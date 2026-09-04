@@ -22,7 +22,7 @@ run = """
 set -eu
 git checkout main
 git reset --hard origin/main
-git merge overlay/dev-infra --no-edit
+git merge overlay/dev-infra --no-ff --no-edit
 """
 
 [tasks.build]
