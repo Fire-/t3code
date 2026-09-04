@@ -108,12 +108,17 @@ The repo's pre-commit hook (`vp staged` via `.vite-hooks/`) runs `vp fmt` on
 all staged files.
 
 - **Never bypass hooks.** `--no-verify` is forbidden.
-- Known quirk: on a fresh install, the first `vp fmt` invocations can fail
-  with `Failed to load configuration file. Failed to parse config: expected
-value at line 1 column 1` while the vp core's config handshake warms up.
-  This is a transient environment state, not a content problem — re-run the
-  commit; it succeeds once warm. If it persists, debug before bypassing
-  anything.
+- Known failure mode: `Failed to load configuration file. Failed to parse
+config: expected value at line 1 column 1`. This means `node_modules/oxfmt`
+  is a **stale broken symlink** (vp's core resolves `oxfmt` by walking up to
+  the root `node_modules/`, and a version bump that prunes the old store
+  entry orphans the link). Fix by repointing it:
+
+  ```bash
+  ln -sfn "$(ls -d node_modules/.pnpm/oxfmt@*/node_modules/oxfmt | tail -1)" node_modules/oxfmt
+  ```
+
+  Then re-run the commit. It is an environment state, not a content problem.
 
 ## Critical Git Rules
 
