@@ -51,9 +51,12 @@ below `overlay/dev-infra` (merge order matters).
 | `mise run sync`         | Fetch origin/main, re-overlay all `overlay/*` branches onto it, return to original branch |
 | `mise run rebuild-main` | Reset `main` to origin/main, merge overlays (dev-infra first)                             |
 | `mise run build`        | Build all workspace packages                                                              |
-| `mise run update`       | rebuild-main + build (quick rebuild)                                                      |
-| `mise run upgrade`      | sync + rebuild-main + build (full upstream sync)                                          |
+| `mise run update`       | rebuild-main + pnpm install + build (quick rebuild)                                       |
+| `mise run upgrade`      | sync + rebuild-main + pnpm install + build (full upstream sync)                           |
 | `mise run serve`        | Run the built server (extra args pass through)                                            |
+
+Tasks chain sequentially via `&&` — mise `depends` runs tasks in parallel,
+which races the git operations. Don't convert these to `depends`.
 
 `git reset --hard` is only permitted inside `mise run rebuild-main` — it is safe
 there because `main` carries no unique work. Never run it manually.

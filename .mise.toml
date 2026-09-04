@@ -30,12 +30,12 @@ description = "Build all workspace packages"
 run = "pnpm build"
 
 [tasks.update]
-description = "Rebuild main from overlays and build"
-depends = ["rebuild-main", "build"]
+description = "Rebuild main from overlays, install deps, build"
+run = "mise run rebuild-main && pnpm install && mise run build"
 
 [tasks.upgrade]
-description = "Full upstream sync: fetch, re-overlay, rebuild main, build"
-depends = ["sync", "rebuild-main", "build"]
+description = "Full upstream sync: fetch, re-overlay, rebuild main, install deps, build"
+run = "mise run sync && mise run rebuild-main && pnpm install && mise run build"
 
 [tasks.serve]
 description = "Run the built server (extra args pass through: mise run serve -- --host 0.0.0.0)"
