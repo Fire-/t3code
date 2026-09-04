@@ -1,0 +1,43 @@
+[tools]
+node = "24"
+pnpm = "11.10.0"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+[tasks.sync]
+description = "Fetch upstream and re-overlay overlay/* branches onto origin/main (requires clean worktree)"
+run = """
+set -eu
+branch=$(git branch --show-current)
+git fetch origin main
+git checkout overlay/dev-infra
+bash "$HOME/code/git-overlay/git-overlay" origin/main overlay/dev-infra
+if [ -n "$branch" ]; then git checkout "$branch"; fi
+"""
+
+[tasks.rebuild-main]
+description = "Reset main to origin/main and merge overlays (dev-infra first)"
+run = """
+set -eu
+git checkout main
+git reset --hard origin/main
+git merge overlay/dev-infra --no-edit
+"""
+
+[tasks.build]
+description = "Build all workspace packages"
+run = "pnpm build"
+
+[tasks.update]
+description = "Rebuild main from overlays and build"
+depends = ["rebuild-main", "build"]
+
+[tasks.upgrade]
+description = "Full upstream sync: fetch, re-overlay, rebuild main, build"
+depends = ["sync", "rebuild-main", "build"]
+
+[tasks.serve]
+description = "Run the built server (extra args pass through: mise run serve -- --host 0.0.0.0)"
+raw = true
+run = 'node apps/server/dist/bin.mjs "$@"'
