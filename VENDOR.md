@@ -46,20 +46,65 @@ below `overlay/dev-infra` (merge order matters).
 
 ## Mise Tasks
 
-| Task                    | Purpose                                                                                   |
-| ----------------------- | ----------------------------------------------------------------------------------------- |
-| `mise run sync`         | Fetch origin/main, re-overlay all `overlay/*` branches onto it, return to original branch |
-| `mise run rebuild-main` | Reset `main` to origin/main, merge overlays (dev-infra first)                             |
-| `mise run build`        | Build all workspace packages                                                              |
-| `mise run update`       | rebuild-main + pnpm install + build (quick rebuild)                                       |
-| `mise run upgrade`      | sync + rebuild-main + pnpm install + build (full upstream sync)                           |
-| `mise run serve`        | Run the built server (extra args pass through)                                            |
+| Task                        | Purpose                                                                                   |
+| --------------------------- | ----------------------------------------------------------------------------------------- |
+| `mise run sync`             | Fetch origin/main, re-overlay all `overlay/*` branches onto it, return to original branch |
+| `mise run rebuild-main`     | Reset `main` to origin/main, merge overlays (dev-infra first)                             |
+| `mise run build`            | Build all workspace packages                                                              |
+| `mise run smoke-test`       | Boot-check the built server bundle (`bin.mjs --version`)                                  |
+| `mise run swap`             | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                       |
+| `mise run swap-back`        | Restore the previous build from bak to current                                            |
+| `mise run setup-stable`     | Pin the current bak as the stable fallback tier                                           |
+| `mise run generate-runtime` | (Re)generate the `~/.t3/code` shim, AGENTS.md, and tier scaffold                          |
+| `mise run update`           | rebuild-main + install + build + smoke-test + swap                                        |
+| `mise run upgrade`          | sync + rebuild-main + install + build + smoke-test + swap                                 |
+| `mise run serve`            | Run the built server from the vendor tree (dev mode)                                      |
 
 Tasks chain sequentially via `&&` — mise `depends` runs tasks in parallel,
 which races the git operations. Don't convert these to `depends`.
 
 `git reset --hard` is only permitted inside `mise run rebuild-main` — it is safe
 there because `main` carries no unique work. Never run it manually.
+
+## Runtime (~/.t3/code)
+
+The installed runtime lives outside the vendor dir and survives
+`rm -rf ~/vendor/t3code`. The vendor tree is for development; the runtime is
+what actually serves.
+
+```
+~/.t3/code/
+  bin/t3           <- runner on PATH (tier walk: current -> bak -> stable)
+  dist/current/    <- active build: bin.mjs + chunks + client/ + node_modules/
+  dist/bak/        <- previous build (auto-created by swap)
+  dist/stable/     <- pinned known-good (setup-stable)
+  userdata/        <- server data (T3CODE_HOME; state.sqlite inside)
+```
+
+- `bin/t3` is a generated script (by `scripts/generate-runtime.sh`) that
+  exports `T3CODE_HOME=~/.t3/code` and execs the first tier containing a
+  `bin.mjs`. It uses a baked absolute node 24 path (the server needs
+  `node:sqlite`); re-run `mise run generate-runtime` after toolchain changes.
+- Each tier's `node_modules/` holds exactly the native deps the bundle
+  externalizes (node-pty, @ff-labs/fff-node + closure, bufferutil,
+  utf-8-validate, msgpackr-extract), copied BUILT and PATCHED from the pnpm
+  store by `scripts/runtime-natives.mjs`. Nothing is reinstalled from the
+  registry — a reinstall would drop upstream's fff-node patch.
+- Daily flow: `mise run upgrade` (updates the runtime via swap), phone pairs
+  against the running server. Fallback to the stable tier: `rm -rf
+~/.t3/code/dist/current && cp -R ~/.t3/code/dist/stable
+~/.t3/code/dist/current` (or `mise run swap-back` if bak is healthy).
+- On PATH via the labeled `~/.zshrc` block:
+
+  ```bash
+  ### t3code:start
+  # t3 code runtime (current/bak/stable tiers)
+  export PATH="$HOME/.t3/code/bin:$PATH"
+  ### t3code:end
+  ```
+
+Note: ~/.zshrc is a symlink into ~/Dropbox/dotfiles — edit the symlink
+target, never `sed -i` the link.
 
 ## First-Time Setup
 
