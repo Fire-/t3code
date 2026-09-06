@@ -135,6 +135,12 @@ Tune via env: `T3_PORT` (default 3773), `T3_HOST` (default `0.0.0.0` — all
 interfaces, matching opencode's `*:80` posture and surviving DHCP changes;
 set `127.0.0.1` for loopback-only), `T3_RUNTIME_DIR` (default `~/.t3/code`).
 
+Never `export T3CODE_HOME` ambiently. t3 treats it as an explicit base dir,
+which flips dev-mode state from `<base>/dev` to `<base>/userdata` — i.e. an
+ambient value can point dev experiments at a live production DB. The shim and
+daemon already pin it per-process; base dirs are: `~/.t3` (vendor-dir CLI
+default), `~/.t3/code` (this runtime), `<repo>/dev` (vendor dev runs).
+
 ## First-Time Setup
 
 ```bash
