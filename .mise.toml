@@ -17,12 +17,15 @@ if [ -n "$branch" ]; then git checkout "$branch"; fi
 """
 
 [tasks.rebuild-main]
-description = "Reset main to origin/main and merge overlays (dev-infra first)"
+description = "Reset main to origin/main and merge overlays (ends on the overlay branch)"
 run = """
 set -eu
 git checkout main
 git reset --hard origin/main
 git merge overlay/dev-infra --no-ff --no-edit
+# Return to the overlay branch: it is the home branch, and ending here
+# makes it impossible to accidentally commit integration-branch work.
+git checkout overlay/dev-infra
 """
 
 [tasks.build]

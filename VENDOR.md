@@ -69,6 +69,9 @@ which races the git operations. Don't convert these to `depends`.
 
 `git reset --hard` is only permitted inside `mise run rebuild-main` — it is safe
 there because `main` carries no unique work. Never run it manually.
+`rebuild-main` deliberately ends on `overlay/dev-infra` (the home branch):
+after a rebuild you are always where commits belong, and direct `main`
+commits become structurally impossible to stumble into.
 
 ## Runtime (~/.t3/code)
 

@@ -92,7 +92,9 @@ adopt_server() {
 health_check() {
 	local i=0
 	while [[ $i -lt $HEALTH_RETRIES ]]; do
-		if curl -sf "$HEALTH_URL" -o /dev/null 2>/dev/null; then
+		# --max-time: the server can bind the port before it serves; without
+		# a timeout curl blocks forever on the accepted-but-stalled socket.
+		if curl -sf --max-time 3 "$HEALTH_URL" -o /dev/null 2>/dev/null; then
 			return 0
 		fi
 		i=$((i + 1))
