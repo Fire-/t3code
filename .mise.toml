@@ -1,0 +1,120 @@
+[tools]
+node = "24"
+pnpm = "11.10.0"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+[tasks.sync]
+description = "Fetch upstream and re-overlay overlay/* branches onto origin/main (requires clean worktree)"
+run = """
+set -eu
+branch=$(git branch --show-current)
+git fetch origin main
+git checkout overlay/dev-infra
+bash "$HOME/code/git-overlay/git-overlay" origin/main overlay/dev-infra
+if [ -n "$branch" ]; then git checkout "$branch"; fi
+"""
+
+[tasks.rebuild-main]
+description = "Reset main to origin/main and merge overlays (dev-infra first)"
+run = """
+set -eu
+git checkout main
+git reset --hard origin/main
+git merge overlay/dev-infra --no-ff --no-edit
+"""
+
+[tasks.build]
+description = "Build all workspace packages"
+run = "pnpm build"
+
+[tasks.smoke-test]
+description = "Verify the built server bundle boots (--version)"
+run = """
+BIN="{{config_root}}/apps/server/dist/bin.mjs"
+if [[ ! -f "$BIN" ]]; then
+  echo "ERROR: server bundle not found. Run 'mise run build' first."
+  exit 1
+fi
+if ! node "$BIN" --version >/dev/null 2>&1; then
+  echo "ERROR: smoke test failed - bundle crashes on startup"
+  exit 1
+fi
+echo "smoke ok: $(node "$BIN" --version)"
+"""
+
+[tasks.swap]
+description = "Promote built bundle to ~/.t3/code/dist/current (shift current->bak)"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+DIST="$RUNTIME/dist"
+VENDOR_DIST="{{config_root}}/apps/server/dist"
+
+if [[ ! -f "$VENDOR_DIST/bin.mjs" ]]; then
+  echo "ERROR: no server bundle found. Run 'mise run build' first."
+  exit 1
+fi
+
+mkdir -p "$DIST"
+
+# Shift tiers: bak -> (dropped), current -> bak
+if [[ -f "$DIST/current/bin.mjs" ]]; then
+  rm -rf "$DIST/bak"
+  mv "$DIST/current" "$DIST/bak"
+fi
+
+mkdir -p "$DIST/current"
+cp -R "$VENDOR_DIST/." "$DIST/current/"
+node "{{config_root}}/scripts/runtime-natives.mjs" "$DIST/current/node_modules"
+
+echo "swapped: current <- $(node "$VENDOR_DIST/bin.mjs" --version 2>/dev/null || echo build)"
+"""
+
+[tasks.swap-back]
+description = "Restore previous build from bak to current"
+run = """
+DIST="${T3_RUNTIME_DIR:-$HOME/.t3/code}/dist"
+
+if [[ ! -f "$DIST/bak/bin.mjs" ]]; then
+  echo "ERROR: no bak tier to restore from."
+  exit 1
+fi
+
+rm -rf "$DIST/current"
+mv "$DIST/bak" "$DIST/current"
+echo "swap-back: bak promoted to current"
+"""
+
+[tasks.setup-stable]
+description = "Copy current bak to stable fallback (run once with known-good build)"
+run = """
+DIST="${T3_RUNTIME_DIR:-$HOME/.t3/code}/dist"
+
+if [[ ! -f "$DIST/bak/bin.mjs" ]]; then
+  echo "ERROR: no bak tier. Run 'mise run swap' first to create bak."
+  exit 1
+fi
+
+rm -rf "$DIST/stable"
+cp -R "$DIST/bak" "$DIST/stable"
+ls -lh "$DIST/stable/bin.mjs"
+echo "stable pinned from bak"
+"""
+
+[tasks.generate-runtime]
+description = "(Re)generate ~/.t3/code runner shim, AGENTS.md, and tier scaffold"
+run = "bash {{config_root}}/scripts/generate-runtime.sh"
+
+[tasks.update]
+description = "Rebuild main, install deps, build, smoke-test, swap to runtime"
+run = "mise run rebuild-main && pnpm install && mise run build && mise run smoke-test && mise run swap"
+
+[tasks.upgrade]
+description = "Full upstream sync: fetch, re-overlay, rebuild main, install deps, build, smoke-test, swap"
+run = "mise run sync && mise run rebuild-main && pnpm install && mise run build && mise run smoke-test && mise run swap"
+
+[tasks.serve]
+description = "Run the built server from the vendor tree (dev mode; runtime uses bin/t3)"
+raw = true
+run = 'node apps/server/dist/bin.mjs "$@"'
