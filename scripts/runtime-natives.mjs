@@ -4,10 +4,12 @@
 //
 // The server bundle (apps/server/dist) externalizes a handful of packages;
 // everything else is packed into bin.mjs and its chunks. Packages are
-// copied from the store as BUILT, PATCHED binaries (each package's whole
-// store node_modules level, so sibling deps like ffi-rs come along) so a
-// tier is byte-identical to what its build was tested against and
-// survives deletion of the vendor directory.
+// copied from the store as BUILT, PATCHED binaries so a tier is
+// byte-identical to what its build was tested against and survives
+// deletion of the vendor directory. (Alternative: a minimal package.json +
+// pnpm install would also work, but the fff-node dependency is PATCHED —
+// a registry reinstall must reproduce upstream's patch, so we copy the
+// store's built content instead.)
 //
 // Usage: node runtime-natives.mjs <target-node_modules-dir>
 
@@ -62,19 +64,6 @@ function findStoreNm(name) {
   return path.join(store, candidates[0], "node_modules");
 }
 
-function nmLevelOf(pkgDir) {
-  // Walk up to the store's node_modules level (scoped packages like
-  // @ff-labs/fff-node add depth beyond one dirname).
-  let dir = path.dirname(pkgDir);
-  for (let i = 0; i < 4 && path.basename(dir) !== "node_modules"; i++) {
-    dir = path.dirname(dir);
-  }
-  if (path.basename(dir) !== "node_modules") {
-    throw new Error(`could not find store node_modules level above ${pkgDir}`);
-  }
-  return dir;
-}
-
 function resolvePkgDir(name, hintNm) {
   const directLink = path.join(serverNM, name);
   if (existsSync(directLink)) return realpathSync(directLink);
@@ -86,22 +75,19 @@ function resolvePkgDir(name, hintNm) {
 }
 
 const visited = new Set();
-const copiedNmLevels = new Set();
 
 function addPackage(name, hintNm) {
   if (visited.has(name)) return;
   visited.add(name);
 
   const pkgDir = resolvePkgDir(name, hintNm);
-  const nmLevel = nmLevelOf(pkgDir);
+  const dest = path.join(target, name);
 
-  // Copy the whole store node_modules level (the package plus any
-  // siblings pnpm placed next to it), dereferencing symlinks, merging
-  // into the target.
-  if (!copiedNmLevels.has(nmLevel)) {
-    copiedNmLevels.add(nmLevel);
-    cpSync(nmLevel, target, { recursive: true, dereference: true, force: true });
-  }
+  // Copy exactly this package, dereferencing symlinks. Per-package (not
+  // whole-level) copies avoid merge collisions when the same package
+  // appears at several store levels.
+  mkdirSync(path.dirname(dest), { recursive: true });
+  cpSync(pkgDir, dest, { recursive: true, dereference: true, force: true });
 
   const pkgJson = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
   const deps = {
@@ -111,7 +97,7 @@ function addPackage(name, hintNm) {
   for (const dep of Object.keys(deps)) {
     // Skip platform binaries for other platforms (napi-rs optional deps).
     if (PLATFORM_RE.test(dep) && !dep.includes(PLATFORM)) continue;
-    addPackage(dep, nmLevel);
+    addPackage(dep, path.dirname(pkgDir));
   }
 }
 
