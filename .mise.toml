@@ -118,3 +118,97 @@ run = "mise run sync && mise run rebuild-main && pnpm install && mise run build 
 description = "Run the built server from the vendor tree (dev mode; runtime uses bin/t3)"
 raw = true
 run = 'node apps/server/dist/bin.mjs "$@"'
+
+[tasks.daemon]
+description = "Start the self-updating t3 daemon (detached, survives everything)"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+PID_FILE="$RUNTIME/daemon.pid"
+if [[ -f "$PID_FILE" ]]; then
+  existing=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  if [[ -n "$existing" ]] && kill -0 "$existing" 2>/dev/null; then
+    echo "Daemon already running (PID $existing). Use 'mise run daemon-stop' first."
+    exit 1
+  fi
+  echo "Stale PID file found, removing"
+  rm -f "$PID_FILE"
+fi
+nohup bash "{{config_root}}/scripts/daemon.sh" > "$RUNTIME/daemon.log" 2>&1 < /dev/null &
+disown
+ok=""
+for i in 1 2 3 4 5 6; do
+  [[ -f "$PID_FILE" ]] && { ok=1; break; }
+  sleep 0.5
+done
+if [[ -n "$ok" ]]; then
+  echo "Daemon started (PID $(cat "$PID_FILE")). Logs: mise run daemon-log"
+else
+  echo "ERROR: daemon failed to start - check $RUNTIME/daemon.log"
+  exit 1
+fi
+"""
+
+[tasks.daemon-stop]
+description = "Stop the t3 daemon and the server it supervises"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+PID_FILE="$RUNTIME/daemon.pid"
+if [[ ! -f "$PID_FILE" ]]; then
+  echo "No daemon PID file - nothing to stop."
+  exit 0
+fi
+pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  kill "$pid" 2>/dev/null || true
+  # Wait for the daemon to actually exit (it stops the server on the way out).
+  for i in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "Daemon did not exit in 10s, force killing"
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+fi
+rm -f "$PID_FILE"
+echo "Daemon stopped"
+"""
+
+[tasks.daemon-status]
+description = "Daemon, server, and tier health at a glance"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+PID_FILE="$RUNTIME/daemon.pid"
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  echo "daemon: running (PID $(cat "$PID_FILE"))"
+else
+  echo "daemon: not running (mise run daemon)"
+fi
+if lsof -tiTCP:${T3_PORT:-3773} -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "server: listening on ${T3_PORT:-3773} (PID $(lsof -tiTCP:${T3_PORT:-3773} -sTCP:LISTEN | head -1))"
+else
+  echo "server: not listening"
+fi
+for tier in current bak stable; do
+  if [[ -f "$RUNTIME/dist/$tier/bin.mjs" ]]; then
+    echo "tier $tier: $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$RUNTIME/dist/$tier/bin.mjs")"
+  else
+    echo "tier $tier: empty"
+  fi
+done
+if [[ -f "$RUNTIME/userdata/state.sqlite" ]]; then
+  echo "busy sessions: $(sqlite3 "$RUNTIME/userdata/state.sqlite" "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running');" 2>/dev/null || echo '?')"
+fi
+"""
+
+[tasks.daemon-log]
+description = "Tail the daemon management log"
+run = "tail -f ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log"
+
+[tasks.server-log]
+description = "Tail the t3 server log (UTC)"
+run = "tail -f ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log.server"
+
+[tasks.logs]
+description = "Tail both daemon and server logs"
+run = "tail -f ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log.server"

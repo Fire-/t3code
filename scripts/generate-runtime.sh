@@ -45,6 +45,9 @@ if [[ ! -x "$NODE_BIN" ]]; then
 fi
 echo "Node:     $NODE_BIN ($("$NODE_BIN" --version))"
 
+# Stable symlink so the daemon and shim never depend on mise at runtime.
+ln -sf "$NODE_BIN" "$RUNTIME_DIR/node.bin"
+
 # --- Generate runner script ---
 cat >"$BIN_DIR/t3" <<RUNNER_EOF
 #!/usr/bin/env bash
@@ -135,6 +138,23 @@ t3 service --help                            # background service management
 Port 80 belongs to opencode — never bind it here. The server defaults to
 port 3773 on loopback; pass --host 0.0.0.0 for Tailnet/LAN access, or use
 --tailscale-serve.
+
+## Daemon
+
+The server is normally supervised by the self-updating daemon (do NOT also
+run \`t3 service install\` — two supervisors would fight):
+
+\`\`\`bash
+cd ~/vendor/t3code && mise run daemon
+\`\`\`
+
+It restarts the server on crash, picks up new builds promoted by
+\`mise run swap\` when no thread session is running (idle gate:
+3 consecutive checks ~90s apart), and falls back current -> bak -> stable
+if a build will not boot. It re-execs itself when its script changes.
+Manage with: \`mise run daemon-status\`, \`daemon-stop\`, \`daemon-log\`,
+\`server-log\`, \`logs\`. Logs live in this directory: daemon.log (daemon,
+local time) and daemon.log.server (server, UTC).
 
 ## Updating
 

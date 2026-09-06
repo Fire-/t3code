@@ -46,19 +46,23 @@ below `overlay/dev-infra` (merge order matters).
 
 ## Mise Tasks
 
-| Task                        | Purpose                                                                                   |
-| --------------------------- | ----------------------------------------------------------------------------------------- |
-| `mise run sync`             | Fetch origin/main, re-overlay all `overlay/*` branches onto it, return to original branch |
-| `mise run rebuild-main`     | Reset `main` to origin/main, merge overlays (dev-infra first)                             |
-| `mise run build`            | Build all workspace packages                                                              |
-| `mise run smoke-test`       | Boot-check the built server bundle (`bin.mjs --version`)                                  |
-| `mise run swap`             | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                       |
-| `mise run swap-back`        | Restore the previous build from bak to current                                            |
-| `mise run setup-stable`     | Pin the current bak as the stable fallback tier                                           |
-| `mise run generate-runtime` | (Re)generate the `~/.t3/code` shim, AGENTS.md, and tier scaffold                          |
-| `mise run update`           | rebuild-main + install + build + smoke-test + swap                                        |
-| `mise run upgrade`          | sync + rebuild-main + install + build + smoke-test + swap                                 |
-| `mise run serve`            | Run the built server from the vendor tree (dev mode)                                      |
+| Task                                          | Purpose                                                                                   |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `mise run sync`                               | Fetch origin/main, re-overlay all `overlay/*` branches onto it, return to original branch |
+| `mise run rebuild-main`                       | Reset `main` to origin/main, merge overlays (dev-infra first)                             |
+| `mise run build`                              | Build all workspace packages                                                              |
+| `mise run smoke-test`                         | Boot-check the built server bundle (`bin.mjs --version`)                                  |
+| `mise run swap`                               | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                       |
+| `mise run swap-back`                          | Restore the previous build from bak to current                                            |
+| `mise run setup-stable`                       | Pin the current bak as the stable fallback tier                                           |
+| `mise run generate-runtime`                   | (Re)generate the `~/.t3/code` shim, AGENTS.md, and tier scaffold                          |
+| `mise run update`                             | rebuild-main + install + build + smoke-test + swap                                        |
+| `mise run upgrade`                            | sync + rebuild-main + install + build + smoke-test + swap                                 |
+| `mise run serve`                              | Run the built server from the vendor tree (dev mode)                                      |
+| `mise run daemon`                             | Start the self-updating daemon (detached, survives everything)                            |
+| `mise run daemon-stop`                        | Stop the daemon and the server it supervises                                              |
+| `mise run daemon-status`                      | Daemon, server, tier, and busy-session health at a glance                                 |
+| `mise run daemon-log` / `server-log` / `logs` | Tail daemon log / server log / both                                                       |
 
 Tasks chain sequentially via `&&` — mise `depends` runs tasks in parallel,
 which races the git operations. Don't convert these to `depends`.
@@ -105,6 +109,27 @@ what actually serves.
 
 Note: ~/.zshrc is a symlink into ~/Dropbox/dotfiles — edit the symlink
 target, never `sed -i` the link.
+
+### Self-updating daemon
+
+`mise run daemon` starts a detached supervisor (`scripts/daemon.sh`,
+`nohup`+`disown`, reparented to launchd) that:
+
+- restarts the server on crash (3→6→12s backoff, then tier fallback)
+- watches `dist/current/bin.mjs` mtime — `swap` bumps it, and within 30s
+  the daemon restarts onto the new build, **but only when idle**: no
+  `projection_thread_sessions` row with status `starting`/`running` for 3
+  consecutive checks (~90s). The idle probe queries the SQLite DB directly
+  (read-only, WAL) — no HTTP endpoint or upstream patch needed.
+- falls back `current → bak → stable` if a build fails its health check
+- re-execs itself when `scripts/daemon.sh` changes (adopting the live
+  server via a port-scoped `lsof` lookup — zero downtime)
+
+This intentionally replaces `t3 service install` (launchd): launchd cannot
+express idle-gated restarts. Running both would fight — don't.
+
+Tune via env: `T3_PORT` (default 3773), `T3_HOST` (default 127.0.0.1),
+`T3_RUNTIME_DIR` (default `~/.t3/code`).
 
 ## First-Time Setup
 
