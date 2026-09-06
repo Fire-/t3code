@@ -26,7 +26,9 @@ PID_FILE="$RUNTIME_DIR/daemon.pid"
 LOG_FILE="$RUNTIME_DIR/daemon.log"
 SERVER_LOG="$RUNTIME_DIR/daemon.log.server"
 PORT="${T3_PORT:-3773}"
-HOST="${T3_HOST:-127.0.0.1}"
+# 0.0.0.0 (not a literal LAN IP): follows DHCP interface changes, and matches
+# opencode's *:80 posture. Override with T3_HOST if you want a narrower bind.
+HOST="${T3_HOST:-0.0.0.0}"
 HEALTH_URL="http://127.0.0.1:$PORT/"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 

@@ -131,8 +131,9 @@ target, never `sed -i` the link.
 This intentionally replaces `t3 service install` (launchd): launchd cannot
 express idle-gated restarts. Running both would fight — don't.
 
-Tune via env: `T3_PORT` (default 3773), `T3_HOST` (default 127.0.0.1),
-`T3_RUNTIME_DIR` (default `~/.t3/code`).
+Tune via env: `T3_PORT` (default 3773), `T3_HOST` (default `0.0.0.0` — all
+interfaces, matching opencode's `*:80` posture and surviving DHCP changes;
+set `127.0.0.1` for loopback-only), `T3_RUNTIME_DIR` (default `~/.t3/code`).
 
 ## First-Time Setup
 

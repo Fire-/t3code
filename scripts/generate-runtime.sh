@@ -135,9 +135,9 @@ t3 pair                                      # mint pairing token for the phone
 t3 service --help                            # background service management
 \`\`\`
 
-Port 80 belongs to opencode — never bind it here. The server defaults to
-port 3773 on loopback; pass --host 0.0.0.0 for Tailnet/LAN access, or use
---tailscale-serve.
+Port 80 belongs to opencode — never bind it here. The daemon binds 0.0.0.0:3773
+(all interfaces, same posture as opencode on :80, survives DHCP changes); narrow
+it with T3_HOST=127.0.0.1 for loopback-only, or use --tailscale-serve.
 
 ## Daemon
 
