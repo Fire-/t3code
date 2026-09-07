@@ -37,27 +37,31 @@ git commit -m "fix(scope): description"
 # 3. Overlay onto origin/main (creates single merge commit on clean base)
 bash ~/code/git-overlay/git-overlay origin/main overlay/my-feature
 
-# 4. Rebuild main and build
+# 4. Rebuild local and build
 mise run update
 ```
 
-When adding an overlay, also add it to the `rebuild-main` task in `.mise.toml`
-below `overlay/dev-infra` (merge order matters).
+Overlay branches are **independent topics**, each synced onto `origin/main`
+itself — never stacked on each other. The `local` branch is the integration
+branch and is rebuilt from scratch on every build:
+`origin/main` + every `overlay/*` branch, merged in alphabetical order
+(`dev-infra` before `prime-agent`). rerere remembers conflict resolutions
+between rebuilds.
 
 ## Mise Tasks
 
 | Task                                          | Purpose                                                                                   |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `mise run sync`                               | Fetch origin/main, re-overlay all `overlay/*` branches onto it, return to original branch |
-| `mise run rebuild-main`                       | Reset `main` to origin/main, merge overlays (dev-infra first)                             |
+| `mise run sync`                               | Fetch origin/main, re-overlay every `overlay/*` branch onto it, return to original branch |
+| `mise run rebuild-local`                      | Reset `local` to origin/main, re-merge all `overlay/*` branches, end on `local`           |
 | `mise run build`                              | Build all workspace packages                                                              |
 | `mise run smoke-test`                         | Boot-check the built server bundle (`bin.mjs --version`)                                  |
 | `mise run swap`                               | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                       |
 | `mise run swap-back`                          | Restore the previous build from bak to current                                            |
 | `mise run setup-stable`                       | Pin the current bak as the stable fallback tier                                           |
 | `mise run generate-runtime`                   | (Re)generate the `~/.t3/code` shim, AGENTS.md, and tier scaffold                          |
-| `mise run update`                             | rebuild-main + install + build + smoke-test + swap                                        |
-| `mise run upgrade`                            | sync + rebuild-main + install + build + smoke-test + swap                                 |
+| `mise run update`                             | rebuild-local + install + build + smoke-test + swap                                       |
+| `mise run upgrade`                            | sync + rebuild-local + install + build + smoke-test + swap                                |
 | `mise run serve`                              | Run the built server from the vendor tree (dev mode)                                      |
 | `mise run daemon`                             | Start the self-updating daemon (detached, survives everything)                            |
 | `mise run daemon-stop`                        | Stop the daemon and the server it supervises                                              |
@@ -67,11 +71,12 @@ below `overlay/dev-infra` (merge order matters).
 Tasks chain sequentially via `&&` — mise `depends` runs tasks in parallel,
 which races the git operations. Don't convert these to `depends`.
 
-`git reset --hard` is only permitted inside `mise run rebuild-main` — it is safe
-there because `main` carries no unique work. Never run it manually.
-`rebuild-main` deliberately ends on `overlay/dev-infra` (the home branch):
-after a rebuild you are always where commits belong, and direct `main`
-commits become structurally impossible to stumble into.
+`git reset --hard` is only permitted inside `mise run rebuild-local` — it is
+safe there because `local` is rebuilt from scratch and overlays carry all
+unique work. Never run it manually. `rebuild-local` deliberately ends on
+`local`: after a rebuild you are always where integration commits belong,
+and direct `main` commits become structurally impossible to stumble into.
+Topic commits go on their `overlay/*` branch, never on `local`.
 
 ## Runtime (~/.t3/code)
 
@@ -244,7 +249,7 @@ git checkout overlay/the-right-one
 git stash pop
 git add <specific-files>
 git commit -m "type(scope): description"
-mise run rebuild-main           # main gets it via the overlay
+mise run rebuild-local           # local gets it via the overlay
 ```
 
 ## Notes for Agents
