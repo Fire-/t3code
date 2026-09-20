@@ -3030,6 +3030,8 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
     "snooze-resume",
     "cancel-resume-keep-snooze",
     "wake-preserve-resume",
+    "independent-patches",
+    "expired-snooze",
     "wake",
   ] as const)("guards a scheduled usage-limit continuation against %s", (scenario) =>
     Effect.gen(function* () {
@@ -3183,6 +3185,45 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
           assert.isTrue(armedShell.limitRecovery!.autoResume);
         }
       }
+      if (scenario === "independent-patches") {
+        yield* TestClock.adjust("10 seconds");
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("recovery:patch-snooze"),
+          threadId,
+          limitRecovery: { runId: run.id, resetAt, snooze: true },
+        });
+        let current = yield* orchestrator.getThreadProjection(threadId);
+        assert.isTrue(current.thread.limitRecovery!.autoResume);
+        assert.isTrue(current.thread.limitRecovery!.snooze);
+        // This is also the payload an older auto-resume-only client sends.
+        yield* TestClock.adjust("10 seconds");
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("recovery:patch-cancel-resume"),
+          threadId,
+          limitRecovery: { runId: run.id, resetAt, autoResume: false },
+        });
+        current = yield* orchestrator.getThreadProjection(threadId);
+        assert.isFalse(current.thread.limitRecovery!.autoResume);
+        assert.isTrue(current.thread.limitRecovery!.snooze);
+        assert.equal(DateTime.toEpochMillis(current.thread.snoozedUntil!), Date.parse(resetAt));
+        assert.equal(
+          DateTime.toEpochMillis(current.thread.snoozedAt!),
+          DateTime.toEpochMillis(current.thread.updatedAt),
+        );
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("recovery:patch-resume"),
+          threadId,
+          limitRecovery: { runId: run.id, resetAt, autoResume: true },
+        });
+        armedShell = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        assert.isTrue(armedShell.limitRecovery!.autoResume);
+        assert.isTrue(armedShell.limitRecovery!.snooze);
+      }
       if (scenario === "manual-snooze") {
         yield* orchestrator.dispatch({
           type: "thread.snooze",
@@ -3241,6 +3282,22 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
       );
       if (autoResume && scenario !== "cancel-resume-keep-snooze") assert.isNotNull(resume);
       else assert.isNull(resume);
+      if (scenario === "expired-snooze") {
+        const staleSnooze = yield* orchestrator
+          .dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make("recovery:expired-snooze"),
+            threadId,
+            limitRecovery: { runId: run.id, resetAt, snooze: true },
+          })
+          .pipe(Effect.exit);
+        assert.equal(staleSnooze._tag, "Failure");
+        const current = yield* orchestrator.getThreadProjection(threadId);
+        assert.isNull(current.thread.snoozedUntil);
+        assert.isFalse(current.thread.limitRecovery!.snooze);
+        assert.isTrue(current.thread.limitRecovery!.autoResume);
+      }
+
       if (scenario === "cancel" || scenario === "rearm")
         yield* orchestrator.dispatch({
           type: "thread.metadata.update",
@@ -3331,7 +3388,9 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
         before.runs.length +
           (scenario === "resume" ||
           scenario === "snooze-resume" ||
-          scenario === "wake-preserve-resume"
+          scenario === "wake-preserve-resume" ||
+          scenario === "independent-patches" ||
+          scenario === "expired-snooze"
             ? 1
             : 0),
       );
@@ -3340,7 +3399,9 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
         before.messages.length +
           (scenario === "resume" ||
           scenario === "snooze-resume" ||
-          scenario === "wake-preserve-resume"
+          scenario === "wake-preserve-resume" ||
+          scenario === "independent-patches" ||
+          scenario === "expired-snooze"
             ? 1
             : 0),
       );
