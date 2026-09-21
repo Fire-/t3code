@@ -12,7 +12,7 @@ export function DeviceToolVersions({
   error?: string | undefined;
 }) {
   return (
-    <div className="space-y-1 text-xs text-muted-foreground">
+    <div className="max-w-sm space-y-1 text-xs text-muted-foreground">
       {deviceToolVersionLabels(tools).map((label) => (
         <p key={label}>{label}</p>
       ))}
