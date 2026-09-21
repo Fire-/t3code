@@ -1,3 +1,4 @@
+import { DeviceHostUpdates } from "../device/DeviceHostUpdates";
 import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { ScopedSwitch } from "./ScopedSwitch";
@@ -783,6 +784,7 @@ function DeviceIntegrationControls({
           <DeviceToolVersions tools={state.hosts.find((host) => host.kind === "local")?.tools} />
         }
       />
+      {environmentId ? <DeviceHostUpdates state={state} environmentId={environmentId} /> : null}
       <DeviceHostsSettings environmentId={environmentId} />
     </>
   );
