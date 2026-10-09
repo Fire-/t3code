@@ -415,6 +415,16 @@ export class SessionStore extends Context.Service<
 
 const SIGNING_SECRET_NAME = "server-signing-key";
 const DEFAULT_SESSION_TTL = Duration.days(30);
+
+/** Default session lifetime in days; overrides the 30-day default when a
+ * positive finite number, so long-lived or headless deployments can extend
+ * paired sessions without re-pairing every month. */
+function defaultSessionTtl(): Duration.Duration {
+  const raw = process.env.T3CODE_SESSION_TTL;
+  if (!raw) return DEFAULT_SESSION_TTL;
+  const days = Number(raw);
+  return Number.isFinite(days) && days > 0 ? Duration.days(days) : DEFAULT_SESSION_TTL;
+}
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 
 const SessionClaims = Schema.Struct({
@@ -625,7 +635,7 @@ export const make = Effect.gen(function* () {
       );
       const issuedAt = yield* DateTime.now;
       const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+        milliseconds: Duration.toMillis(input?.ttl ?? defaultSessionTtl()),
       });
       const claims: SessionClaims = {
         v: 1,

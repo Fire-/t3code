@@ -579,4 +579,18 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       expect((yield* readRow)[0]).toEqual({ surface: "mobile", appVersion: "1.3.0" });
     }).pipe(Effect.provide(Layer.mergeAll(makeSessionStoreLayer(), SqlitePersistenceMemory))),
   );
+  it.effect("extends the default session TTL from T3CODE_SESSION_TTL", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const before = process.env.T3CODE_SESSION_TTL;
+      process.env.T3CODE_SESSION_TTL = "90";
+      try {
+        const issued = yield* sessions.issue({ subject: "env-ttl-probe" });
+        expect(issued.expiresAt.epochMilliseconds).toBe(Duration.toMillis(Duration.days(90)));
+      } finally {
+        if (before === undefined) delete process.env.T3CODE_SESSION_TTL;
+        else process.env.T3CODE_SESSION_TTL = before;
+      }
+    }).pipe(Effect.provide(makeSessionStoreLayer())),
+  );
 });
