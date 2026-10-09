@@ -29,6 +29,9 @@ PORT="${T3_PORT:-3773}"
 # 0.0.0.0 (not a literal LAN IP): follows DHCP interface changes, and matches
 # opencode's *:80 posture. Override with T3_HOST if you want a narrower bind.
 HOST="${T3_HOST:-0.0.0.0}"
+# Paired session lifetime in days (consumed by the server at session-issue
+# time; unset/invalid inside the server falls back to its 30-day default).
+export T3CODE_SESSION_TTL="${T3CODE_SESSION_TTL:-180}"
 HEALTH_URL="http://127.0.0.1:$PORT/"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
