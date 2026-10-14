@@ -249,6 +249,8 @@ describe("ChatMarkdown streaming", () => {
     const highlighter = await getSyntaxHighlighterPromise("text");
     const highlight = vi.spyOn(highlighter, "codeToHast");
     const writeText = vi.fn(async (_text: string) => {});
+    // writeTextToClipboard requires a window before it touches the clipboard.
+    vi.stubGlobal("window", {});
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

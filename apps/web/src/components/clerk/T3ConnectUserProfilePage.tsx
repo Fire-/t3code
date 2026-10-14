@@ -13,6 +13,7 @@ import {
   useManagedRelayEnvironments,
 } from "../../cloud/managedRelayState";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
@@ -180,7 +181,9 @@ export function T3ConnectUserProfilePage() {
         ? {
             secondaryActionProps: {
               children: "Copy trace ID",
-              onClick: () => void navigator.clipboard?.writeText(traceId),
+              onClick: () => {
+                void writeTextToClipboard(traceId, "trace ID").catch(() => undefined);
+              },
             },
           }
         : undefined,
