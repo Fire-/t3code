@@ -93,6 +93,15 @@ adopt_server() {
 	return 1
 }
 
+# Epoch seconds when a PID started, or nothing when ps/date can't tell.
+process_start_epoch() {
+	local started
+	started=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null || true)
+	read -r started <<<"$started" # ps pads lstart with trailing spaces
+	[[ -n "$started" ]] || return 0
+	LC_ALL=C date -j -f '%a %b %d %T %Y' "$started" +%s 2>/dev/null || true
+}
+
 # ── Health & idle checks ───────────────────────────────────────────────────
 health_check() {
 	local i=0
@@ -213,6 +222,17 @@ if adopt_server; then
 	log "Found running server on port $PORT (PID $server_pid) - adopting it"
 	adopt_stale=1 # verify below whether it matches the current tier's build
 	last_binary_mtime=$(stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0)
+	# A swap can land before this daemon starts, e.g. in the same check
+	# interval as the script change that re-exec'd it. Baseline on the
+	# server's start time instead so the idle gate restarts onto that build.
+	# The restart resets the baseline to the build's mtime, so it runs once;
+	# a server already on a fallback tier started after the build and is
+	# never seen as stale.
+	server_started=$(process_start_epoch "$server_pid")
+	if [[ "$server_started" =~ ^[0-9]+$ ]] && [[ "$server_started" -lt "$last_binary_mtime" ]]; then
+		log "Adopted server predates the current build - restart pending (idle-gated)"
+		last_binary_mtime=$server_started
+	fi
 else
 	start_server current
 	last_binary_mtime=$(stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0)
