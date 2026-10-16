@@ -123,13 +123,15 @@ echo "stable pinned from bak"
 description = "(Re)generate ~/.t3/code runner shim, AGENTS.md, and tier scaffold"
 run = "bash {{config_root}}/scripts/generate-runtime.sh"
 
+# --frozen-lockfile: a plain install rewrites one alchemy peer hash in
+# pnpm-lock.yaml, and the dirty file then blocks the next rebuild-local.
 [tasks.update]
 description = "Rebuild main, install deps, build, smoke-test, swap to runtime"
-run = "mise run rebuild-local && pnpm install && mise run build && mise run smoke-test && mise run swap"
+run = "mise run rebuild-local && pnpm install --frozen-lockfile && mise run build && mise run smoke-test && mise run swap"
 
 [tasks.upgrade]
 description = "Full upstream sync: fetch, re-overlay, rebuild main, install deps, build, smoke-test, swap"
-run = "mise run sync && mise run rebuild-local && pnpm install && mise run build && mise run smoke-test && mise run swap"
+run = "mise run sync && mise run rebuild-local && pnpm install --frozen-lockfile && mise run build && mise run smoke-test && mise run swap"
 
 [tasks.serve]
 description = "Run the built server from the vendor tree (dev mode; runtime uses bin/t3)"
