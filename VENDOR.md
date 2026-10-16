@@ -200,8 +200,14 @@ config: expected value at line 1 column 1`. This means `node_modules/oxfmt`
   entry orphans the link). Fix by repointing it:
 
   ```bash
-  ln -sfn "$(ls -d node_modules/.pnpm/oxfmt@*/node_modules/oxfmt | tail -1)" node_modules/oxfmt
+  ln -sfn "$(cd node_modules && ls -d .pnpm/oxfmt@*/node_modules/oxfmt | tail -1)" node_modules/oxfmt
   ```
+
+  The target must be relative to `node_modules/` (where the link lives), so
+  list from inside it; a `node_modules/.pnpm/...` target resolves to
+  `node_modules/node_modules/...` and stays broken. `vp lint` resolves
+  `oxlint` the same way; repoint `node_modules/oxlint` with the same command
+  (s/oxfmt/oxlint/) if it fails the same way.
 
   Then re-run the commit. It is an environment state, not a content problem.
 
