@@ -124,8 +124,9 @@ target, never `sed -i` the link.
 `nohup`+`disown`, reparented to launchd) that:
 
 - restarts the server on crash (3→6→12s backoff, then tier fallback)
-- watches `dist/current/bin.mjs` mtime — `swap` bumps it, and within 30s
-  the daemon restarts onto the new build, **but only when idle**: no
+- watches `dist/current/bin.mjs` mtime — `swap` and `swap-back` both
+  change it, and within 30s the daemon restarts onto that build, **but
+  only when idle**: no
   `projection_thread_sessions` row with status `starting`/`running` for 3
   consecutive checks (~90s). The idle probe queries the SQLite DB directly
   (read-only, WAL) — no HTTP endpoint or upstream patch needed.

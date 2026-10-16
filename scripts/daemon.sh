@@ -3,8 +3,9 @@
 #
 # Supervises the t3 server from the tiered runtime at ~/.t3/code:
 #   - restarts on crash (exponential backoff, then tier fallback)
-#   - detects a new build in dist/current (swap bumps bin.mjs mtime) and
-#     restarts onto it, but ONLY when no thread session is running
+#   - detects a different build in dist/current (swap and swap-back both
+#     change bin.mjs mtime) and restarts onto it, but ONLY when no thread
+#     session is running
 #     (idle gate: 3 consecutive idle checks)
 #   - falls back current -> bak -> stable if a build won't boot
 #   - re-execs itself when this script changes (adopting the live server)
@@ -48,12 +49,23 @@ server_pid=""
 last_binary_mtime=0
 consecutive_idle=0
 crash_count=0
+# A self-re-exec passes the baseline of the server it leaves running.
+handoff_baseline=""
+if [[ "${1:-}" == "--binary-baseline" && "${2:-}" =~ ^[0-9]+$ ]]; then
+	handoff_baseline="$2"
+fi
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >&2; }
 
 # ── Server management ──────────────────────────────────────────────────────
 start_server() {
 	local tier="$1"
+	# binary_changed compares against the build the server was last started
+	# from. Starting a fallback tier leaves it on the failed current build,
+	# so that build is not retried until current changes again.
+	if [[ "$tier" == "current" ]]; then
+		last_binary_mtime=$(current_binary_mtime)
+	fi
 	T3CODE_HOME="$RUNTIME_DIR" \
 		"$NODE_BIN" "$DIST/$tier/bin.mjs" --port "$PORT" --host "$HOST" --no-browser \
 		>"$SERVER_LOG" 2>&1 &
@@ -128,10 +140,14 @@ is_idle() {
 	[[ "$busy" == "0" ]]
 }
 
+current_binary_mtime() { stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0; }
+
+# Any change counts, not just a newer mtime: swap-back moves the older bak
+# build into current. A missing bin.mjs (mid-swap) is not a build.
 binary_changed() {
 	local mtime
-	mtime=$(stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0)
-	[[ "$mtime" -gt "$last_binary_mtime" ]]
+	mtime=$(current_binary_mtime)
+	[[ "$mtime" -gt 0 && "$mtime" -ne "$last_binary_mtime" ]]
 }
 
 # ── Fallback chain ─────────────────────────────────────────────────────────
@@ -221,21 +237,25 @@ adopt_stale=0
 if adopt_server; then
 	log "Found running server on port $PORT (PID $server_pid) - adopting it"
 	adopt_stale=1 # verify below whether it matches the current tier's build
-	last_binary_mtime=$(stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0)
-	# A swap can land before this daemon starts, e.g. in the same check
-	# interval as the script change that re-exec'd it. Baseline on the
-	# server's start time instead so the idle gate restarts onto that build.
-	# The restart resets the baseline to the build's mtime, so it runs once;
-	# a server already on a fallback tier started after the build and is
-	# never seen as stale.
-	server_started=$(process_start_epoch "$server_pid")
-	if [[ "$server_started" =~ ^[0-9]+$ ]] && [[ "$server_started" -lt "$last_binary_mtime" ]]; then
-		log "Adopted server predates the current build - restart pending (idle-gated)"
-		last_binary_mtime=$server_started
+	last_binary_mtime=$(current_binary_mtime)
+	if [[ -n "$handoff_baseline" ]]; then
+		# Self-re-exec: the previous instance knows which build this server
+		# runs, so a swap or swap-back that landed meanwhile still restarts,
+		# and a server on a fallback tier is not sent back to a failed build.
+		last_binary_mtime=$handoff_baseline
+	else
+		# A server we know nothing about (its daemon died, or a manual start)
+		# cannot be running a build newer than itself.
+		server_started=$(process_start_epoch "$server_pid")
+		if [[ "$server_started" =~ ^[0-9]+$ ]] && [[ "$server_started" -lt "$last_binary_mtime" ]]; then
+			last_binary_mtime=$server_started
+		fi
+	fi
+	if binary_changed; then
+		log "Adopted server is not on the current build - restart pending (idle-gated)"
 	fi
 else
 	start_server current
-	last_binary_mtime=$(stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0)
 fi
 
 if ! health_check; then
@@ -283,7 +303,7 @@ while true; do
 	if [[ "$self_mtime" -gt "$last_self_mtime" ]]; then
 		if bash -n "$SELF" 2>/dev/null; then
 			log "Daemon script changed - re-execing with new code (server stays up)"
-			exec bash "$SELF"
+			exec bash "$SELF" --binary-baseline "$last_binary_mtime"
 		else
 			log "Daemon script changed but failed syntax check - keeping current code"
 			last_self_mtime=$self_mtime
@@ -298,7 +318,6 @@ while true; do
 			if [[ $consecutive_idle -ge $IDLE_THRESHOLD ]]; then
 				log "Idle for $consecutive_idle checks - restarting onto new build..."
 				stop_server
-				last_binary_mtime=$(stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0)
 				start_server current
 				if health_check; then
 					log "New build healthy"
