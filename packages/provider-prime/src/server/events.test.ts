@@ -10,8 +10,11 @@ import {
   primeIpythonFileChange,
   primeProviderGoal,
   primeIpythonUpdate,
+  primeRlmChildSignature,
+  primeRlmChildView,
   primeToolItem,
 } from "./events.ts";
+import type { PrimeRlmChild } from "./rpc.ts";
 
 describe("primeAgentEndErrorMessage", () => {
   it("[VAL-TURN-009] takes the first non-blank errorMessage among agent_end messages", () => {
@@ -603,5 +606,106 @@ describe("Prime custom messages", () => {
   ])("[VAL-MSG-003] leaves $name to its own mapping", ({ message }) => {
     assert.isFalse(primeCustomMessageHidden(message));
     assert.isUndefined(primeCustomMessageNotice(message));
+  });
+});
+
+describe("primeRlmChildView", () => {
+  const child = (fields: Partial<PrimeRlmChild>): PrimeRlmChild => ({
+    id: "child-1",
+    label: "repo-scout",
+    sessionDir: "/tmp/session/sub-1",
+    status: "queued",
+    ...fields,
+  });
+
+  it.each([
+    { status: "queued", mapped: "waiting", terminal: false },
+    { status: "running", mapped: "running", terminal: false },
+    { status: "done", mapped: "completed", terminal: true },
+    { status: "error", mapped: "failed", terminal: true },
+    { status: "cancelled", mapped: "cancelled", terminal: true },
+  ])("[VAL-RLM-001][VAL-RLM-003] maps $status to $mapped", ({ status, mapped, terminal }) => {
+    const view = primeRlmChildView(child({ status }));
+    assert.equal(view?.status, mapped);
+    assert.equal(view?.terminal, terminal);
+  });
+
+  it("[VAL-RLM-001] ignores a status Prime does not define", () => {
+    assert.isUndefined(primeRlmChildView(child({ status: "paused" })));
+  });
+
+  it("[VAL-RLM-001] titles the child by its label, falling back to the session name", () => {
+    assert.equal(primeRlmChildView(child({ sessionName: "scout" }))?.title, "repo-scout");
+    assert.equal(primeRlmChildView(child({ label: " ", sessionName: "scout" }))?.title, "scout");
+  });
+
+  it("[VAL-RLM-001] a running child reports its answer preview, else its activity, as progress", () => {
+    assert.equal(
+      primeRlmChildView(
+        child({ status: "running", activity: { kind: "executing", toolName: "bash" } }),
+      )?.progress,
+      "Running bash",
+    );
+    assert.equal(
+      primeRlmChildView(
+        child({
+          status: "running",
+          answerPreview: "half done",
+          activity: { kind: "writing" },
+        }),
+      )?.progress,
+      "half done",
+    );
+    assert.isNull(primeRlmChildView(child({ status: "running" }))?.result);
+  });
+
+  it("[VAL-RLM-001] a done child's result is its answer preview", () => {
+    const view = primeRlmChildView(
+      child({ status: "done", answerPreview: "155 repos found", toolUseCount: 9 }),
+    );
+    assert.equal(view?.result, "155 repos found");
+    assert.isUndefined(view?.progress);
+  });
+
+  it.each([
+    { status: "error", error: "kernel died", result: "kernel died" },
+    { status: "cancelled", error: "Cancelled by user", result: "Cancelled by user" },
+    { status: "cancelled", error: undefined, result: null },
+  ])("[VAL-RLM-003] a $status child carries its error text as the result", (input) => {
+    assert.equal(
+      primeRlmChildView(
+        child({
+          status: input.status,
+          ...(input.error === undefined ? {} : { error: input.error }),
+        }),
+      )?.result,
+      input.result,
+    );
+  });
+});
+
+describe("primeRlmChildSignature", () => {
+  const base: PrimeRlmChild = {
+    id: "child-1",
+    label: "repo-scout",
+    sessionDir: "/tmp/session/sub-1",
+    status: "running",
+    answerPreview: "half done",
+    toolUseCount: 7,
+  };
+
+  it("[VAL-RLM-002] an identical snapshot has the same signature", () => {
+    assert.equal(primeRlmChildSignature(base), primeRlmChildSignature({ ...base }));
+  });
+
+  it.each<{ name: string; change: Partial<PrimeRlmChild> }>([
+    { name: "status", change: { status: "done" } },
+    { name: "label", change: { label: "other" } },
+    { name: "activity", change: { activity: { kind: "executing", toolName: "bash" } } },
+    { name: "toolUseCount", change: { toolUseCount: 8 } },
+    { name: "answerPreview", change: { answerPreview: "more" } },
+    { name: "error", change: { error: "boom" } },
+  ])("[VAL-RLM-002] changes when $name changes", ({ change }) => {
+    assert.notEqual(primeRlmChildSignature(base), primeRlmChildSignature({ ...base, ...change }));
   });
 });

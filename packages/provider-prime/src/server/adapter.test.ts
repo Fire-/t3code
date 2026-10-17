@@ -7639,6 +7639,289 @@ describe("Prime settle engine", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
+
+  describe("rlm children", () => {
+    type Subagent = Extract<AdapterEvent, { type: "subagent.updated" }>["subagent"];
+    type SubagentItem = Extract<
+      Extract<AdapterEvent, { type: "turn_item.updated" }>["turnItem"],
+      { type: "subagent" }
+    >;
+    const RUN_1 = RunId.make(`run:${THREAD_ID}:1`);
+    const childUpdate = (child: Record<string, unknown>) => ({
+      type: "rlm_child_update",
+      child: { id: "child-1", label: "repo-scout", sessionDir: "/tmp/prime/sub-1", ...child },
+    });
+    const subagentUpdates = (seen: ReadonlyArray<AdapterEvent>): Array<Subagent> =>
+      seen.flatMap((event) => (event.type === "subagent.updated" ? [event.subagent] : []));
+    const subagentItems = (seen: ReadonlyArray<AdapterEvent>): Array<SubagentItem> =>
+      seen.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? [event.turnItem]
+          : [],
+      );
+    const latestByTitle = <A extends { readonly title: string | null }>(rows: ReadonlyArray<A>) =>
+      new Map(rows.map((row) => [row.title, row]));
+    /** The overlay's SPAWN_CHILD scenario (rpc-mock-agent.ts). */
+    const SPAWN_CHILD = [
+      { status: "queued" },
+      { status: "running", toolUseCount: 3, activity: { kind: "executing", toolName: "bash" } },
+      { status: "running", answerPreview: "half done", toolUseCount: 7 },
+      { status: "running", answerPreview: "half done", toolUseCount: 7 },
+      { status: "done", answerPreview: "155 repos found", toolUseCount: 9, durationMs: 42_000 },
+    ];
+    const runChildren = Effect.fnUntraced(function* (
+      snapshots: ReadonlyArray<Record<string, unknown>>,
+    ) {
+      const open = yield* openTurn();
+      const { fake, seen, record } = open;
+      yield* open.begin();
+      const providerTurnId = yield* runningTurnId(record);
+      yield* fake.emit({ type: "agent_start" });
+      for (const snapshot of snapshots) yield* fake.emit(childUpdate(snapshot));
+      yield* replyText(fake, "child work done");
+      yield* fake.emit(agentEnd());
+      const terminal = yield* record((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      return { seen, providerTurnId, providerThread: open.providerThread };
+    });
+
+    it.effect(
+      "[VAL-RLM-001] SPAWN_CHILD: child snapshots become one provider-native subagent and its turn item, queued -> waiting -> running -> completed",
+      () =>
+        Effect.gen(function* () {
+          const { seen, providerTurnId, providerThread } = yield* runChildren(SPAWN_CHILD);
+          const updates = subagentUpdates(seen);
+          assert.deepEqual(
+            updates.map((update) => update.status),
+            ["waiting", "running", "running", "completed"],
+          );
+          assert.equal(new Set(updates.map((update) => update.id)).size, 1);
+          for (const update of updates) {
+            assert.equal(update.origin, "provider_native");
+            assert.isNull(update.childThreadId);
+            assert.equal(update.title, "repo-scout");
+            assert.equal(update.runId, RUN_1);
+            assert.equal(update.threadId, THREAD_ID);
+            assert.equal(update.providerThreadId, providerThread.id);
+            assert.include(update.nativeTaskRef?.nativeId ?? "", "child-1");
+          }
+          assert.equal(updates[1]?.progress, "Running bash");
+          assert.equal(updates[2]?.progress, "half done");
+          const done = updates.at(-1)!;
+          assert.equal(done.result, "155 repos found");
+          assert.isNotNull(done.completedAt);
+
+          const items = subagentItems(seen);
+          assert.lengthOf(items, 4);
+          assert.equal(new Set(items.map((item) => item.id)).size, 1);
+          const item = items.at(-1)!;
+          assert.equal(item.subagentId, done.id);
+          assert.equal(item.status, "completed");
+          assert.equal(item.origin, "provider_native");
+          assert.isNull(item.childThreadId);
+          assert.equal(item.title, "repo-scout");
+          assert.equal(item.result, "155 repos found");
+          assert.equal(item.runId, RUN_1);
+          assert.equal(item.providerTurnId, providerTurnId);
+
+          const nodes = seen.flatMap((event) =>
+            event.type === "node.updated" && event.node.id === done.id ? [event.node] : [],
+          );
+          assert.deepEqual(
+            nodes.map((node) => node.status),
+            ["waiting", "running", "running", "completed"],
+          );
+          assert.isTrue(nodes.every((node) => node.kind === "subagent" && node.runId === RUN_1));
+          assert.equal(item.nodeId, done.id);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-RLM-002] an exact duplicate snapshot, or one that differs only in Prime's activity clock, adds no update",
+      () =>
+        Effect.gen(function* () {
+          const [queued, tool, half, , done] = SPAWN_CHILD;
+          const { seen } = yield* runChildren([
+            queued!,
+            tool!,
+            half!,
+            half!,
+            { ...half, lastActivityAt: 1_700_000_000_000, activityStaleMs: 90_000 },
+            done!,
+            done!,
+          ]);
+          assert.lengthOf(subagentUpdates(seen), 4);
+          assert.lengthOf(subagentItems(seen), 4);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-RLM-003] error and cancelled children end failed and cancelled with their text; a removal after completion keeps the completion",
+      () =>
+        Effect.gen(function* () {
+          const { seen } = yield* runChildren([
+            { id: "child-err", label: "lint", status: "queued" },
+            { id: "child-err", label: "lint", status: "running" },
+            { id: "child-err", label: "lint", status: "error", error: "kernel died" },
+            { id: "child-cancel", label: "tests", status: "running" },
+            { id: "child-cancel", label: "tests", status: "cancelled", error: "Cancelled by user" },
+            { id: "child-docs", label: "docs", status: "done", answerPreview: "docs ok" },
+            {
+              id: "child-docs",
+              label: "docs",
+              status: "cancelled",
+              error: "Deleted by parent orchestrator",
+            },
+          ]);
+          const updates = latestByTitle(subagentUpdates(seen));
+          const items = latestByTitle(subagentItems(seen));
+          for (const [title, status, result] of [
+            ["lint", "failed", "kernel died"],
+            ["tests", "cancelled", "Cancelled by user"],
+            ["docs", "completed", "docs ok"],
+          ] as const) {
+            assert.equal(updates.get(title)?.status, status, title);
+            assert.equal(updates.get(title)?.result, result, title);
+            assert.isNotNull(updates.get(title)?.completedAt ?? null, title);
+            assert.equal(items.get(title)?.status, status, title);
+            assert.equal(items.get(title)?.result, result, title);
+          }
+          assert.lengthOf(
+            subagentUpdates(seen).filter((update) => update.title === "docs"),
+            1,
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-RLM-004] a child that outlives its turn is non-terminal before turn.terminal, and its later update stays on the original run without a new turn or continuation offer",
+      () =>
+        Effect.gen(function* () {
+          const offers =
+            yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+          const open = yield* openTurn(undefined, "full-access", {
+            offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid),
+          });
+          const { fake, seen, record } = open;
+          const afterPrompt = yield* open.begin();
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit(childUpdate({ status: "queued" }));
+          yield* fake.emit(childUpdate({ status: "running" }));
+          yield* replyText(fake, "spawned a scout");
+          yield* fake.emit(agentEnd());
+          yield* record((event) => event.type === "turn.terminal");
+          const terminalIndex = seen.findIndex((event) => event.type === "turn.terminal");
+          const beforeTerminal = subagentUpdates(seen.slice(0, terminalIndex));
+          assert.equal(beforeTerminal.at(-1)?.status, "running");
+
+          // No turn is open now: an unknown child has nothing to attach to.
+          yield* fake.emit(childUpdate({ id: "child-stray", label: "stray", status: "running" }));
+          yield* fake.emit(childUpdate({ status: "done", answerPreview: "155 repos found" }));
+          const late = yield* record(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+          );
+          const lateItem = yield* record(
+            (event) => event.type === "turn_item.updated" && event.turnItem.type === "subagent",
+          );
+          assert.isTrue(late.type === "subagent.updated");
+          if (late.type !== "subagent.updated" || lateItem.type !== "turn_item.updated") return;
+          assert.equal(late.subagent.id, beforeTerminal[0]?.id);
+          assert.equal(late.subagent.runId, RUN_1);
+          assert.equal(late.subagent.result, "155 repos found");
+          assert.equal(lateItem.turnItem.runId, RUN_1);
+          assert.equal(lateItem.turnItem.providerTurnId, providerTurnId);
+          assert.equal(lateItem.turnItem.status, "completed");
+
+          const afterTerminal = seen.slice(terminalIndex + 1);
+          assert.isFalse(
+            afterTerminal.some(
+              (event) => event.type === "turn.terminal" || event.type === "provider_turn.updated",
+            ),
+            "a late child update starts no turn",
+          );
+          assert.isFalse(
+            subagentUpdates(seen).some((update) => update.title === "stray"),
+            "an unattributable child is dropped",
+          );
+          assert.equal(yield* Queue.size(offers), 0);
+          assert.notInclude(fake.commandLog().slice(afterPrompt), "prompt");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-RLM-001] two threads whose children share Prime's session-local child id keep distinct subagents and items",
+      () =>
+        Effect.gen(function* () {
+          const runThread = Effect.fnUntraced(function* (index: number) {
+            const fake = yield* makeFakePrime;
+            fake.queueState({
+              sessionFile: `/fake/.prime/agent/sessions/--workspace--/000${index}_rlm.jsonl`,
+            });
+            const threadId = ThreadId.make(`thread-prime-rlm-${index}`);
+            const { runtime, takeEvent } = yield* openRuntime(
+              fake,
+              "default",
+              threadId,
+              ProviderSessionId.make(`provider-session-prime-rlm-${index}`),
+            );
+            const providerThread = yield* runtime.ensureThread({
+              threadId,
+              modelSelection: modelSelection("default"),
+              runtimePolicy,
+            });
+            const seen: Array<AdapterEvent> = [];
+            const record = (predicate: (event: AdapterEvent) => boolean) =>
+              takeEvent((event) => {
+                seen.push(event);
+                return predicate(event);
+              });
+            yield* startTurn(
+              runtime,
+              providerThread,
+              "default",
+              [],
+              "Spawn a scout",
+              undefined,
+              1,
+              threadId,
+            );
+            yield* fake.takeRequest("prompt");
+            yield* fake.emit({ type: "response", command: "prompt", success: true });
+            yield* fake.emit({ type: "agent_start" });
+            yield* fake.emit(
+              childUpdate({
+                id: "sub-1a2b3c4d",
+                label: `scout ${index}`,
+                status: "done",
+                answerPreview: `thread ${index}`,
+              }),
+            );
+            yield* fake.emit(agentEnd());
+            yield* record((event) => event.type === "turn.terminal");
+            return { threadId, providerThread, seen };
+          });
+          const first = yield* runThread(1);
+          const second = yield* runThread(2);
+          assert.notEqual(first.providerThread.id, second.providerThread.id);
+          const [firstUpdate] = subagentUpdates(first.seen);
+          const [secondUpdate] = subagentUpdates(second.seen);
+          const [firstItem] = subagentItems(first.seen);
+          const [secondItem] = subagentItems(second.seen);
+          assert.notEqual(firstUpdate?.id, secondUpdate?.id);
+          assert.notEqual(firstItem?.id, secondItem?.id);
+          assert.notEqual(firstItem?.nodeId, secondItem?.nodeId);
+          for (const [thread, update, item] of [
+            [first, firstUpdate, firstItem],
+            [second, secondUpdate, secondItem],
+          ] as const) {
+            assert.equal(update?.threadId, thread.threadId);
+            assert.equal(item?.threadId, thread.threadId);
+            assert.include(update?.nativeTaskRef?.nativeId ?? "", thread.providerThread.id);
+          }
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
 });
 
 describe("Prime tool mapping", () => {

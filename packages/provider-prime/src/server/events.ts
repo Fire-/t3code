@@ -5,6 +5,7 @@ import {
   primeRecordNumber,
   primeRecordString as recordString,
   type PrimeGoalState,
+  type PrimeRlmChild,
   type PrimeRpcRecord,
 } from "./rpc.ts";
 
@@ -502,4 +503,77 @@ export function primeIpythonUpdate(
     return { type: "progress" };
   }
   return { type: "output", text };
+}
+
+const PRIME_RLM_CHILD_STATUSES = {
+  queued: "waiting",
+  running: "running",
+  done: "completed",
+  error: "failed",
+  cancelled: "cancelled",
+} as const;
+
+const isMappedRlmChildStatus = (status: string): status is keyof typeof PRIME_RLM_CHILD_STATUSES =>
+  Object.hasOwn(PRIME_RLM_CHILD_STATUSES, status);
+
+export interface PrimeRlmChildView {
+  readonly status: (typeof PRIME_RLM_CHILD_STATUSES)[keyof typeof PRIME_RLM_CHILD_STATUSES];
+  readonly terminal: boolean;
+  readonly title: string;
+  readonly model: string | null;
+  readonly progress: string | undefined;
+  readonly result: string | null;
+}
+
+function primeRlmChildActivity(activity: PrimeRlmChild["activity"]): string | undefined {
+  switch (activity?.kind) {
+    case "executing":
+      return `Running ${nonBlank(activity.toolName) ?? "a tool"}`;
+    case "writing":
+      return "Writing";
+    case "waiting":
+      return "Waiting";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * An RLM child as T3 shows it. Prime's statuses are RlmChildAgentStatus
+ * (core/agent-session.ts); `label` is derived from the child's prompt.
+ */
+export function primeRlmChildView(child: PrimeRlmChild): PrimeRlmChildView | undefined {
+  if (!isMappedRlmChildStatus(child.status)) return undefined;
+  const status = PRIME_RLM_CHILD_STATUSES[child.status];
+  const terminal = status === "completed" || status === "failed" || status === "cancelled";
+  const answer = nonBlank(child.answerPreview);
+  const error = nonBlank(child.error);
+  const result = !terminal ? undefined : status === "completed" ? answer : (error ?? answer);
+  const progress = terminal
+    ? undefined
+    : (answer ?? nonBlank(child.progressNote) ?? primeRlmChildActivity(child.activity));
+  return {
+    status,
+    terminal,
+    title: nonBlank(child.label) ?? nonBlank(child.sessionName) ?? "RLM child",
+    model: nonBlank(child.model) ?? null,
+    progress: progress?.slice(0, 200),
+    result: result?.slice(0, 10_000) ?? null,
+  };
+}
+
+/** The fields an emitted update shows; equal signatures are exact duplicates. */
+export function primeRlmChildSignature(child: PrimeRlmChild): string {
+  return JSON.stringify([
+    child.status,
+    child.label,
+    child.sessionName,
+    child.model,
+    child.activity?.kind,
+    child.activity?.toolName,
+    child.toolUseCount,
+    child.answerPreview,
+    child.progressNote,
+    child.error,
+  ]);
 }

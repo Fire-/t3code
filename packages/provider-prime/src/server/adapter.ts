@@ -57,6 +57,8 @@ import {
   primeIpythonFileChange,
   primeIpythonUpdate,
   primeProviderGoal,
+  primeRlmChildSignature,
+  primeRlmChildView,
   primeSessionCommandFailure,
   primeToolItem,
   type PrimeAutonomousContinuation,
@@ -501,6 +503,14 @@ interface PrimeThreadState {
   activeTurn: ActivePrimeTurn | null;
 }
 
+interface PrimeRlmChildState {
+  readonly turn: ActivePrimeTurn;
+  readonly nativeId: string;
+  readonly startedAt: DateTime.Utc;
+  signature: string;
+  terminal: boolean;
+}
+
 interface PrimeWake {
   readonly state: PrimeThreadState;
   readonly events: Array<PrimeRpcRecord>;
@@ -617,6 +627,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       let stopRequested = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PrimeWake | null = null;
+      const rlmChildren = new Map<string, PrimeRlmChildState>();
       // Prime emits session_action_update only on change, so the latest
       // snapshot is session state that outlives any single turn.
       let latestSessionActions: PrimeSessionActionSnapshot | null = null;
@@ -1838,7 +1849,119 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         yield* connection.terminate;
       });
 
+      /**
+       * An RLM child stays with the turn that first reported it, after that
+       * turn's terminal too: a completed run keeps ingesting while a subagent it
+       * owns is unsettled (RunExecutionService shouldStopProviderEventIngestion),
+       * so a late update needs the original run, never a new turn.
+       */
+      const handleRlmChildUpdate = Effect.fnUntraced(function* (event: PrimeRpcRecord) {
+        const frame = classifyPrimeEvent(event);
+        if (frame._tag !== "Prime" || frame.frame.type !== "rlm_child_update") {
+          yield* Effect.logDebug("Ignoring a malformed Prime rlm_child_update.");
+          return;
+        }
+        const child = frame.frame.child;
+        const view = primeRlmChildView(child);
+        if (view === undefined) {
+          yield* Effect.logDebug("Ignoring an RLM child with an unknown status.", {
+            status: child.status,
+          });
+          return;
+        }
+        const known = rlmChildren.get(child.id);
+        const signature = primeRlmChildSignature(child);
+        if (known?.signature === signature) return;
+        // "cancelled" is also Prime's removal signal (rlm.delete_subagent);
+        // a child that already finished keeps its outcome.
+        if (known?.terminal === true && view.status === "cancelled") return;
+        const turn = known?.turn ?? threadState?.activeTurn ?? null;
+        if (turn === null) {
+          if (pendingWake !== null) {
+            pendingWake.events.push(event);
+            return;
+          }
+          yield* Effect.logDebug("Dropping an RLM child update with no turn to attach to.", {
+            childId: child.id,
+          });
+          return;
+        }
+        const updatedAt = yield* DateTime.now;
+        const record: PrimeRlmChildState = known ?? {
+          turn,
+          // Prime's child id is the child's session directory name
+          // (`sub-<8 hex>`), unique only under its parent session.
+          nativeId: `rlm:${turn.turnInput.providerThread.id}:${child.id}`,
+          startedAt: updatedAt,
+          signature,
+          terminal: view.terminal,
+        };
+        record.signature = signature;
+        record.terminal = view.terminal;
+        rlmChildren.set(child.id, record);
+        const subagentId = idAllocator.derive.nodeFromProviderItem({
+          driver: PRIME_PROVIDER,
+          nativeItemId: record.nativeId,
+        });
+        const completedAt = view.terminal ? updatedAt : null;
+        const progress = view.progress === undefined ? {} : { progress: view.progress };
+        yield* emitItemNode(
+          turn,
+          record.nativeId,
+          "subagent",
+          view.status,
+          record.startedAt,
+          completedAt,
+        );
+        yield* emit({
+          type: "subagent.updated",
+          driver: PRIME_PROVIDER,
+          subagent: {
+            id: subagentId,
+            threadId: turn.turnInput.threadId,
+            runId: turn.turnInput.runId,
+            parentNodeId: turn.turnInput.rootNodeId,
+            origin: "provider_native",
+            createdBy: "agent",
+            driver: PRIME_PROVIDER,
+            providerInstanceId: options.instanceId,
+            providerThreadId: turn.turnInput.providerThread.id,
+            childThreadId: null,
+            nativeTaskRef: providerRef(record.nativeId),
+            prompt: view.title,
+            title: view.title,
+            model: view.model,
+            status: view.status,
+            ...progress,
+            result: view.result,
+            startedAt: record.startedAt,
+            completedAt,
+            updatedAt,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PRIME_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, record.nativeId, record.startedAt, updatedAt),
+            status: view.status,
+            title: view.title,
+            completedAt,
+            type: "subagent",
+            subagentId,
+            origin: "provider_native",
+            driver: PRIME_PROVIDER,
+            providerInstanceId: options.instanceId,
+            childThreadId: null,
+            prompt: view.title,
+            ...progress,
+            result: view.result,
+          },
+        });
+      });
+
       const handleSessionEvent = Effect.fnUntraced(function* (event: PrimeRpcRecord) {
+        if (event["type"] === "rlm_child_update") return yield* handleRlmChildUpdate(event);
         // Model-selection hooks can await a dialog before startTurn can claim
         // a wake. Keep interactive requests session-scoped until a turn owns
         // them; buffer native output and notifications for that turn.

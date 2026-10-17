@@ -129,25 +129,34 @@ export function isPrimeStateIdle(state: PrimeState): boolean {
   );
 }
 
+/** Prime's RlmChildAgentSnapshot (core/agent-session.ts). */
+const PrimeRlmChild = Schema.Struct({
+  id: Schema.String,
+  parentId: Schema.optionalKey(Schema.String),
+  activeSessionId: Schema.optionalKey(Schema.String),
+  sessionName: Schema.optionalKey(Schema.String),
+  model: Schema.optionalKey(Schema.String),
+  label: Schema.String,
+  status: Schema.String,
+  durationMs: Schema.optionalKey(Schema.Number),
+  answerPreview: Schema.optionalKey(Schema.String),
+  toolUseCount: Schema.optionalKey(Schema.Number),
+  sessionDir: Schema.optionalKey(Schema.String),
+  activity: Schema.optionalKey(
+    Schema.Struct({ kind: Schema.String, toolName: Schema.optionalKey(Schema.String) }),
+  ),
+  progressNote: Schema.optionalKey(Schema.String),
+  error: Schema.optionalKey(Schema.String),
+});
+export type PrimeRlmChild = typeof PrimeRlmChild.Type;
+
 const PrimeOnlyFrame = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("session_action_update"),
     actions: PrimeSessionActionSnapshot,
   }),
   Schema.Struct({ type: Schema.Literal("goal_update"), goal: PrimeGoalState }),
-  Schema.Struct({
-    type: Schema.Literal("rlm_child_update"),
-    child: Schema.Struct({
-      id: Schema.String,
-      parentId: Schema.optionalKey(Schema.String),
-      activeSessionId: Schema.optionalKey(Schema.String),
-      sessionName: Schema.optionalKey(Schema.String),
-      label: Schema.String,
-      status: Schema.String,
-      sessionDir: Schema.optionalKey(Schema.String),
-      error: Schema.optionalKey(Schema.String),
-    }),
-  }),
+  Schema.Struct({ type: Schema.Literal("rlm_child_update"), child: PrimeRlmChild }),
   Schema.Struct({
     type: Schema.Literal("compaction_start"),
     reason: Schema.String,

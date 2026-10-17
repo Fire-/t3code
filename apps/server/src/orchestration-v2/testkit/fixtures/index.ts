@@ -77,6 +77,8 @@ import { primeApprovalInput } from "./prime_approval/input.ts";
 import { assertPrimeApprovalOutput } from "./prime_approval/prime_output.ts";
 import { primeGoalAutonomousInput } from "./prime_goal_autonomous/input.ts";
 import { assertPrimeGoalAutonomousOutput } from "./prime_goal_autonomous/prime_output.ts";
+import { primeRlmChildrenInput } from "./prime_rlm_children/input.ts";
+import { assertPrimeRlmChildrenOutput } from "./prime_rlm_children/prime_output.ts";
 import { primeSessionCommandInput } from "./prime_session_command/input.ts";
 import { assertPrimeSessionCommandOutput } from "./prime_session_command/prime_output.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
@@ -1716,6 +1718,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: PRIME_MODEL_SELECTION,
         runContinuationWorker: true,
         assertOutput: assertPrimeGoalAutonomousOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_rlm_children",
+    buildInput: primeRlmChildrenInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_rlm_children/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeRlmChildrenOutput,
       },
     ],
   },
