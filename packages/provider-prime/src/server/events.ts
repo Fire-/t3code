@@ -577,3 +577,138 @@ export function primeRlmChildSignature(child: PrimeRlmChild): string {
     child.error,
   ]);
 }
+
+const USER_ENTRIES_FINGERPRINT_PREFIX = "prime-user-entries:v1:";
+
+/** FNV-1a: a short stable digest, so a turn's ref carries no prompt text. */
+export function primeUserEntryHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Records which user entries a turn added to the Prime session, in order:
+ * Prime's `get_fork_messages` lists exactly the persisted user messages that
+ * have text (core/agent-session.ts getUserMessagesForForking), and a T3 turn
+ * adds zero (a session command) or more (prompt, steers, continuations).
+ */
+export function primeUserEntriesFingerprint(hashes: ReadonlyArray<string>): string {
+  return `${USER_ENTRIES_FINGERPRINT_PREFIX}${hashes.length === 0 ? "none" : hashes.join(".")}`;
+}
+
+export function primeUserEntryHashes(
+  fingerprint: string | undefined,
+): ReadonlyArray<string> | undefined {
+  if (fingerprint === undefined || !fingerprint.startsWith(USER_ENTRIES_FINGERPRINT_PREFIX)) {
+    return undefined;
+  }
+  const body = fingerprint.slice(USER_ENTRIES_FINGERPRINT_PREFIX.length);
+  return body === "none" ? [] : body.split(".");
+}
+
+export interface PrimeForkMessage {
+  readonly entryId: string;
+  readonly text: string;
+}
+
+export function primeForkMessages(data: unknown): ReadonlyArray<PrimeForkMessage> | undefined {
+  const messages = recordField(data, "messages");
+  if (!Array.isArray(messages)) return undefined;
+  const result: Array<PrimeForkMessage> = [];
+  for (const message of messages) {
+    const entryId = recordString(message, "entryId");
+    const text = recordString(message, "text");
+    if (entryId === undefined || text === undefined) return undefined;
+    result.push({ entryId, text });
+  }
+  return result;
+}
+
+interface PrimeBoundaryTurn {
+  readonly ordinal: number;
+  readonly nativeTurnRef: { readonly fingerprint?: string | undefined } | null;
+}
+
+/** How many user entries the turns after `boundaryOrdinal` added; undefined when one is unknown. */
+export function primeDiscardedUserEntries(
+  turns: ReadonlyArray<PrimeBoundaryTurn>,
+  boundaryOrdinal: number,
+): number | undefined {
+  let count = 0;
+  for (const turn of turns) {
+    if (turn.ordinal <= boundaryOrdinal) continue;
+    const hashes = primeUserEntryHashes(turn.nativeTurnRef?.fingerprint);
+    if (hashes === undefined) return undefined;
+    count += hashes.length;
+  }
+  return count;
+}
+
+export type PrimeForkBoundary =
+  | { readonly type: "keep_all" }
+  | { readonly type: "fork"; readonly entryId: string }
+  | { readonly type: "error"; readonly message: string };
+
+const entriesMatch = (
+  messages: ReadonlyArray<PrimeForkMessage>,
+  end: number,
+  hashes: ReadonlyArray<string>,
+) =>
+  end - hashes.length >= 0 &&
+  hashes.every(
+    (hash, index) => primeUserEntryHash(messages[end - hashes.length + index]?.text ?? "") === hash,
+  );
+
+/**
+ * Finds the first user entry the turns after `boundaryOrdinal` added, walking
+ * them newest first against the tail of `get_fork_messages`. History before
+ * the thread's first turn (a forked session's copied entries) stays put.
+ * `skipUnmatched` tolerates turns whose entries are gone from the session,
+ * which is what a fork source's rolled-back turns look like; the boundary
+ * turn's own entries must still sit right before the result.
+ */
+export function primeForkBoundary(input: {
+  readonly messages: ReadonlyArray<PrimeForkMessage>;
+  readonly turns: ReadonlyArray<PrimeBoundaryTurn>;
+  readonly boundaryOrdinal: number;
+  readonly skipUnmatched: boolean;
+}): PrimeForkBoundary {
+  const discarded = input.turns
+    .filter((turn) => turn.ordinal > input.boundaryOrdinal)
+    .toSorted((left, right) => right.ordinal - left.ordinal);
+  let cursor = input.messages.length;
+  for (const turn of discarded) {
+    const hashes = primeUserEntryHashes(turn.nativeTurnRef?.fingerprint);
+    if (hashes === undefined) {
+      return {
+        type: "error",
+        message: `Prime turn ${turn.ordinal} has no recorded session entries`,
+      };
+    }
+    if (hashes.length === 0) continue;
+    if (entriesMatch(input.messages, cursor, hashes)) {
+      cursor -= hashes.length;
+    } else if (!input.skipUnmatched) {
+      return {
+        type: "error",
+        message: `Prime session history no longer matches turn ${turn.ordinal}`,
+      };
+    }
+  }
+  const target = input.turns.find((turn) => turn.ordinal === input.boundaryOrdinal);
+  const targetHashes = primeUserEntryHashes(target?.nativeTurnRef?.fingerprint);
+  if (targetHashes !== undefined && !entriesMatch(input.messages, cursor, targetHashes)) {
+    return {
+      type: "error",
+      message: `Prime session history no longer matches turn ${input.boundaryOrdinal}`,
+    };
+  }
+  const boundary = input.messages[cursor];
+  return boundary === undefined
+    ? { type: "keep_all" }
+    : { type: "fork", entryId: boundary.entryId };
+}

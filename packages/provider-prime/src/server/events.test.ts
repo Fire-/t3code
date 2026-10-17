@@ -6,6 +6,9 @@ import {
   primeAutonomousNotice,
   primeCustomMessageHidden,
   primeCustomMessageNotice,
+  primeDiscardedUserEntries,
+  primeForkBoundary,
+  primeForkMessages,
   primeHeartbeatNotification,
   primeIpythonFileChange,
   primeProviderGoal,
@@ -13,6 +16,9 @@ import {
   primeRlmChildSignature,
   primeRlmChildView,
   primeToolItem,
+  primeUserEntriesFingerprint,
+  primeUserEntryHash,
+  primeUserEntryHashes,
 } from "./events.ts";
 import type { PrimeRlmChild } from "./rpc.ts";
 
@@ -707,5 +713,116 @@ describe("primeRlmChildSignature", () => {
     { name: "error", change: { error: "boom" } },
   ])("[VAL-RLM-002] changes when $name changes", ({ change }) => {
     assert.notEqual(primeRlmChildSignature(base), primeRlmChildSignature({ ...base, ...change }));
+  });
+});
+
+describe("primeForkBoundary", () => {
+  const turn = (ordinal: number, texts: ReadonlyArray<string> | undefined) => ({
+    ordinal,
+    nativeTurnRef:
+      texts === undefined
+        ? { fingerprint: undefined }
+        : { fingerprint: primeUserEntriesFingerprint(texts.map(primeUserEntryHash)) },
+  });
+  const messages = (...texts: ReadonlyArray<string>) =>
+    texts.map((text, index) => ({ entryId: `entry-${index}`, text }));
+
+  it("round-trips the user entries fingerprint and ignores foreign refs", () => {
+    const hashes = ["alpha", "bravo"].map(primeUserEntryHash);
+    assert.deepEqual(primeUserEntryHashes(primeUserEntriesFingerprint(hashes)), hashes);
+    assert.deepEqual(primeUserEntryHashes(primeUserEntriesFingerprint([])), []);
+    assert.isUndefined(primeUserEntryHashes("u1"));
+    assert.isUndefined(primeUserEntryHashes(undefined));
+    assert.notEqual(primeUserEntryHash("alpha"), primeUserEntryHash("alphb"));
+  });
+
+  it("reads get_fork_messages and rejects a malformed reply", () => {
+    assert.deepEqual(primeForkMessages({ messages: [{ entryId: "4c2b59bf", text: "alpha" }] }), [
+      { entryId: "4c2b59bf", text: "alpha" },
+    ]);
+    assert.isUndefined(primeForkMessages({ messages: [{ entryId: "4c2b59bf" }] }));
+    assert.isUndefined(primeForkMessages(undefined));
+  });
+
+  it("counts discarded user entries and flags a turn without a fingerprint", () => {
+    const turns = [turn(1, ["a"]), turn(2, ["b", "steer"]), turn(3, [])];
+    assert.equal(primeDiscardedUserEntries(turns, 1), 2);
+    assert.equal(primeDiscardedUserEntries(turns, 2), 0);
+    assert.isUndefined(primeDiscardedUserEntries([...turns, turn(4, undefined)], 1));
+  });
+
+  it("forks before the first discarded turn's prompt, counting steers and command-only turns", () => {
+    const turns = [turn(1, ["a"]), turn(2, ["b", "steer"]), turn(3, []), turn(4, ["c"])];
+    const history = messages("a", "b", "steer", "c");
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 1, skipUnmatched: false }),
+      { type: "fork", entryId: "entry-1" },
+    );
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 3, skipUnmatched: false }),
+      { type: "fork", entryId: "entry-3" },
+    );
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 4, skipUnmatched: false }),
+      { type: "keep_all" },
+    );
+  });
+
+  it("keeps a forked session's inherited history when rolling back to thread start", () => {
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("inherited", "a", "b"),
+        turns: [turn(1, ["a"]), turn(2, ["b"])],
+        boundaryOrdinal: 0,
+        skipUnmatched: false,
+      }),
+      { type: "fork", entryId: "entry-1" },
+    );
+  });
+
+  it("fails rollback when the session no longer matches or a turn has no fingerprint", () => {
+    const history = messages("a", "b");
+    assert.equal(
+      primeForkBoundary({
+        messages: history,
+        turns: [turn(1, ["a"]), turn(2, ["changed"])],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }).type,
+      "error",
+    );
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: history,
+        turns: [turn(1, ["a"]), turn(2, undefined)],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "error", message: "Prime turn 2 has no recorded session entries" },
+    );
+  });
+
+  it("skips a fork source's rolled-back turns but still checks the boundary turn", () => {
+    const turns = [turn(1, ["a"]), turn(2, ["rolled back"]), turn(3, ["c"])];
+    const history = messages("a", "c");
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 1, skipUnmatched: true }),
+      { type: "fork", entryId: "entry-1" },
+    );
+    assert.equal(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 1, skipUnmatched: false })
+        .type,
+      "error",
+    );
+    // A rolled-back turn repeating the boundary turn's prompt would swallow it.
+    assert.equal(
+      primeForkBoundary({
+        messages: messages("same", "same"),
+        turns: [turn(1, ["same"]), turn(2, ["same"]), turn(3, ["same"])],
+        boundaryOrdinal: 1,
+        skipUnmatched: true,
+      }).type,
+      "error",
+    );
   });
 });

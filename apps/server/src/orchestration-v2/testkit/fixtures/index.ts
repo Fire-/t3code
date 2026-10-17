@@ -162,6 +162,7 @@ import { assertClaudeThreadRollbackOutput } from "./thread_rollback/claude_outpu
 import { assertThreadRollbackOutput } from "./thread_rollback/codex_output.ts";
 import { threadRollbackInput } from "./thread_rollback/input.ts";
 import { assertPiThreadRollbackOutput } from "./thread_rollback/pi_output.ts";
+import { assertPrimeThreadRollbackOutput } from "./thread_rollback/prime_output.ts";
 import { assertThreadRollbackAfterRestartOutput } from "./thread_rollback_after_restart/codex_output.ts";
 import { threadRollbackAfterRestartInput } from "./thread_rollback_after_restart/input.ts";
 import { threadRollbackAfterStopInput } from "./thread_rollback_after_stop/input.ts";
@@ -1770,6 +1771,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./thread_rollback/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiThreadRollbackOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./thread_rollback/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeThreadRollbackOutput,
       },
     ],
   },

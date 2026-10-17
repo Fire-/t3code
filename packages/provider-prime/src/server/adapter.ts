@@ -52,6 +52,9 @@ import {
   primeCustomMessageHidden,
   primeCustomMessageNotice,
   primeContentText as contentText,
+  primeDiscardedUserEntries,
+  primeForkBoundary,
+  primeForkMessages,
   primeErrorMessage,
   primeHeartbeatNotification,
   primeIpythonFileChange,
@@ -61,6 +64,8 @@ import {
   primeRlmChildView,
   primeSessionCommandFailure,
   primeToolItem,
+  primeUserEntriesFingerprint,
+  primeUserEntryHash,
   type PrimeAutonomousContinuation,
 } from "./events.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -459,6 +464,8 @@ interface ActivePrimeTurn {
    * reports self-started refinement through the same frames.
    */
   readonly sessionCommands: Set<string>;
+  /** Hashes of the user entries this turn added to the session, in order. */
+  readonly userEntryHashes: Array<string>;
   latestCompactionAfterTokens: number | null;
   lastLiveUsedTokens: number | null;
   /** Bumped by every transition that can make an in-flight `get_state` probe stale. */
@@ -1663,8 +1670,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           }
         }
         yield* cancelPendingPrompts(completedAt);
-        // Prime 1.0.0 has no get_entries (modes/rpc/rpc-mode.ts), so a turn keeps
-        // its synthetic ref and the conversation head is not tracked.
+        // Prime 1.0.0 has no get_entries (modes/rpc/rpc-mode.ts), so the ref stays
+        // synthetic; its fingerprint is what rollback and fork match against
+        // get_fork_messages.
+        const nativeTurnRef =
+          turn.providerTurn.nativeTurnRef === null
+            ? null
+            : {
+                ...turn.providerTurn.nativeTurnRef,
+                fingerprint: primeUserEntriesFingerprint(turn.userEntryHashes),
+              };
         const tokenUsage = readUsage
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
@@ -1675,6 +1690,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           threadId: turn.turnInput.threadId,
           providerTurn: {
             ...turn.providerTurn,
+            nativeTurnRef,
             status: interrupted ? "interrupted" : failure !== null ? "failed" : "completed",
             completedAt,
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
@@ -2079,6 +2095,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             const message = event["message"];
             const role = recordString(message, "role");
             if (role === "user") {
+              const text = contentText(recordField(message, "content"));
+              if (text.length > 0) turn.userEntryHashes.push(primeUserEntryHash(text));
               // Prime echoes every prompt and steer as a user message; only its
               // own autonomous continuations become items.
               const continuation = primeAutonomousContinuation(message);
@@ -2967,6 +2985,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               sessionCommands: new Set(
                 initialSessionCommand === undefined ? [] : [initialSessionCommand],
               ),
+              userEntryHashes: [],
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
@@ -3310,13 +3329,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (pendingWake !== null) {
               return yield* protocolError("Cannot roll back while native Prime work awaits a turn");
             }
-            const forkEntryId = primeRollbackForkEntry(rollbackInput);
-            if (forkEntryId === null) {
+            const discardedEntries = primeDiscardedUserEntries(
+              rollbackInput.providerThreadTurns,
+              rollbackBoundaryOrdinal(rollbackInput.target),
+            );
+            if (discardedEntries === 0) {
               return primeThreadSnapshot(state.providerThread);
             }
-            if (forkEntryId === undefined) {
+            if (discardedEntries === undefined) {
               return yield* protocolError(
-                "Prime rollback target has no captured session-tree entry",
+                "Prime rollback crosses a turn with no recorded session entries",
               );
             }
             return yield* Effect.acquireUseRelease(
@@ -3343,7 +3365,26 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               ),
               (barrier) =>
                 Effect.gen(function* () {
-                  const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
+                  const forkMessages = primeForkMessages(
+                    yield* request({ type: "get_fork_messages" }),
+                  );
+                  if (forkMessages === undefined)
+                    return yield* protocolError("Prime returned malformed fork messages");
+                  const boundary = primeForkBoundary({
+                    messages: forkMessages,
+                    turns: rollbackInput.providerThreadTurns,
+                    boundaryOrdinal: rollbackBoundaryOrdinal(rollbackInput.target),
+                    skipUnmatched: false,
+                  });
+                  if (boundary.type === "error") return yield* protocolError(boundary.message);
+                  if (boundary.type === "keep_all")
+                    return yield* protocolError(
+                      "Prime session has none of the rolled-back turns' entries",
+                    );
+                  const forkData = yield* lifecycleRequest({
+                    type: "fork",
+                    entryId: boundary.entryId,
+                  });
                   if (recordField(forkData, "cancelled") === true)
                     return yield* protocolError("A Prime extension cancelled the session fork");
                   const forkState = yield* request({ type: "get_state" }).pipe(
@@ -3360,10 +3401,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                       "Prime fork did not return a persisted session file",
                     );
                   }
-                  const entriesData = yield* request({ type: "get_entries" }).pipe(
-                    Effect.orElseSucceed(() => undefined),
-                  );
-                  const leafId = recordString(entriesData, "leafId") ?? null;
                   // RPC responses bypass the pump. Drain preceding native events
                   // before deciding whether this fork can replace their binding.
                   const queued = yield* Queue.offer(connection.events, {
@@ -3396,7 +3433,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                       requestedSessionName = null;
                       yield* updateProviderThread(state, {
                         nativeThreadRef: providerRef(forkSessionFile),
-                        nativeConversationHeadRef: leafId === null ? null : providerRef(leafId),
+                        nativeConversationHeadRef: null,
                       });
                       rollbackBarrier = null;
                       return primeThreadSnapshot(state.providerThread);
@@ -3435,15 +3472,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (forkInput.providerTurnId !== undefined && target === undefined) {
               return yield* protocolError("Prime fork target turn is missing");
             }
-            const beforeEntry =
-              target === undefined
-                ? null
-                : primeRollbackForkEntry({
-                    target: { type: "provider_turn", providerTurn: target },
-                    providerThreadTurns: sourceTurns,
-                  });
-            if (beforeEntry === undefined) {
-              return yield* protocolError("Prime fork boundary has no captured session-tree entry");
+            if (
+              target !== undefined &&
+              primeDiscardedUserEntries(sourceTurns, target.ordinal) === undefined
+            ) {
+              return yield* protocolError(
+                "Prime fork source has a turn with no recorded session entries",
+              );
             }
             // CLI --fork uses Prime's own session format and sets the destination cwd. RPC
             // switch_session/clone alone would retain the source cwd.
@@ -3468,13 +3503,28 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                   Effect.ignore,
                   Effect.forkScoped,
                 );
-                if (beforeEntry !== null) {
-                  const result = yield* forkConnection.request({
-                    type: "fork",
-                    entryId: beforeEntry,
+                if (target !== undefined) {
+                  const forkMessages = primeForkMessages(
+                    yield* forkConnection.request({ type: "get_fork_messages" }),
+                  );
+                  if (forkMessages === undefined)
+                    return yield* protocolError("Prime returned malformed fork messages");
+                  // The source's projection still lists turns a rollback discarded.
+                  const boundary = primeForkBoundary({
+                    messages: forkMessages,
+                    turns: sourceTurns,
+                    boundaryOrdinal: target.ordinal,
+                    skipUnmatched: true,
                   });
-                  if (recordField(result, "cancelled") === true) {
-                    return yield* protocolError("A Prime extension cancelled the session fork");
+                  if (boundary.type === "error") return yield* protocolError(boundary.message);
+                  if (boundary.type === "fork") {
+                    const result = yield* forkConnection.request({
+                      type: "fork",
+                      entryId: boundary.entryId,
+                    });
+                    if (recordField(result, "cancelled") === true) {
+                      return yield* protocolError("A Prime extension cancelled the session fork");
+                    }
                   }
                 }
                 const state = yield* forkConnection.request({ type: "get_state" });
@@ -3535,25 +3585,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
   });
 });
 
-/**
- * Turns without a ref left nothing on the active branch, so the boundary is the first discarded
- * turn that has one. Returns `null` when no such turn follows the target (nothing to discard) and
- * `undefined` when the boundary turn has no strong entry ref.
- */
-function primeRollbackForkEntry(input: {
-  readonly target:
+function rollbackBoundaryOrdinal(
+  target:
     | { readonly type: "thread_start" }
-    | { readonly type: "provider_turn"; readonly providerTurn: OrchestrationV2ProviderTurn };
-  readonly providerThreadTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;
-}): string | null | undefined {
-  const boundaryOrdinal =
-    input.target.type === "thread_start" ? 0 : input.target.providerTurn.ordinal;
-  const ref = input.providerThreadTurns
-    .filter((turn) => turn.ordinal > boundaryOrdinal && turn.nativeTurnRef !== null)
-    .sort((a, b) => a.ordinal - b.ordinal)[0]?.nativeTurnRef;
-  if (ref == null) return null;
-  if (ref.strength !== "strong" || ref.nativeId === null) return undefined;
-  return ref.nativeId;
+    | { readonly type: "provider_turn"; readonly providerTurn: OrchestrationV2ProviderTurn },
+): number {
+  return target.type === "thread_start" ? 0 : target.providerTurn.ordinal;
 }
 
 function primeSubagentOutput(result: unknown): string {

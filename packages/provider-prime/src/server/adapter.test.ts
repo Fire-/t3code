@@ -49,7 +49,13 @@ import {
   PRIME_PROVIDER,
   type PrimeAdapterV2Options,
 } from "./adapter.ts";
-import { makePrimeRpcConnection, type PrimeRpcRecord } from "./rpc.ts";
+import {
+  makePrimeRpcConnection,
+  primeRecordField,
+  primeRecordString,
+  type PrimeRpcRecord,
+} from "./rpc.ts";
+import { primeContentText, primeUserEntriesFingerprint, primeUserEntryHash } from "./events.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 import { turnItemOutputText } from "../../../client-runtime/src/work-log/itemDetail.ts";
 
@@ -141,6 +147,13 @@ interface FakePrime {
     jobs: ReadonlyArray<unknown>,
     heartbeats: ReadonlyArray<unknown>,
   ) => void;
+  /**
+   * Replaces the session's user entries. Emitted user `message_end`s append
+   * to them, as Prime persists each one; `get_fork_messages` lists them and
+   * `fork` cuts them before its entry and switches to a new session file
+   * (core/agent-session-runtime.ts fork).
+   */
+  readonly setForkMessages: (messages: ReadonlyArray<{ entryId: string; text: string }>) => void;
 }
 interface FakeSessionActions {
   readonly queuedCount: number;
@@ -216,6 +229,28 @@ const recordedIdleState = (sessionFile: string) => ({
   sessionActions: { queuedCount: 0, steering: [], followUps: [] },
   goal: { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 },
 });
+/** A settled turn as the adapter records it: synthetic weak ref plus the user entries it added. */
+const recordedTurn = (
+  providerThreadId: ProviderThreadId,
+  ordinal: number,
+  texts: ReadonlyArray<string>,
+): OrchestrationV2ProviderTurn => ({
+  id: ProviderTurnId.make(`turn-${ordinal}`),
+  providerThreadId,
+  nodeId: NodeId.make(`node-${ordinal}`),
+  runAttemptId: null,
+  nativeTurnRef: {
+    driver: PRIME_PROVIDER,
+    nativeId: `${providerThreadId}:attempt:${ordinal}`,
+    strength: "weak",
+    fingerprint: primeUserEntriesFingerprint(texts.map(primeUserEntryHash)),
+  },
+  ordinal,
+  status: "completed",
+  startedAt: null,
+  completedAt: null,
+});
+
 const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
   const exitCode = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
@@ -241,12 +276,19 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   let scheduledJobs: ReadonlyArray<unknown> = [];
   let heartbeatJobs: ReadonlyArray<unknown> = [];
   let stdinBuffer = "";
+  let forkMessages: Array<{ entryId: string; text: string }> = [];
+  let nextEntry = 0;
   // Prime 1.0.0 has no get_entries (modes/rpc/rpc-mode.ts default branch).
   const unknownCommands = new Set<string>(["get_entries"]);
   const commandFailures = new Map<string, string>();
 
   const emit = (record: PrimeRpcRecord, chunkBytes?: number) =>
     Effect.gen(function* () {
+      const message = record["message"];
+      if (record["type"] === "message_end" && primeRecordString(message, "role") === "user") {
+        const text = primeContentText(primeRecordField(message, "content"));
+        if (text.length > 0) forkMessages.push({ entryId: `entry-${++nextEntry}`, text });
+      }
       const bytes = new TextEncoder().encode(`${encodeJsonLine(record)}\n`);
       const size = chunkBytes ?? bytes.byteLength;
       for (let offset = 0; offset < bytes.byteLength; offset += size) {
@@ -320,8 +362,16 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
-      case "fork":
-        return { ...base, data: { text: "Hello prime-agent", cancelled: false } };
+      case "get_fork_messages":
+        return { ...base, data: { messages: [...forkMessages] } };
+      case "fork": {
+        const index = forkMessages.findIndex((entry) => entry.entryId === record["entryId"]);
+        if (index === -1) return { ...base, success: false, error: "Invalid entry ID for forking" };
+        const text = forkMessages[index]!.text;
+        forkMessages = forkMessages.slice(0, index);
+        sessionFile = `/fake/fork-${++sessionGeneration}.jsonl`;
+        return { ...base, data: { text, cancelled: false } };
+      }
       case "list_schedules":
         return { ...base, data: { jobs: scheduledJobs } };
       case "list_heartbeats":
@@ -481,6 +531,9 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
     setBackgroundJobs: (jobs, heartbeats) => {
       scheduledJobs = jobs;
       heartbeatJobs = heartbeats;
+    },
+    setForkMessages: (messages) => {
+      forkMessages = [...messages];
     },
   } satisfies FakePrime;
 });
@@ -719,6 +772,7 @@ describe("PrimeAdapterV2", () => {
           modelSelection: modelSelection("default"),
           runtimePolicy,
         });
+        fake.setForkMessages([{ entryId: "user-before-wake", text: "before wake" }]);
         fake.deferNextLifecycle("fork");
         const rollingBack = yield* runtime
           .rollbackThread({
@@ -728,26 +782,11 @@ describe("PrimeAdapterV2", () => {
               checkpointId: CheckpointId.make("checkpoint-start"),
               appRunOrdinal: 0,
             },
-            providerThreadTurns: [
-              {
-                id: ProviderTurnId.make("previous-turn"),
-                providerThreadId: providerThread.id,
-                nodeId: NodeId.make("previous-node"),
-                runAttemptId: null,
-                nativeTurnRef: {
-                  driver: PRIME_PROVIDER,
-                  nativeId: "user-before-wake",
-                  strength: "strong",
-                },
-                ordinal: 1,
-                status: "completed",
-                startedAt: providerThread.createdAt,
-                completedAt: providerThread.createdAt,
-              },
-            ],
+            providerThreadTurns: [recordedTurn(providerThread.id, 1, ["before wake"])],
           })
           .pipe(Effect.result, Effect.forkScoped);
         const fork = yield* fake.takeRequest("fork");
+        assert.equal(fork["entryId"], "user-before-wake");
         const overlappingTurn = yield* startTurn(runtime, providerThread).pipe(Effect.result);
         assert.equal(overlappingTurn._tag, "Failure");
         const overlappingRegistration = yield* runtime
@@ -967,23 +1006,7 @@ describe("PrimeAdapterV2", () => {
             checkpointId: CheckpointId.make("checkpoint-start"),
             appRunOrdinal: 0,
           },
-          providerThreadTurns: [
-            {
-              id: ProviderTurnId.make("previous-turn"),
-              providerThreadId: providerThread.id,
-              nodeId: NodeId.make("previous-node"),
-              runAttemptId: null,
-              nativeTurnRef: {
-                driver: PRIME_PROVIDER,
-                nativeId: "user-before-wake",
-                strength: "strong",
-              },
-              ordinal: 1,
-              status: "completed",
-              startedAt: providerThread.createdAt,
-              completedAt: providerThread.createdAt,
-            },
-          ],
+          providerThreadTurns: [recordedTurn(providerThread.id, 1, ["before wake"])],
         })
         .pipe(Effect.result);
       assert.equal(
@@ -2248,82 +2271,95 @@ describe("PrimeAdapterV2", () => {
   );
 
   it.effect.each([
-    { historical: false, label: "the latest turn" },
-    { historical: true, label: "a historical turn" },
-  ])("natively forks $label into an independent session", ({ historical }) =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePrime;
-      const forkFake = yield* makeFakePrime;
-      const forkFile = "/fake/forked.jsonl";
-      const { runtime, takeEvent } = yield* openRuntime(
-        fake,
-        "default",
-        THREAD_ID,
-        SESSION_ID,
-        forkFake,
-      );
-      const source = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      const turn = (ordinal: number): OrchestrationV2ProviderTurn => ({
-        id: ProviderTurnId.make(`turn-${ordinal}`),
-        providerThreadId: source.id,
-        nodeId: NodeId.make(`node-${ordinal}`),
-        runAttemptId: null,
-        nativeTurnRef: { driver: PRIME_PROVIDER, nativeId: `u${ordinal}`, strength: "strong" },
-        ordinal,
-        status: "completed",
-        startedAt: null,
-        completedAt: null,
-      });
-      forkFake.queueState({ sessionFile: forkFile });
-      fake.queueState({ sessionFile: forkFile });
-      const target = ThreadId.make("fork-target");
-      const forked = yield* runtime.forkThread({
-        sourceProviderThread: source,
-        sourceProviderTurns: historical ? [turn(1), turn(2)] : [turn(1)],
-        providerTurnId: turn(1).id,
-        targetThreadId: target,
-      });
-      assert.equal(forked.appThreadId, target);
-      assert.equal(forked.nativeThreadRef?.nativeId, forkFile);
-      assert.notEqual(forked.id, source.id);
-      assert.equal(source.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
-      const args = forkFake.lastSpawn().args;
-      assert.equal(args[args.indexOf("--fork") + 1], FAKE_SESSION_FILE);
-      assert.include(args, "--no-extensions");
-      assert.include(args, "--no-tools");
-      assert.notInclude(args, "--no-session");
-      assert.deepEqual(
-        forkFake
-          .allRequests()
-          .filter((request) => request.type === "fork")
-          .map((request) => request.entryId),
-        historical ? ["u2"] : [],
-      );
-      assert.isFalse(
-        fake.allRequests().some((request) => request.type === "fork" || request.type === "clone"),
-      );
-      const adopted = { ...forked, id: ProviderThreadId.make("pending-fork-row") };
-      yield* startTurn(runtime, adopted, "default", [], "Continue", undefined, 1, target);
-      yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_end", messages: [] });
-      const updated = yield* takeEvent(
-        (event) =>
-          event.type === "provider_thread.updated" && event.providerThread.appThreadId === target,
-      );
-      assert.isTrue(
-        updated.type === "provider_thread.updated" && updated.providerThread.id === adopted.id,
-      );
-      yield* takeEvent((event) => event.type === "turn.terminal");
-      yield* runtime.resumeThread({ providerThread: adopted });
-      assert.equal(
-        fake.allRequests().findLast((request) => request.type === "switch_session")?.sessionPath,
-        forkFile,
-      );
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    {
+      label: "the latest turn",
+      turns: [["one"]],
+      sourceEntries: ["one"],
+      expectedForks: [],
+    },
+    {
+      label: "a historical turn whose successor was steered",
+      turns: [["one"], ["two", "steer"]],
+      sourceEntries: ["one", "two", "steer"],
+      expectedForks: ["entry-2"],
+    },
+    {
+      label: "a turn followed by a rolled-back turn",
+      turns: [["one"], ["rolled back"], ["three"]],
+      sourceEntries: ["one", "three"],
+      expectedForks: ["entry-2"],
+    },
+  ])(
+    "natively forks $label into an independent session",
+    ({ turns, sourceEntries, expectedForks }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const forkFake = yield* makeFakePrime;
+        const forkFile = "/fake/forked.jsonl";
+        const { runtime, takeEvent } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          forkFake,
+        );
+        const source = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const sourceTurns = turns.map((texts, index) => recordedTurn(source.id, index + 1, texts));
+        // `--fork` copies the source session's entries with their ids.
+        forkFake.setForkMessages(
+          sourceEntries.map((text, index) => ({ entryId: `entry-${index + 1}`, text })),
+        );
+        forkFake.queueState({ sessionFile: forkFile });
+        fake.queueState({ sessionFile: forkFile });
+        const target = ThreadId.make("fork-target");
+        const forked = yield* runtime.forkThread({
+          sourceProviderThread: source,
+          sourceProviderTurns: sourceTurns,
+          providerTurnId: sourceTurns[0]!.id,
+          targetThreadId: target,
+        });
+        assert.equal(forked.appThreadId, target);
+        assert.equal(forked.nativeThreadRef?.nativeId, forkFile);
+        assert.notEqual(forked.id, source.id);
+        assert.equal(source.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+        const args = forkFake.lastSpawn().args;
+        assert.equal(args[args.indexOf("--fork") + 1], FAKE_SESSION_FILE);
+        assert.include(args, "--no-extensions");
+        assert.include(args, "--no-tools");
+        assert.notInclude(args, "--no-session");
+        assert.deepEqual(
+          forkFake
+            .allRequests()
+            .filter((request) => request.type === "fork")
+            .map((request) => request.entryId),
+          expectedForks,
+        );
+        assert.include(forkFake.commandLog(), "get_fork_messages");
+        assert.isFalse(
+          fake.allRequests().some((request) => request.type === "fork" || request.type === "clone"),
+        );
+        const adopted = { ...forked, id: ProviderThreadId.make("pending-fork-row") };
+        yield* startTurn(runtime, adopted, "default", [], "Continue", undefined, 1, target);
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        const updated = yield* takeEvent(
+          (event) =>
+            event.type === "provider_thread.updated" && event.providerThread.appThreadId === target,
+        );
+        assert.isTrue(
+          updated.type === "provider_thread.updated" && updated.providerThread.id === adopted.id,
+        );
+        yield* takeEvent((event) => event.type === "turn.terminal");
+        yield* runtime.resumeThread({ providerThread: adopted });
+        assert.equal(
+          fake.allRequests().findLast((request) => request.type === "switch_session")?.sessionPath,
+          forkFile,
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("presents explicitly namespaced MCP extension tools", () =>
@@ -2925,7 +2961,7 @@ describe("PrimeAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("rolls back past turns that left nothing in the session tree", () =>
+  it.effect("rolls back past turns that added no user entries to the session", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePrime;
       const { runtime } = yield* openRuntime(fake);
@@ -2933,20 +2969,6 @@ describe("PrimeAdapterV2", () => {
         threadId: THREAD_ID,
         modelSelection: modelSelection("default"),
         runtimePolicy,
-      });
-      const turn = (ordinal: number, entryId: string | null): OrchestrationV2ProviderTurn => ({
-        id: ProviderTurnId.make(`turn-${ordinal}`),
-        providerThreadId: providerThread.id,
-        nodeId: NodeId.make(`node-${ordinal}`),
-        runAttemptId: null,
-        nativeTurnRef:
-          entryId === null
-            ? null
-            : { driver: PRIME_PROVIDER, nativeId: entryId, strength: "strong" },
-        ordinal,
-        status: "completed",
-        startedAt: null,
-        completedAt: null,
       });
       const rollBackToFirst = (turns: ReadonlyArray<OrchestrationV2ProviderTurn>) =>
         runtime.rollbackThread({
@@ -2965,10 +2987,148 @@ describe("PrimeAdapterV2", () => {
           .filter((request) => request.type === "fork")
           .map((request) => request.entryId);
 
-      yield* rollBackToFirst([turn(1, "u1"), turn(2, null)]);
+      fake.setForkMessages([{ entryId: "u1", text: "one" }]);
+      yield* rollBackToFirst([
+        recordedTurn(providerThread.id, 1, ["one"]),
+        recordedTurn(providerThread.id, 2, []),
+      ]);
       assert.deepEqual(forkedEntries(), []);
-      yield* rollBackToFirst([turn(1, "u1"), turn(2, null), turn(3, "u3")]);
+      assert.notInclude(fake.commandLog(), "get_fork_messages");
+
+      fake.setForkMessages([
+        { entryId: "u1", text: "one" },
+        { entryId: "u3", text: "three" },
+      ]);
+      const rolledBack = yield* rollBackToFirst([
+        recordedTurn(providerThread.id, 1, ["one"]),
+        recordedTurn(providerThread.id, 2, []),
+        recordedTurn(providerThread.id, 3, ["three"]),
+      ]);
       assert.deepEqual(forkedEntries(), ["u3"]);
+      assert.equal(rolledBack.providerThread.nativeThreadRef?.nativeId, "/fake/fork-1.jsonl");
+      assert.isNull(rolledBack.providerThread.nativeConversationHeadRef);
+      assert.notInclude(fake.commandLog(), "get_entries");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("rolls back a live thread to before the discarded turn's prompt, steer included", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePrime;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const settled: Array<OrchestrationV2ProviderTurn> = [];
+      for (const [runOrdinal, texts] of [
+        [1, ["first prompt"]],
+        [2, ["second prompt", "second steer"]],
+      ] as const) {
+        yield* startTurn(runtime, providerThread, "default", [], texts[0], undefined, runOrdinal);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "response", command: "prompt", success: true });
+        yield* fake.emit({ type: "agent_start" });
+        for (const text of texts) {
+          yield* fake.emit({
+            type: "message_end",
+            message: { role: "user", content: [{ type: "text", text }] },
+          });
+        }
+        yield* emitCustomMessage(fake, {
+          role: "custom",
+          customType: "harness_digest",
+          content: "not a user entry",
+          display: false,
+        });
+        yield* fake.emit(agentEnd());
+        const terminal = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+        );
+        if (terminal.type === "provider_turn.updated") settled.push(terminal.providerTurn);
+        yield* takeEvent((event) => event.type === "turn.terminal");
+      }
+      assert.deepEqual(
+        settled.map((turn) => [turn.nativeTurnRef?.strength, turn.nativeTurnRef?.fingerprint]),
+        [
+          ["weak", primeUserEntriesFingerprint([primeUserEntryHash("first prompt")])],
+          [
+            "weak",
+            primeUserEntriesFingerprint(["second prompt", "second steer"].map(primeUserEntryHash)),
+          ],
+        ],
+      );
+      const rolledBack = yield* runtime.rollbackThread({
+        providerThread,
+        target: {
+          type: "provider_turn",
+          checkpointId: CheckpointId.make("checkpoint-1"),
+          appRunOrdinal: 1,
+          providerTurn: settled[0]!,
+        },
+        providerThreadTurns: settled,
+      });
+      assert.deepEqual(
+        fake
+          .allRequests()
+          .filter((request) => request.type === "fork")
+          .map((request) => request.entryId),
+        ["entry-2"],
+      );
+      assert.equal(rolledBack.providerThread.nativeThreadRef?.nativeId, "/fake/fork-1.jsonl");
+      const listed = yield* fake.takeRequest("get_fork_messages");
+      assert.isString(listed["id"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      label: "the session no longer holds the discarded turn's entries",
+      second: recordedTurn(ProviderThreadId.make("unused"), 2, ["two"]),
+      entries: [
+        { entryId: "u1", text: "one" },
+        { entryId: "u2", text: "something else" },
+      ],
+      listsEntries: true,
+    },
+    {
+      label: "a discarded turn has no recorded user entries",
+      second: {
+        ...recordedTurn(ProviderThreadId.make("unused"), 2, ["two"]),
+        nativeTurnRef: { driver: PRIME_PROVIDER, nativeId: "legacy", strength: "weak" as const },
+      },
+      entries: [{ entryId: "u1", text: "one" }],
+      listsEntries: false,
+    },
+  ])("fails rollback without forking when $label", ({ second, entries, listsEntries }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePrime;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.setForkMessages(entries);
+      const first = recordedTurn(providerThread.id, 1, ["one"]);
+      const result = yield* runtime
+        .rollbackThread({
+          providerThread,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint-1"),
+            appRunOrdinal: 1,
+            providerTurn: first,
+          },
+          providerThreadTurns: [first, { ...second, providerThreadId: providerThread.id }],
+        })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.notInclude(fake.commandLog(), "fork");
+      assert.equal(fake.commandLog().includes("get_fork_messages"), listsEntries);
+      const resumed = yield* startTurn(runtime, providerThread).pipe(Effect.result);
+      assert.equal(resumed._tag, "Success", "a refused rollback leaves the session usable");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
