@@ -25,6 +25,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -1634,9 +1635,14 @@ describe("PrimeAdapterV2", () => {
       sessionId: "0001_abc",
     },
   ])(
-    "[VAL-LAUNCH-003] fails a resume still blocked after ~45 s, naming $sessionId and prime-agent stop",
-    ({ error, sessionId }) =>
-      Effect.gen(function* () {
+    "[VAL-LAUNCH-003] fails a resume still blocked after ~45 s with a typed lease conflict naming $sessionId and prime-agent stop, logged as a warning",
+    ({ error, sessionId }) => {
+      const warnings: Array<string> = [];
+      const logger = Logger.make(({ logLevel, message }) => {
+        if (logLevel !== "Warn") return;
+        warnings.push((Array.isArray(message) ? message : [message]).map(String).join(" "));
+      });
+      return Effect.gen(function* () {
         const fake = yield* makeFakePrime;
         const { runtime } = yield* openRuntime(fake);
         const providerThread = yield* runtime.ensureThread({
@@ -1653,14 +1659,31 @@ describe("PrimeAdapterV2", () => {
         assert.isAtLeast(elapsed, 45_000);
         assert.isBelow(elapsed, 50_000);
         assert.equal(failure._tag, "ProviderAdapterResumeThreadError");
-        const message = JSON.stringify(failure.cause);
+        const leaseConflict =
+          failure._tag === "ProviderAdapterResumeThreadError" ? failure.cause : undefined;
+        assert.instanceOf(leaseConflict, Error);
+        assert.equal(
+          (leaseConflict as { readonly _tag?: unknown })._tag,
+          "PrimeSessionLeaseConflictError",
+        );
+        const message = (leaseConflict as Error).message;
         assert.include(message, `Prime session ${sessionId} is still open`);
         assert.include(message, `prime-agent stop ${sessionId}`);
+        assert.isTrue(
+          warnings.some((warning) => warning.includes(message)),
+          `expected a warning log carrying "${message}"`,
+        );
         assert.isAbove(
           fake.allRequests().filter((request) => request.type === "switch_session").length,
           40,
         );
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(layerTest, Logger.layer([logger], { mergeWithExisting: false })),
+        ),
+      );
+    },
   );
 
   it.effect("[VAL-LAUNCH-003] does not retry other switch_session failures", () =>
@@ -4606,6 +4629,151 @@ describe("Prime settle engine", () => {
         assert.isTrue(seen.indexOf(first) < seen.indexOf(secondText!));
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  describe("settle probe failures", () => {
+    const GET_STATE_DETAIL = "session state store is locked";
+    type SettlePath = "agent-activity" | "command-only";
+    const SETTLE_PATHS: ReadonlyArray<SettlePath> = ["agent-activity", "command-only"];
+
+    /** Starts a turn whose settle trigger sends the first get_state, returning the log index before it. */
+    const triggerSettle = (
+      turn: Effect.Success<ReturnType<typeof openTurn>>,
+      path: SettlePath,
+      beforeTrigger: () => void,
+    ) =>
+      Effect.gen(function* () {
+        if (path === "command-only") {
+          // The deferred prompt ack of a command-only prompt is its settle trigger.
+          beforeTrigger();
+          return yield* turn.begin("/command-only");
+        }
+        const afterPrompt = yield* turn.begin();
+        yield* turn.fake.emit({ type: "agent_start" });
+        yield* replyText(turn.fake, "Reply before settle");
+        beforeTrigger();
+        yield* turn.fake.emit(agentEnd());
+        return afterPrompt;
+      });
+
+    const isCompletedTerminal = (event: AdapterEvent) =>
+      event.type === "turn.terminal" && event.status === "completed";
+
+    it.effect.each(SETTLE_PATHS)(
+      "[VAL-TURN-014] on the %s path a failed settle get_state is retried on the clock and completes once after an idle read",
+      (path) =>
+        Effect.gen(function* () {
+          const turn = yield* openTurn();
+          const { fake, seen, record } = turn;
+          const afterPrompt = yield* triggerSettle(turn, path, () => fake.failNextState());
+          yield* fake.takeRequest("get_state");
+          yield* pumpBarrier(fake, record, "after the failed probe");
+          assert.lengthOf(terminals(seen), 0, "a failed probe never ends the turn");
+
+          yield* advanceClockUntil(fake.takeRequest("get_state"));
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.equal(probesSince(fake, afterPrompt), 2);
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each(SETTLE_PATHS)(
+      "[VAL-TURN-014] on the %s path three failed settle get_state reads end the turn failed once with the get_state detail",
+      (path) =>
+        Effect.gen(function* () {
+          const turn = yield* openTurn();
+          const { fake, seen, record } = turn;
+          const afterPrompt = yield* triggerSettle(turn, path, () =>
+            fake.failCommand("get_state", GET_STATE_DETAIL),
+          );
+          yield* fake.takeRequest("get_state");
+          yield* advanceClockUntil(fake.takeRequest("get_state"));
+          yield* advanceClockUntil(fake.takeRequest("get_state"));
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
+          assert.include(
+            terminal.type === "turn.terminal" ? terminal.failure?.message : undefined,
+            GET_STATE_DETAIL,
+          );
+          assert.equal(probesSince(fake, afterPrompt), 3);
+          assert.lengthOf(terminals(seen), 1);
+          assert.isUndefined(seen.find(isCompletedTerminal));
+
+          yield* TestClock.adjust(Duration.minutes(1));
+          assert.equal(probesSince(fake, afterPrompt), 3, "retries stop after three attempts");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-014] a timed-out settle get_state never completes the turn and is retried on the clock",
+      () =>
+        Effect.gen(function* () {
+          const turn = yield* openTurn();
+          const { fake, seen, record } = turn;
+          const afterPrompt = yield* triggerSettle(turn, "agent-activity", () =>
+            fake.deferNextState(),
+          );
+          yield* fake.takeRequest("get_state");
+          yield* advanceClockUntil(fake.takeRequest("get_state"));
+          assert.isUndefined(seen.find(isCompletedTerminal));
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.equal(probesSince(fake, afterPrompt), 2);
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-014] a settle get_state that answers busy sends no timer-driven get_state and waits for the next transition",
+      () =>
+        Effect.gen(function* () {
+          const turn = yield* openTurn();
+          const { fake, seen, record } = turn;
+          const afterPrompt = yield* triggerSettle(turn, "agent-activity", () =>
+            fake.queueState({ isStreaming: true }),
+          );
+          yield* fake.takeRequest("get_state");
+          yield* pumpBarrier(fake, record, "after the busy probe");
+          yield* TestClock.adjust(Duration.minutes(1));
+          yield* pumpBarrier(fake, record, "a minute after the busy probe");
+          assert.equal(probesSince(fake, afterPrompt), 1);
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.equal(probesSince(fake, afterPrompt), 2);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-014] agent_start after a failed settle get_state cancels the pending retry",
+      () =>
+        Effect.gen(function* () {
+          const turn = yield* openTurn();
+          const { fake, seen, record } = turn;
+          const afterPrompt = yield* triggerSettle(turn, "agent-activity", () =>
+            fake.failNextState(),
+          );
+          yield* fake.takeRequest("get_state");
+          yield* pumpBarrier(fake, record, "after the failed probe");
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Second run");
+          yield* record(isAssistantText("Second run"));
+          yield* TestClock.adjust(Duration.minutes(1));
+          yield* pumpBarrier(fake, record, "a minute after agent_start");
+          assert.equal(probesSince(fake, afterPrompt), 1, "the stale retry was cancelled");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.equal(probesSince(fake, afterPrompt), 2);
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
   describe("turn control paths", () => {
     const FAIL_ME_ERROR =
       'Mistral API error (400): {"object":"error","message":"Invalid request payload: Expected at most one leading ThinkChunk, got 2","type":"invalid_request_invalid_args","code":"3051"}';

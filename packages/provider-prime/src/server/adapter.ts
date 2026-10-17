@@ -103,6 +103,8 @@ const PRIME_REQUEST_TIMEOUT_MS = 15_000;
 const PRIME_SESSION_TIMEOUT_MS = 60_000;
 const PRIME_UNSOLICITED_ACTIVITY_ERROR =
   "Prime started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.";
+// A failed or timed-out get_state is retried as error recovery, not polling:
+// a read that answers busy is never repeated on a timer.
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
 // Prime keeps a disconnected client's worker alive for a 30 s grace period, and
@@ -112,6 +114,19 @@ const PRIME_SESSION_ACTIVE_RETRY = Schedule.spaced(Duration.seconds(1)).pipe(
   Schedule.upTo({ duration: Duration.seconds(45) }),
 );
 const PRIME_SESSION_ALREADY_ACTIVE = /Session is already active in (.+?): /;
+
+/**
+ * ProviderAdapterV2Error is a closed union in provider-core, so this travels as
+ * the cause of ProviderAdapterResumeThreadError.
+ */
+class PrimeSessionLeaseConflictError extends Schema.TaggedError<PrimeSessionLeaseConflictError>()(
+  "PrimeSessionLeaseConflictError",
+  { sessionId: Schema.String },
+) {
+  override get message(): string {
+    return `Prime session ${this.sessionId} is still open in another prime-agent process. Stop it with \`prime-agent stop ${this.sessionId}\` and try again.`;
+  }
+}
 
 function primeSessionAlreadyActive(
   error: PrimeRpcError | PrimeRpcTimeoutError,
@@ -710,20 +725,18 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           }),
           Effect.catchTag(
             "PrimeRpcError",
-            (
-              error,
-            ): Effect.Effect<
-              never,
-              PrimeRpcError | ProviderAdapter.ProviderAdapterProtocolError
-            > => {
+            (error): Effect.Effect<never, PrimeRpcError | PrimeSessionLeaseConflictError> => {
               const active = primeSessionAlreadyActive(error);
               if (active === undefined) return Effect.fail(error);
-              const sessionId = active.activeSessionId ?? primeSessionIdFromPath(sessionPath);
-              return Effect.fail(
-                protocolError(
-                  `Prime session ${sessionId} is still open in another prime-agent process. Stop it with \`prime-agent stop ${sessionId}\` and try again.`,
-                ),
-              );
+              const conflict = new PrimeSessionLeaseConflictError({
+                sessionId: active.activeSessionId ?? primeSessionIdFromPath(sessionPath),
+              });
+              // ProviderTurnStartService logs only the error tag before it
+              // falls back to a fresh native session, so say why here.
+              return Effect.logWarning(conflict.message, {
+                providerSessionId: input.providerSessionId,
+                sessionId: conflict.sessionId,
+              }).pipe(Effect.andThen(Effect.fail(conflict)));
             },
           ),
         );
@@ -1637,14 +1650,14 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             // A failed probe still has to reach the pump. Dropping it would
             // leave a command-only turn active forever, because Prime never emits
             // agent events for one.
-            onFailure: () =>
+            onFailure: (error) =>
               Queue.offer(connection.events, {
                 type: "t3.settle_probe",
                 providerTurnId,
                 settleAfterAgentActivity,
                 settleProbeGeneration,
                 attempt,
-                probeFailed: true,
+                probeError: error.message,
               }),
           }),
           Effect.ignore,
@@ -2150,12 +2163,14 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               yield* Deferred.succeed(rollbackBarrier, undefined);
             return;
           }
-          case "t3.settle_probe": {
-            const data = event["data"];
-            const probeFailed = event["probeFailed"] === true;
+          case "t3.settle_probe":
+          case "t3.settle_probe_retry": {
             const settleAfterAgentActivity = event["settleAfterAgentActivity"] === true;
             const attempt = Math.max(1, Math.trunc(recordNumber(event, "attempt") ?? 1));
+            // Any transition that bumps the generation (agent_start, compaction,
+            // busy session actions) also cancels a pending retry here.
             if (
+              state === null ||
               turn === null ||
               turn.providerTurn.id !== event["providerTurnId"] ||
               turn.settleProbeGeneration !== event["settleProbeGeneration"] ||
@@ -2164,30 +2179,49 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             ) {
               return;
             }
-            if (probeFailed) {
-              if (!settleAfterAgentActivity) {
-                if (state !== null) yield* finalizeTurn(state);
-                return;
-              }
-              if (attempt < SETTLE_PROBE_MAX_ATTEMPTS) {
-                yield* Effect.sleep(SETTLE_PROBE_RETRY_DELAY).pipe(
-                  Effect.andThen(scheduleSettleProbe(turn, true, attempt + 1)),
-                  Effect.forkIn(scope),
-                );
-                return;
-              }
-              stopRequested = true;
-              yield* connection.terminate;
+            if (event["type"] === "t3.settle_probe_retry") {
+              yield* scheduleSettleProbe(turn, settleAfterAgentActivity, attempt);
               return;
             }
-            const probedState = decodePrimeState(data);
-            if (Option.isNone(probedState)) {
-              yield* Effect.logWarning("Prime get_state returned an unexpected shape.");
+            const probedState = decodePrimeState(event["data"]);
+            const probeError =
+              recordString(event, "probeError") ??
+              (Option.isNone(probedState) ? "Prime get_state returned an unexpected shape." : null);
+            if (probeError === null) {
+              if (Option.isSome(probedState) && isPrimeStateIdle(probedState.value)) {
+                yield* finalizeTurn(state);
+              }
               return;
             }
-            if (isPrimeStateIdle(probedState.value)) {
-              if (state !== null) yield* finalizeTurn(state);
+            yield* Effect.logWarning("Prime settle get_state failed.", {
+              attempt,
+              error: probeError,
+            });
+            if (attempt < SETTLE_PROBE_MAX_ATTEMPTS) {
+              yield* Effect.sleep(SETTLE_PROBE_RETRY_DELAY).pipe(
+                Effect.andThen(
+                  Queue.offer(connection.events, {
+                    type: "t3.settle_probe_retry",
+                    providerTurnId: event["providerTurnId"],
+                    settleAfterAgentActivity,
+                    settleProbeGeneration: event["settleProbeGeneration"],
+                    attempt: attempt + 1,
+                  }),
+                ),
+                Effect.forkIn(scope),
+              );
+              return;
             }
+            // Without an idle read nothing proves Prime finished, so the turn
+            // cannot complete; the session stays usable for the next turn.
+            const prior = turn.rejectedPromptFailure ?? turn.failure;
+            const probeFailure = `Prime did not confirm that the turn finished: get_state failed ${attempt} times. ${probeError}`;
+            turn.rejectedPromptFailure = null;
+            turn.failure = makeProviderFailure({
+              message: prior === null ? probeFailure : `${prior.message}\n\n${probeFailure}`,
+              class: "provider_error",
+            });
+            yield* finalizeTurn(state, false);
             return;
           }
           default: {
