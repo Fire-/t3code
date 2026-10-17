@@ -924,7 +924,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         continuation: PrimeAutonomousContinuation,
       ) {
         const emittedAt = yield* DateTime.now;
-        const nativeItemId = `autonomous-continuation:${turn.nextItemOrdinal}`;
+        const nativeItemId = `autonomous-continuation:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
         const messageId = idAllocator.derive.messageFromProviderItem({
           driver: PRIME_PROVIDER,
           nativeItemId,
@@ -1423,7 +1423,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           const message = recordString(event, "message") ?? "";
           if (turn === null || message.length === 0) return;
           const emittedAt = yield* DateTime.now;
-          const nativeItemId = `notify:${turn.nextItemOrdinal}`;
+          const nativeItemId = `notify:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
           yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
           yield* emit({
             type: "turn_item.updated",
@@ -1588,7 +1588,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           return;
         }
         const emittedAt = yield* DateTime.now;
-        const nativeItemId = `extension-error:${turn.nextItemOrdinal}`;
+        const nativeItemId = `extension-error:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
         const extensionName = primeExtensionDisplayName(recordString(event, "extensionPath"));
         const extensionEvent = recordString(event, "event");
         const detail = recordString(event, "error")?.trim();
@@ -1965,13 +1965,17 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               // autonomous action keeps the turn open.
               const notice = primeAutonomousNotice(message);
               if (notice !== undefined) {
-                yield* emitSystemNotice(turn, `autonomous:${turn.nextItemOrdinal}`, notice);
+                yield* emitSystemNotice(
+                  turn,
+                  `autonomous:${turn.providerTurn.id}:${turn.nextItemOrdinal}`,
+                  notice,
+                );
                 return;
               }
               const notification = primeHeartbeatNotification(message);
               if (notification !== undefined) {
                 const emittedAt = yield* DateTime.now;
-                const nativeItemId = `heartbeat:${turn.nextItemOrdinal}`;
+                const nativeItemId = `heartbeat:${turn.providerTurn.id}:${turn.nextItemOrdinal}`;
                 yield* emitItemNode(
                   turn,
                   nativeItemId,

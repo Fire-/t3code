@@ -7283,6 +7283,133 @@ describe("Prime settle engine", () => {
           assert.lengthOf(continuationItems(seen), 1);
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
+
+    it.effect(
+      "[VAL-AUTO-001][VAL-AUTO-003] two threads whose turns share a local ordinal keep distinct autonomous notice, continuation, heartbeat, notify, and extension-error items",
+      () =>
+        Effect.gen(function* () {
+          /** Each thread runs its first turn, so both start at the same local item ordinal. */
+          const runThread = Effect.fnUntraced(function* (index: number) {
+            const fake = yield* makeFakePrime;
+            fake.queueState({
+              sessionFile: `/fake/.prime/agent/sessions/--workspace--/000${index}_thread.jsonl`,
+            });
+            const threadId = ThreadId.make(`thread-prime-test-${index}`);
+            const { runtime, takeEvent } = yield* openRuntime(
+              fake,
+              "default",
+              threadId,
+              ProviderSessionId.make(`provider-session-prime-test-${index}`),
+            );
+            const providerThread = yield* runtime.ensureThread({
+              threadId,
+              modelSelection: modelSelection("default"),
+              runtimePolicy,
+            });
+            const seen: Array<AdapterEvent> = [];
+            const record = (predicate: (event: AdapterEvent) => boolean) =>
+              takeEvent((event) => {
+                seen.push(event);
+                return predicate(event);
+              });
+            yield* startTurn(
+              runtime,
+              providerThread,
+              "default",
+              [],
+              PROMPT,
+              undefined,
+              1,
+              threadId,
+            );
+            yield* fake.takeRequest("prompt");
+            yield* fake.emit({ type: "response", command: "prompt", success: true });
+            const providerTurnId = yield* runningTurnId(record);
+            yield* fake.emit({ type: "agent_start" });
+            yield* emitNotice(fake, ["autonomous_gate_failed", `gate failed in thread ${index}`]);
+            yield* emitUserMessage(fake, `${PLAIN_CONTINUATION}\n\nthread ${index}`, true);
+            yield* emitCustomMessage(fake, {
+              role: "custom",
+              customType: "heartbeat_prompt",
+              content: `[heartbeat: */5 * * * * run#1]\n\nheartbeat in thread ${index}`,
+              display: true,
+              details: { jobId: `job-${index}`, schedule: "*/5 * * * *", status: "active" },
+            });
+            yield* fake.emit({
+              type: "extension_ui_request",
+              method: "notify",
+              message: `notify in thread ${index}`,
+            });
+            yield* fake.emit({
+              type: "extension_error",
+              extensionPath: "/ext.ts",
+              event: "tool_call",
+              error: `extension failed in thread ${index}`,
+            });
+            yield* fake.emit(agentEnd());
+            yield* record((event) => event.type === "turn.terminal");
+            return { threadId, providerThread, providerTurnId, seen };
+          });
+
+          const first = yield* runThread(1);
+          const second = yield* runThread(2);
+          assert.notEqual(first.providerThread.id, second.providerThread.id);
+          assert.notEqual(first.providerTurnId, second.providerTurnId);
+
+          const syntheticItems = (seen: ReadonlyArray<AdapterEvent>) =>
+            latestItems(seen).filter(
+              (item) =>
+                item.type === "system_notice" ||
+                item.type === "user_message" ||
+                item.type === "notification" ||
+                item.type === "error" ||
+                (item.type === "dynamic_tool" && item.toolName === "notify"),
+            );
+          const nodeIds = (seen: ReadonlyArray<AdapterEvent>) =>
+            seen.flatMap((event) => (event.type === "node.updated" ? [event.node.id] : []));
+          const messageIds = (seen: ReadonlyArray<AdapterEvent>) =>
+            seen.flatMap((event) => (event.type === "message.updated" ? [event.message.id] : []));
+
+          for (const thread of [first, second]) {
+            const items = syntheticItems(thread.seen);
+            assert.sameMembers(
+              items.map((item) => item.type),
+              ["system_notice", "user_message", "notification", "dynamic_tool", "error"],
+            );
+            assert.lengthOf(messageIds(thread.seen), 1);
+          }
+
+          const disjoint = (left: ReadonlyArray<string>, right: ReadonlyArray<string>) =>
+            assert.isEmpty(
+              left.filter((id) => right.includes(id)),
+              "derived ids collide across threads",
+            );
+          disjoint(
+            syntheticItems(first.seen).map((item) => item.id),
+            syntheticItems(second.seen).map((item) => item.id),
+          );
+          disjoint(nodeIds(first.seen), nodeIds(second.seen));
+          disjoint(messageIds(first.seen), messageIds(second.seen));
+
+          // ProjectionStore upserts by id, so replaying both threads into one
+          // keyed store shows whether the second thread replaces the first's rows.
+          const projected = new Map<string, { threadId: string; text: string }>();
+          for (const thread of [first, second]) {
+            for (const item of syntheticItems(thread.seen)) {
+              projected.set(item.id, { threadId: item.threadId, text: JSON.stringify(item) });
+            }
+          }
+          for (const thread of [first, second]) {
+            const index = thread === first ? 1 : 2;
+            for (const item of syntheticItems(thread.seen)) {
+              const row = projected.get(item.id);
+              assert.equal(row?.threadId, thread.threadId);
+              assert.include(row?.text ?? "", `thread ${index}`);
+              assert.include(item.nativeItemRef?.nativeId ?? "", thread.providerTurnId);
+            }
+          }
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
   });
 });
 
