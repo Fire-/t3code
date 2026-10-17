@@ -862,6 +862,6 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         if (before === undefined) delete process.env.T3CODE_SESSION_TTL;
         else process.env.T3CODE_SESSION_TTL = before;
       }
-    }).pipe(Effect.provide(makeSessionStoreLayer())),
+    }).pipe(Effect.provide(layerSessionStore())),
   );
 });
