@@ -32,7 +32,7 @@ const mcpSession = {
 describe("prime-agent T3 MCP injection", () => {
   it("always adds the permission bridge and configures MCP when available", () => {
     const resolvedArgs = resolvePrimeLaunchArgs(
-      "--extension=/home/user/.prime/agent/extensions/demo.ts --session-dir=/tmp/prime-sessions --provider=anthropic --model=claude-sonnet --tools='' --name=-review --extension-flag=kept",
+      "--extension=/home/user/.prime/agent/extensions/demo.ts --session-dir=/tmp/prime-sessions --provider=anthropic --model=claude-sonnet --tools='' --goal-token-budget=5000 --extension-flag=kept",
     );
     assert.isTrue(resolvedArgs.ok);
     if (!resolvedArgs.ok) return;
@@ -56,10 +56,10 @@ describe("prime-agent T3 MCP injection", () => {
       "claude-sonnet",
       "--tools",
       "",
-      "--name",
-      "-review",
+      "--goal-token-budget",
+      "5000",
       "--extension-flag=kept",
-      "--extension",
+      "-e",
       "/tmp/cache/prime-t3-mcp-extension.ts",
     ]);
     assert.notInclude(launch.args, "--no-extensions");
@@ -85,7 +85,7 @@ describe("prime-agent T3 MCP injection", () => {
     assert.deepEqual(permissionOnly.args, [
       "--mode",
       "rpc",
-      "--extension",
+      "-e",
       "/tmp/cache/prime-t3-mcp-extension.ts",
     ]);
     assert.isFalse(permissionOnly.hasT3Mcp);
@@ -142,9 +142,79 @@ describe("prime-agent T3 MCP injection", () => {
       ok: false,
       message: "Prime launch argument '--mode' is controlled by T3 Code and cannot be overridden.",
     });
-    assert.deepInclude(resolvePrimeLaunchArgs("--session old.jsonl"), { ok: false });
+    assert.deepInclude(resolvePrimeLaunchArgs("--resume old.jsonl"), { ok: false });
     assert.deepInclude(resolvePrimeLaunchArgs("prompt prime-agent immediately"), { ok: false });
     assert.deepInclude(resolvePrimeLaunchArgs("--plan @instructions.md"), { ok: false });
+  });
+
+  it.each([
+    ["--mode text", "--mode"],
+    ["--resume /sessions/old.jsonl", "--resume"],
+    ["-r /sessions/old.jsonl", "-r"],
+    ["--resume=/sessions/old.jsonl", "--resume"],
+    ["--no-session", "--no-session"],
+    ["--fork /sessions/old.jsonl", "--fork"],
+    ["--continue", "--continue"],
+    ["--daemon-socket /tmp/private.sock", "--daemon-socket"],
+    ["--daemon-socket=/tmp/private.sock", "--daemon-socket"],
+    ["--cwd /elsewhere", "--cwd"],
+    ["--print hello", "--print"],
+    ["--export out.html", "--export"],
+  ])("[VAL-LAUNCH-001] rejects reserved launch argument %s", (launchArgs, reserved) => {
+    assert.deepInclude(resolvePrimeLaunchArgs(launchArgs), {
+      ok: false,
+      message: `Prime launch argument '${reserved}' is controlled by T3 Code and cannot be overridden.`,
+    });
+  });
+
+  it("[VAL-LAUNCH-001] passes Prime's own launch arguments through and never adds Pi-only flags", () => {
+    const resolved = resolvePrimeLaunchArgs(
+      "--offline --autonomous --autonomous-max-turns=4 --goal 'ship it' --skill review --thinking high",
+    );
+    assert.deepEqual(resolved, {
+      ok: true,
+      args: [
+        "--offline",
+        "--autonomous",
+        "--autonomous-max-turns",
+        "4",
+        "--goal",
+        "ship it",
+        "--skill",
+        "review",
+        "--thinking",
+        "high",
+      ],
+    });
+    if (!resolved.ok) return;
+    const launch = buildPrimeRpcLaunch({
+      launchArgs: resolved.args,
+      environment: {},
+      mcpSession,
+      extensionPath: "/tmp/cache/prime-t3-mcp-extension.ts",
+      runtimeMode: "full-access",
+    });
+    assert.deepEqual(launch.args.slice(0, 2), ["--mode", "rpc"]);
+    assert.deepEqual(launch.args.slice(-2), ["-e", "/tmp/cache/prime-t3-mcp-extension.ts"]);
+    for (const flag of [
+      "--session",
+      "--approve",
+      "--no-approve",
+      "--exclude-tools",
+      "--name",
+      "--tui-mode",
+      "--use-theme",
+      "--daemon-socket",
+      "--no-skills",
+      "--no-context-files",
+      "--no-extensions",
+    ]) {
+      assert.notInclude(launch.args, flag);
+    }
+    // Pi's short aliases for flags Prime lacks are not Prime flags.
+    for (const piOnly of ["-xt read", "-n review", "-a", "-na"]) {
+      assert.isFalse(resolvePrimeLaunchArgs(piOnly).ok, piOnly);
+    }
   });
 
   it("rejects --provider without --model, which Prime refuses at startup", () => {

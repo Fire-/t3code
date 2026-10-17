@@ -391,6 +391,90 @@ describe("Prime tool discovery permissions", () => {
   });
 });
 
+describe("Prime ipython permissions", () => {
+  type ToolCallHook = (
+    event: { toolName: string; input: unknown },
+    ctx: { ui: { confirm: (title: string) => Promise<boolean> } },
+  ) => Promise<{ block: true; reason: string } | undefined>;
+
+  const callTool = async (
+    runtimeMode: string,
+    toolName: string,
+    answer: boolean,
+    options: { readonly unreachable?: boolean } = {},
+  ) => {
+    const bridge = await loadMcpBridge({ runtimeMode, ...options });
+    const hook = bridge.handlers.get("tool_call") as unknown as ToolCallHook;
+    const confirmations: string[] = [];
+    const result = await hook(
+      { toolName, input: { code: "await bash('rm -rf build')" } },
+      {
+        ui: {
+          confirm: async (title) => {
+            confirmations.push(title);
+            return answer;
+          },
+        },
+      },
+    );
+    return { result, confirmations };
+  };
+
+  it.each(["approval-required", "auto-accept-edits"])(
+    "[VAL-LAUNCH-004] asks before running ipython in %s",
+    async (runtimeMode) => {
+      const declined = await callTool(runtimeMode, "ipython", false);
+      assert.deepEqual(declined.confirmations, ["Allow ipython?"]);
+      assert.deepEqual(declined.result, {
+        block: true,
+        reason: "ipython was declined in T3 Code.",
+      });
+      const approved = await callTool(runtimeMode, "ipython", true);
+      assert.deepEqual(approved.confirmations, ["Allow ipython?"]);
+      assert.isUndefined(approved.result);
+    },
+  );
+
+  it("[VAL-LAUNCH-004] runs ipython without asking in full-access", async () => {
+    const { result, confirmations } = await callTool("full-access", "ipython", false);
+    assert.isUndefined(result);
+    assert.deepEqual(confirmations, []);
+  });
+
+  it.each(["edit", "write"])(
+    "[VAL-LAUNCH-004] keeps %s as a file change that only approval-required asks about",
+    async (toolName) => {
+      const edits = await callTool("auto-accept-edits", toolName, false);
+      assert.isUndefined(edits.result);
+      assert.deepEqual(edits.confirmations, []);
+      const supervised = await callTool("approval-required", toolName, false);
+      assert.equal(supervised.result?.block, true);
+      assert.deepEqual(supervised.confirmations, [`Allow ${toolName}?`]);
+    },
+  );
+
+  it("[VAL-LAUNCH-004] keeps the session working when the T3 MCP server is unreachable", async () => {
+    const bridge = await loadMcpBridge({ runtimeMode: "approval-required", unreachable: true });
+    assert.equal(bridge.tools.length, 0);
+    const notices: Array<[string, string]> = [];
+    const context = {
+      model: { api: "anthropic-messages" },
+      ui: { notify: (message: string, level: string) => notices.push([message, level]) },
+    };
+    await bridge.handlers.get("session_start")!({ systemPrompt: "" }, context);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]![0], /^t3-code MCP unavailable: .*fetch failed$/);
+    assert.equal(notices[0]![1], "warning");
+    const prompt = await bridge.handlers.get("before_agent_start")!(
+      { systemPrompt: "Prime system prompt" },
+      context,
+    );
+    assert.isTrue(prompt.systemPrompt.startsWith("Prime system prompt"));
+    const gated = await callTool("approval-required", "ipython", false, { unreachable: true });
+    assert.deepEqual(gated.confirmations, ["Allow ipython?"]);
+  });
+});
+
 async function loadRequestHook(): Promise<RequestHook> {
   const handlers = new Map<string, RequestHook>();
   const source = NodeModule.stripTypeScriptTypes(

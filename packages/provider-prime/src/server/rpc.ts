@@ -68,6 +68,195 @@ export function parsePrimeModelSlug(slug: string): { provider: string; modelId: 
   return { provider: slug.slice(0, separator), modelId: slug.slice(separator + 1) };
 }
 
+// Prime-only shapes, from packages/coding-agent/src/core/agent-session.ts
+// (AgentSessionEvent), core/session-action-store.ts and core/goals.ts. Enum-like
+// fields stay plain strings so a new Prime value never turns a known frame into
+// an unknown one.
+export const PrimeSessionActionSnapshot = Schema.Struct({
+  queuedCount: Schema.Number,
+  steering: Schema.Array(Schema.Unknown),
+  followUps: Schema.Array(Schema.Unknown),
+  active: Schema.optionalKey(
+    Schema.Struct({
+      kind: Schema.String,
+      phase: Schema.String,
+      label: Schema.optionalKey(Schema.String),
+    }),
+  ),
+});
+export type PrimeSessionActionSnapshot = typeof PrimeSessionActionSnapshot.Type;
+
+export const PrimeGoalState = Schema.Struct({
+  active: Schema.Boolean,
+  status: Schema.String,
+  goalId: Schema.optionalKey(Schema.String),
+  objective: Schema.optionalKey(Schema.String),
+  tokenBudget: Schema.optionalKey(Schema.Number),
+  tokensUsed: Schema.Number,
+  timeUsedSeconds: Schema.Number,
+  continuationsUsed: Schema.Number,
+  lastReason: Schema.optionalKey(Schema.String),
+  lastError: Schema.optionalKey(Schema.String),
+});
+export type PrimeGoalState = typeof PrimeGoalState.Type;
+
+/** `get_state` data (modes/rpc/rpc-types.ts). Prime has no `pendingMessageCount`. */
+export const PrimeState = Schema.Struct({
+  model: Schema.optionalKey(Schema.Unknown),
+  thinkingLevel: Schema.optionalKey(Schema.String),
+  isStreaming: Schema.Boolean,
+  isCompacting: Schema.Boolean,
+  steeringMode: Schema.optionalKey(Schema.String),
+  followUpMode: Schema.optionalKey(Schema.String),
+  sessionFile: Schema.optionalKey(Schema.String),
+  sessionId: Schema.optionalKey(Schema.String),
+  sessionName: Schema.optionalKey(Schema.String),
+  autoCompactionEnabled: Schema.optionalKey(Schema.Boolean),
+  messageCount: Schema.optionalKey(Schema.Number),
+  sessionActions: Schema.optionalKey(PrimeSessionActionSnapshot),
+  goal: Schema.optionalKey(PrimeGoalState),
+});
+export type PrimeState = typeof PrimeState.Type;
+
+export const decodePrimeState = Schema.decodeUnknownOption(PrimeState);
+
+export function isPrimeStateIdle(state: PrimeState): boolean {
+  return (
+    !state.isStreaming &&
+    !state.isCompacting &&
+    state.sessionActions?.active === undefined &&
+    (state.sessionActions?.queuedCount ?? 0) === 0
+  );
+}
+
+const PrimeOnlyFrame = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("session_action_update"),
+    actions: PrimeSessionActionSnapshot,
+  }),
+  Schema.Struct({ type: Schema.Literal("goal_update"), goal: PrimeGoalState }),
+  Schema.Struct({
+    type: Schema.Literal("rlm_child_update"),
+    child: Schema.Struct({
+      id: Schema.String,
+      parentId: Schema.optionalKey(Schema.String),
+      activeSessionId: Schema.optionalKey(Schema.String),
+      sessionName: Schema.optionalKey(Schema.String),
+      label: Schema.String,
+      status: Schema.String,
+      sessionDir: Schema.optionalKey(Schema.String),
+      error: Schema.optionalKey(Schema.String),
+    }),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("compaction_start"),
+    reason: Schema.String,
+    customInstructions: Schema.optionalKey(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("compaction_end"),
+    reason: Schema.String,
+    result: Schema.optionalKey(Schema.Unknown),
+    aborted: Schema.Boolean,
+    willRetry: Schema.Boolean,
+    errorMessage: Schema.optionalKey(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("auto_retry_start"),
+    attempt: Schema.Number,
+    maxAttempts: Schema.Number,
+    delayMs: Schema.Number,
+    errorMessage: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("auto_retry_end"),
+    success: Schema.Boolean,
+    attempt: Schema.Number,
+    finalError: Schema.optionalKey(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("extension_error"),
+    extensionPath: Schema.optionalKey(Schema.String),
+    event: Schema.optionalKey(Schema.String),
+    error: Schema.String,
+  }),
+  Schema.Struct({ type: Schema.Literal("refine_complete"), result: Schema.Unknown }),
+  Schema.Struct({ type: Schema.Literal("refine_failed"), error: Schema.String }),
+  Schema.Struct({
+    type: Schema.Literals(["message_start", "message_end"]),
+    message: Schema.Struct({
+      role: Schema.Literal("custom"),
+      customType: Schema.String,
+      content: Schema.Unknown,
+      display: Schema.Boolean,
+      details: Schema.optionalKey(Schema.Unknown),
+    }),
+  }),
+]);
+export type PrimeOnlyFrame = typeof PrimeOnlyFrame.Type;
+const decodePrimeOnlyFrame = Schema.decodeUnknownOption(PrimeOnlyFrame);
+
+// Events Prime shares with Pi, plus Prime notices T3 does not map.
+const PRIME_PASSTHROUGH_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "agent_start",
+  "agent_end",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "response",
+  "extension_ui_request",
+  "session_info_changed",
+  "thinking_level_changed",
+  "service_tier_changed",
+  "auth_stale",
+  "rlm_progress_note",
+  "recap_update",
+  "ipython_sent_agent_message",
+  "bash_start",
+  "bash_output",
+  "bash_end",
+  "observed_session_event",
+  "observed_session_closed",
+]);
+
+export type PrimeEventFrame =
+  | { readonly _tag: "Prime"; readonly frame: PrimeOnlyFrame }
+  /**
+   * Prime answers unknown commands and reports post-acceptance prompt failures
+   * on the daemon path with a response that has no id (rpc-mode.ts,
+   * daemon-mode.ts), so it cannot be routed to a pending request.
+   */
+  | {
+      readonly _tag: "OrphanErrorResponse";
+      readonly command: string | undefined;
+      readonly error: string;
+    }
+  | { readonly _tag: "Passthrough"; readonly type: string }
+  | { readonly _tag: "Unknown"; readonly type: string | undefined };
+
+export function classifyPrimeEvent(record: PrimeRpcRecord): PrimeEventFrame {
+  const type = record["type"];
+  if (type === "response" && record["id"] === undefined && record["success"] === false) {
+    return {
+      _tag: "OrphanErrorResponse",
+      command: primeRecordString(record, "command"),
+      error: Predicate.isString(record["error"])
+        ? record["error"]
+        : summarizePrimeError(record["error"]),
+    };
+  }
+  const prime = decodePrimeOnlyFrame(record);
+  if (Option.isSome(prime)) return { _tag: "Prime", frame: prime.value };
+  if (Predicate.isString(type) && PRIME_PASSTHROUGH_EVENT_TYPES.has(type)) {
+    return { _tag: "Passthrough", type };
+  }
+  return { _tag: "Unknown", type: Predicate.isString(type) ? type : undefined };
+}
 export interface PrimeRpcSpawnOptions {
   readonly command: string;
   readonly args: ReadonlyArray<string>;

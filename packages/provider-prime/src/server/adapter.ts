@@ -32,6 +32,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -56,8 +57,13 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import {
+  classifyPrimeEvent,
+  decodePrimeState,
+  isPrimeStateIdle,
   makePrimeRpcConnection,
   parsePrimeModelSlug,
+  type PrimeRpcError,
+  type PrimeRpcTimeoutError,
   primeRecordField as recordField,
   primeRecordNumber as recordNumber,
   primeRecordString as recordString,
@@ -88,7 +94,27 @@ const PRIME_UNSOLICITED_ACTIVITY_ERROR =
   "Prime started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.";
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
+// Prime keeps a disconnected client's worker alive for a 30 s grace period, and
+// switch_session fails with SessionAlreadyActiveError (core/session-lease.ts)
+// until that worker releases the session lease.
+const PRIME_SESSION_ACTIVE_RETRY = Schedule.spaced(Duration.seconds(1)).pipe(
+  Schedule.upTo({ duration: Duration.seconds(45) }),
+);
+const PRIME_SESSION_ALREADY_ACTIVE = /Session is already active in (.+?): /;
 
+function primeSessionAlreadyActive(
+  error: PrimeRpcError | PrimeRpcTimeoutError,
+): { readonly activeSessionId: string | undefined } | undefined {
+  if (error._tag !== "PrimeRpcError") return undefined;
+  const match = error.detail?.match(PRIME_SESSION_ALREADY_ACTIVE);
+  if (match === null || match === undefined) return undefined;
+  return { activeSessionId: match[1] === "another process" ? undefined : match[1] };
+}
+
+function primeSessionIdFromPath(sessionPath: string): string {
+  const name = sessionPath.replace(/\\/g, "/").split("/").pop() ?? sessionPath;
+  return name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
+}
 const PrimeProviderCapabilitiesV2 = {
   runtimePolicy: { enforcement: "client-boundary" },
   sessions: {
@@ -652,6 +678,32 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               connection.terminate.pipe(Effect.andThen(Effect.fail(error))),
           }),
           Effect.onInterrupt(() => connection.terminate),
+        );
+
+      const resumeSession = (sessionPath: string) =>
+        lifecycleRequest({ type: "switch_session", sessionPath }).pipe(
+          Effect.retry({
+            schedule: PRIME_SESSION_ACTIVE_RETRY,
+            while: (error) => primeSessionAlreadyActive(error) !== undefined,
+          }),
+          Effect.catchTag(
+            "PrimeRpcError",
+            (
+              error,
+            ): Effect.Effect<
+              never,
+              PrimeRpcError | ProviderAdapter.ProviderAdapterProtocolError
+            > => {
+              const active = primeSessionAlreadyActive(error);
+              if (active === undefined) return Effect.fail(error);
+              const sessionId = active.activeSessionId ?? primeSessionIdFromPath(sessionPath);
+              return Effect.fail(
+                protocolError(
+                  `Prime session ${sessionId} is still open in another prime-agent process. Stop it with \`prime-agent stop ${sessionId}\` and try again.`,
+                ),
+              );
+            },
+          ),
         );
 
       const tokenUsageFromStats = (
@@ -2077,18 +2129,24 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               yield* connection.terminate;
               return;
             }
-            if (
-              recordField(data, "isStreaming") !== true &&
-              recordField(data, "isCompacting") !== true &&
-              (recordNumber(data, "pendingMessageCount") ?? 0) === 0
-            ) {
+            const probedState = decodePrimeState(data);
+            if (Option.isNone(probedState)) {
+              yield* Effect.logWarning("Prime get_state returned an unexpected shape.");
+              return;
+            }
+            if (isPrimeStateIdle(probedState.value)) {
               turn.settleWhenIdle = false;
               if (state !== null) yield* finalizeTurn(state);
             }
             return;
           }
-          default:
+          default: {
+            const frame = classifyPrimeEvent(event);
+            if (frame._tag === "Unknown") {
+              yield* Effect.logDebug("Ignoring unknown prime-agent event.", { type: frame.type });
+            }
             return;
+          }
         }
       });
 
@@ -2186,11 +2244,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           baselineModel = null;
           baselineThinking = null;
           contextWindow = null;
-          const result = yield* lifecycleRequest(
-            resumeId != null
-              ? { type: "switch_session", sessionPath: resumeId }
-              : { type: "new_session" },
-          );
+          const result = yield* resumeId != null
+            ? resumeSession(resumeId)
+            : lifecycleRequest({ type: "new_session" });
           if (recordField(result, "cancelled") === true) {
             return yield* protocolError("A Prime extension cancelled the session switch");
           }

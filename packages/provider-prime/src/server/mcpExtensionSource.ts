@@ -29,6 +29,8 @@ const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PRIME_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PRIME_MCP_EXTENSION_PATH_ENV)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
+// Prime's only built-in tool, ipython, can run shell commands and edit files
+// from one cell, so it must stay out of both sets and be confirmed like a command.
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PRIME_FILE_CHANGE_TOOLS)});
 

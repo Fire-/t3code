@@ -12,9 +12,14 @@ import {
   T3_PRIME_MCP_EXTENSION_PATH_ENV,
 } from "./mcpExtensionSource.ts";
 
+// Prime's flag parser: packages/coding-agent/src/cli/args.ts. T3 owns the
+// session (switch_session), the working directory (spawn cwd), and the daemon
+// (Prime's default one, so a user-chosen socket cannot strand sessions).
 const RESERVED_PRIME_LAUNCH_ARGUMENTS = new Set([
   "--continue",
   "-c",
+  "--cwd",
+  "--daemon-socket",
   "--export",
   "--fork",
   "--help",
@@ -26,8 +31,6 @@ const RESERVED_PRIME_LAUNCH_ARGUMENTS = new Set([
   "-p",
   "--resume",
   "-r",
-  "--session",
-  "--session-id",
   "--version",
   "-v",
 ]);
@@ -35,14 +38,19 @@ const RESERVED_PRIME_LAUNCH_ARGUMENTS = new Set([
 const PRIME_ARGUMENTS_WITH_VALUES = new Set([
   "--api-key",
   "--append-system-prompt",
-  "--exclude-tools",
-  "-xt",
+  "--autonomous-gate",
+  "--autonomous-gate-retries",
+  "--autonomous-gate-timeout-ms",
+  "--autonomous-max-continuations",
+  "--autonomous-max-tokens",
+  "--autonomous-max-turns",
+  "--autonomous-timeout-ms",
   "--extension",
   "-e",
+  "--goal",
+  "--goal-token-budget",
   "--model",
   "--models",
-  "--name",
-  "-n",
   "--prompt-template",
   "--provider",
   "--session-dir",
@@ -52,15 +60,10 @@ const PRIME_ARGUMENTS_WITH_VALUES = new Set([
   "--thinking",
   "--tools",
   "-t",
-  "--tui-mode",
-  "--use-theme",
 ]);
 
 const PRIME_ARGUMENTS_WITHOUT_VALUES = new Set([
-  "--approve",
-  "-a",
-  "--no-approve",
-  "-na",
+  "--autonomous",
   "--no-builtin-tools",
   "-nbt",
   "--no-context-files",
@@ -202,7 +205,7 @@ function withoutToolSelectionArgs(args: ReadonlyArray<string>): ReadonlyArray<st
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
-    if (arg === "--tools" || arg === "-t" || arg === "--exclude-tools" || arg === "-xt") {
+    if (arg === "--tools" || arg === "-t") {
       index += 1;
       continue;
     }
@@ -212,9 +215,7 @@ function withoutToolSelectionArgs(args: ReadonlyArray<string>): ReadonlyArray<st
       arg === "--no-builtin-tools" ||
       arg === "-nbt" ||
       arg.startsWith("--tools=") ||
-      arg.startsWith("-t=") ||
-      arg.startsWith("--exclude-tools=") ||
-      arg.startsWith("-xt=")
+      arg.startsWith("-t=")
     ) {
       continue;
     }
@@ -277,7 +278,7 @@ export function buildPrimeRpcLaunch(input: {
     input.extensionPath !== undefined &&
     !hasExplicitExtension(args, input.extensionPath)
   ) {
-    args.push("--extension", input.extensionPath);
+    args.push("-e", input.extensionPath);
   }
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Prime child reuse

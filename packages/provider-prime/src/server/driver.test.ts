@@ -135,7 +135,7 @@ it.layer(layerTest)("PrimeDriver workspace discovery", (it) => {
   it.effect("keeps each workspace's skills and commands separate from the machine catalog", () =>
     Effect.gen(function* () {
       const { spawner, launches } = yield* makePrimeSpawner();
-      const instance = yield* create({ launchArgs: '--approve --skill "extra skill"' }).pipe(
+      const instance = yield* create({ launchArgs: '--offline --skill "extra skill"' }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
       yield* instance.snapshot.refresh;
@@ -174,7 +174,7 @@ it.layer(layerTest)("PrimeDriver workspace discovery", (it) => {
       assert.equal(workspaceLaunch!.command, "custom-prime");
       assert.includeMembers(
         [...workspaceLaunch!.args],
-        ["--approve", "--skill", "extra skill", "--no-session"],
+        ["--offline", "--skill", "extra skill", "--no-session"],
       );
       assert.equal(workspaceLaunch!.options.env?.PRIME_AGENT_CODING_AGENT_DIR, "/isolated-prime");
     }).pipe(Effect.scoped),

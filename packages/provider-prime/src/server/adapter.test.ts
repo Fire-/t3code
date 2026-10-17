@@ -18,6 +18,7 @@ import {
   type OrchestrationV2ProviderTurn,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -101,12 +102,18 @@ interface FakePrime {
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv;
   };
+  readonly spawns: () => ReadonlyArray<{
+    readonly args: ReadonlyArray<string>;
+    readonly env: NodeJS.ProcessEnv;
+  }>;
+  /** Fails the next `count` switch_session requests with Prime's error text. */
+  readonly failSwitches: (count: number, error: string) => void;
 }
 
 /**
- * Pi 1.0.0's idle `get_state` reply, taken from Pi's `simple` replay fixture
- * (fixtures/simple/pi_transcript.ndjson) minus the model object. Pi omits
- * `model` when none is selected and `sessionName` until one is set.
+ * Prime's idle `get_state` reply as observed live (research/dependency-readiness.md),
+ * minus the model object. Prime omits `sessionName` until one is set and has
+ * no `pendingMessageCount`.
  */
 const recordedIdleState = (sessionFile: string) => ({
   thinkingLevel: "high",
@@ -118,9 +125,9 @@ const recordedIdleState = (sessionFile: string) => ({
   sessionId: "00000000-0000-4000-8000-000000000002",
   autoCompactionEnabled: true,
   messageCount: 0,
-  pendingMessageCount: 0,
+  sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+  goal: { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 },
 });
-
 const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
   const requests = yield* Queue.unbounded<PrimeRpcRecord>();
@@ -133,6 +140,8 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   let deferredStateRequest: PrimeRpcRecord | undefined;
   let failState = false;
   let vetoSwitch = false;
+  let switchFailures = 0;
+  let switchFailureError = "";
   let vetoNewSession = false;
   let deferredLifecycle: string | undefined;
   let sessionFile = FAKE_SESSION_FILE;
@@ -192,6 +201,10 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
         return { ...base, data: { cancelled } };
       }
       case "switch_session": {
+        if (switchFailures > 0) {
+          switchFailures -= 1;
+          return { ...base, success: false, error: switchFailureError };
+        }
         const cancelled = vetoSwitch;
         vetoSwitch = false;
         return { ...base, data: { cancelled } };
@@ -235,17 +248,15 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
       }
     });
 
-  let lastSpawn: { readonly args: ReadonlyArray<string>; readonly env: NodeJS.ProcessEnv } = {
-    args: [],
-    env: {},
-  };
+  const spawns: Array<{ readonly args: ReadonlyArray<string>; readonly env: NodeJS.ProcessEnv }> =
+    [];
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.sync(() => {
       if (ChildProcess.isStandardCommand(command)) {
-        lastSpawn = {
+        spawns.push({
           args: command.args,
           env: command.options.env ?? {},
-        };
+        });
       }
       return ChildProcessSpawner.makeHandle({
         pid: ChildProcessSpawner.ProcessId(FAKE_PID),
@@ -318,7 +329,12 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
     },
     queueStats: (data) => statsQueue.push(data),
     closeStdout: Queue.end(stdout),
-    lastSpawn: () => lastSpawn,
+    lastSpawn: () => spawns.at(-1) ?? { args: [], env: {} },
+    spawns: () => spawns,
+    failSwitches: (count, error) => {
+      switchFailures = count;
+      switchFailureError = error;
+    },
   } satisfies FakePrime;
 });
 
@@ -388,6 +404,13 @@ const openRuntime = Effect.fnUntraced(function* (
     });
   return { runtime, takeEvent };
 });
+
+/**
+ * Advances virtual time in 1 s steps until `effect` completes. A retry's sleep
+ * can register after any single adjustment, so one fixed adjust could miss it.
+ */
+const advanceClockUntil = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.raceFirst(effect, Effect.forever(TestClock.adjust(Duration.seconds(1))));
 
 const makeAppThread = Effect.fnUntraced(function* (model: string, threadId = THREAD_ID) {
   const now = yield* DateTime.now;
@@ -1343,32 +1366,273 @@ describe("PrimeAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("injects the T3 MCP extension and bearer when a session exists", () =>
+  it.effect(
+    "[VAL-LAUNCH-001] launches --mode rpc with the T3 bridge, its env, and no Pi-only or daemon flags",
+    () =>
+      Effect.gen(function* () {
+        yield* (yield* McpProviderSessions.McpProviderSessions).set({
+          environmentId: EnvironmentId.make("environment-prime-mcp"),
+          threadId: THREAD_ID,
+          providerSessionId: "mcp-session-prime",
+          providerInstanceId: PRIME_INSTANCE_ID,
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer secret-prime-token",
+          browserToolsAvailable: true,
+        });
+        const fake = yield* makeFakePrime;
+        yield* openRuntime(fake);
+        assert.equal(fake.spawns().length, 1);
+        const spawn = fake.lastSpawn();
+        assert.deepEqual(spawn.args.slice(0, 2), ["--mode", "rpc"]);
+        const extensions = spawn.args.flatMap((arg, index) =>
+          arg === "-e" ? [spawn.args[index + 1]] : [],
+        );
+        assert.equal(extensions.length, 1);
+        assert.isTrue(extensions[0]?.endsWith("prime-t3-mcp-extension.ts"));
+        for (const flag of [
+          "--session",
+          "--approve",
+          "--no-approve",
+          "--exclude-tools",
+          "--name",
+          "--tui-mode",
+          "--use-theme",
+          "--daemon-socket",
+          "--no-extensions",
+          "--no-skills",
+          "--no-context-files",
+          "--no-session",
+        ]) {
+          assert.notInclude(spawn.args, flag);
+        }
+        assert.equal(spawn.env.T3_MCP_URL, "http://127.0.0.1:43123/mcp");
+        assert.equal(spawn.env.T3_MCP_BEARER_TOKEN, "secret-prime-token");
+        assert.equal(spawn.env.T3_PRIME_RUNTIME_MODE, "full-access");
+        assert.equal(spawn.env.T3_PRIME_MCP_EXTENSION_PATH, extensions[0]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-LAUNCH-001] rejects reserved launch arguments before spawning and passes others through",
+    () =>
+      Effect.gen(function* () {
+        const rejected = yield* makeFakePrime;
+        const adapter = yield* makeAdapter(rejected, "--daemon-socket /tmp/other.sock");
+        const error = yield* adapter
+          .openSession({
+            threadId: THREAD_ID,
+            providerSessionId: SESSION_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          })
+          .pipe(Effect.flip);
+        assert.include(
+          JSON.stringify(error),
+          "Prime launch argument '--daemon-socket' is controlled by T3 Code and cannot be overridden.",
+        );
+        assert.equal(rejected.spawns().length, 0);
+
+        const accepted = yield* makeFakePrime;
+        const passthrough = yield* makeAdapter(accepted, "--offline --skill review --goal=ship");
+        yield* passthrough.openSession({
+          threadId: THREAD_ID,
+          providerSessionId: SESSION_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        assert.deepEqual(accepted.lastSpawn().args.slice(0, 8), [
+          "--mode",
+          "rpc",
+          "--offline",
+          "--skill",
+          "review",
+          "--goal",
+          "ship",
+          "-e",
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-LAUNCH-002] reopens a thread in a new process with switch_session and completes a turn",
+    () =>
+      Effect.gen(function* () {
+        const first = yield* makeFakePrime;
+        const providerThread = yield* Effect.gen(function* () {
+          const { runtime, takeEvent } = yield* openRuntime(first);
+          const created = yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          yield* startTurn(runtime, created);
+          yield* first.takeRequest("prompt");
+          yield* first.emit({ type: "agent_start" });
+          yield* first.emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "One" }],
+              stopReason: "stop",
+            },
+          });
+          yield* first.emit({ type: "agent_settled" });
+          const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          return created;
+        }).pipe(Effect.scoped);
+        assert.equal(providerThread.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+
+        const second = yield* makeFakePrime;
+        const { runtime, takeEvent } = yield* openRuntime(
+          second,
+          "default",
+          THREAD_ID,
+          ProviderSessionId.make("provider-session-prime-reopened"),
+        );
+        const resumed = yield* runtime.resumeThread({ providerThread });
+        const switched = yield* second.takeRequest("switch_session");
+        assert.equal(switched.sessionPath, FAKE_SESSION_FILE);
+        assert.equal(resumed.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+        assert.equal(resumed.id, providerThread.id);
+        assert.notInclude(second.lastSpawn().args, "--resume");
+        assert.isFalse(second.allRequests().some((request) => request.type === "new_session"));
+
+        yield* startTurn(runtime, resumed, "default", [], "Two", undefined, 2);
+        const prompt = yield* second.takeRequest("prompt");
+        assert.equal(prompt.message, "Two");
+        yield* second.emit({ type: "agent_start" });
+        yield* second.emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Two" }],
+            stopReason: "stop",
+          },
+        });
+        yield* second.emit({ type: "agent_settled" });
+        const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-LAUNCH-003] retries a resume while Prime reports the session already active, then opens",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.failSwitches(3, `Session is already active in prime-worker-7: ${FAKE_SESSION_FILE}`);
+        const startedAt = yield* Clock.currentTimeMillis;
+        const resumed = yield* advanceClockUntil(runtime.resumeThread({ providerThread }));
+        assert.isBelow((yield* Clock.currentTimeMillis) - startedAt, 45_000);
+        assert.equal(resumed.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+        assert.equal(
+          fake.allRequests().filter((request) => request.type === "switch_session").length,
+          4,
+        );
+        yield* startTurn(runtime, resumed);
+        yield* fake.takeRequest("prompt");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      error: `Session is already active in prime-worker-7: ${FAKE_SESSION_FILE}`,
+      sessionId: "prime-worker-7",
+    },
+    {
+      error: `Session is already active in another process: ${FAKE_SESSION_FILE}`,
+      sessionId: "0001_abc",
+    },
+  ])(
+    "[VAL-LAUNCH-003] fails a resume still blocked after ~45 s, naming $sessionId and prime-agent stop",
+    ({ error, sessionId }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.failSwitches(Number.POSITIVE_INFINITY, error);
+        const startedAt = yield* Clock.currentTimeMillis;
+        const failure = yield* advanceClockUntil(
+          runtime.resumeThread({ providerThread }).pipe(Effect.flip),
+        );
+        const elapsed = (yield* Clock.currentTimeMillis) - startedAt;
+        assert.isAtLeast(elapsed, 45_000);
+        assert.isBelow(elapsed, 50_000);
+        assert.equal(failure._tag, "ProviderAdapterResumeThreadError");
+        const message = JSON.stringify(failure.cause);
+        assert.include(message, `Prime session ${sessionId} is still open`);
+        assert.include(message, `prime-agent stop ${sessionId}`);
+        assert.isAbove(
+          fake.allRequests().filter((request) => request.type === "switch_session").length,
+          40,
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("[VAL-LAUNCH-003] does not retry other switch_session failures", () =>
     Effect.gen(function* () {
-      yield* (yield* McpProviderSessions.McpProviderSessions).set({
-        environmentId: EnvironmentId.make("environment-prime-mcp"),
-        threadId: THREAD_ID,
-        providerSessionId: "mcp-session-prime",
-        providerInstanceId: PRIME_INSTANCE_ID,
-        endpoint: "http://127.0.0.1:43123/mcp",
-        authorizationHeader: "Bearer secret-prime-token",
-        browserToolsAvailable: true,
-      });
       const fake = yield* makeFakePrime;
-      yield* openRuntime(fake);
-      const spawn = fake.lastSpawn();
-      assert.isTrue(spawn.args.includes("--extension"));
-      const extensions = spawn.args.flatMap((arg, index) =>
-        arg === "--extension" ? [spawn.args[index + 1]] : [],
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.failSwitches(1, "Session file not found");
+      const failure = yield* runtime.resumeThread({ providerThread }).pipe(Effect.flip);
+      assert.include(JSON.stringify(failure.cause), "Session file not found");
+      assert.equal(
+        fake.allRequests().filter((request) => request.type === "switch_session").length,
+        1,
       );
-      assert.isFalse(spawn.args.includes("--no-extensions"));
-      assert.isTrue(extensions.some((path) => path?.endsWith("prime-t3-mcp-extension.ts")));
-      assert.equal(spawn.env.T3_MCP_URL, "http://127.0.0.1:43123/mcp");
-      assert.equal(spawn.env.T3_MCP_BEARER_TOKEN, "secret-prime-token");
-      assert.equal(spawn.env.T3_PRIME_RUNTIME_MODE, "full-access");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("[VAL-LAUNCH-001] ignores unknown and unmapped Prime events during a turn", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePrime;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "future_prime_event", payload: { nested: true } });
+      yield* fake.emit({
+        type: "session_action_update",
+        actions: { queuedCount: 0, steering: [], followUps: [] },
+      });
+      yield* fake.emit({
+        type: "rlm_child_update",
+        child: { id: "child-1", label: "explore", status: "running", sessionDir: "/tmp/c" },
+      });
+      yield* fake.emit({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Done" }],
+          stopReason: "stop",
+        },
+      });
+      yield* fake.emit({ type: "agent_settled" });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
   it.effect("rejects a resume while a turn is active", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePrime;
@@ -2819,7 +3083,7 @@ describe("PrimeAdapterV2", () => {
       yield* takeEvent(
         (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
       );
-      fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
+      fake.queueState({ isStreaming: false, isCompacting: false });
       yield* fake.emit({
         type: "compaction_end",
         reason: "manual",
@@ -3848,7 +4112,7 @@ describe("PrimeAdapterV2", () => {
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
 
-      fake.queueState({ isStreaming: false, isCompacting: true, pendingMessageCount: 0 });
+      fake.queueState({ isStreaming: false, isCompacting: true });
       yield* fake.emit({ type: "agent_settled" });
       yield* fake.takeRequest("get_state");
       yield* fake.emit({ type: "compaction_start", reason: "manual" });
@@ -3856,7 +4120,7 @@ describe("PrimeAdapterV2", () => {
         (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
       );
 
-      fake.queueState({ isStreaming: true, isCompacting: false, pendingMessageCount: 0 });
+      fake.queueState({ isStreaming: true, isCompacting: false });
       yield* fake.emit({
         type: "compaction_end",
         reason: "manual",
@@ -3873,7 +4137,7 @@ describe("PrimeAdapterV2", () => {
       );
       yield* fake.takeRequest("get_state");
 
-      fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
+      fake.queueState({ isStreaming: false, isCompacting: false });
       yield* fake.emit({ type: "agent_settled" });
       yield* fake.takeRequest("get_state");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
@@ -3902,7 +4166,7 @@ describe("PrimeAdapterV2", () => {
         (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
       );
 
-      fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
+      fake.queueState({ isStreaming: false, isCompacting: false });
       yield* fake.emit({
         type: "compaction_end",
         reason: "manual",
@@ -3943,7 +4207,7 @@ describe("PrimeAdapterV2", () => {
       assert.isDefined(providerTurnId);
       yield* fake.emit({ type: "agent_start" });
 
-      fake.queueState({ isStreaming: false, isCompacting: true, pendingMessageCount: 0 });
+      fake.queueState({ isStreaming: false, isCompacting: true });
       yield* fake.emit({ type: "agent_settled" });
       yield* fake.takeRequest("get_state");
       yield* fake.emit({ type: "compaction_start", reason: "manual" });
@@ -3997,11 +4261,7 @@ describe("PrimeAdapterV2", () => {
         },
       });
       yield* fake.takeRequest("prompt");
-      yield* fake.resolveDeferredState({
-        isStreaming: false,
-        isCompacting: false,
-        pendingMessageCount: 0,
-      });
+      yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
 
       yield* fake.emit({ type: "agent_start" });
       yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
@@ -4029,7 +4289,7 @@ describe("PrimeAdapterV2", () => {
           assistantItem.turnItem.text === "Recovered",
       );
 
-      fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
+      fake.queueState({ isStreaming: false, isCompacting: false });
       yield* fake.emit({ type: "agent_settled" });
       yield* fake.takeRequest("get_state");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");

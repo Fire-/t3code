@@ -44,6 +44,7 @@ export async function loadMcpBridge(
     readonly toolSearchDisabled?: boolean;
     readonly allowsTool?: (name: string) => boolean;
     readonly runtimeMode?: string;
+    readonly unreachable?: boolean;
   } = {},
 ) {
   const handlers = new Map<string, AgentStartHook>();
@@ -98,6 +99,7 @@ export async function loadMcpBridge(
       transport: { body: string; headers: Record<string, string>; signal?: AbortSignal },
     ) => {
       transport.signal?.throwIfAborted();
+      if (options.unreachable) throw new TypeError("fetch failed");
       transports.push({
         url,
         authorization: transport.headers.authorization!,
