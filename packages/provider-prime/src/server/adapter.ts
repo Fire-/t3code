@@ -419,14 +419,6 @@ interface ActivePrimeTurn {
   activeProviderRetry: PrimeProviderRetryState | null;
   failure: ReturnType<typeof makeProviderFailure> | null;
   rejectedPromptFailure: ReturnType<typeof makeProviderFailure> | null;
-  stopTreeRefs?: PrimeTurnTreeRefs | null;
-}
-
-interface PrimeTurnTreeRefs {
-  /** Omitted keeps the synthetic ref; null means the turn left nothing on the active branch. */
-  readonly nativeTurnRef: OrchestrationV2ProviderRef | null | undefined;
-  readonly leafId: string | null;
-  readonly retainedNativeTurnIds: ReadonlyArray<string> | undefined;
 }
 
 interface PendingPrimePrompt {
@@ -591,15 +583,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       );
       let appliedModel: string | null = null;
       let appliedThinking: string | null = null;
-      let appliedSessionName: string | null = null;
+      // Recorded when sent, not when accepted: a name Prime rejects would be
+      // rejected again before every prompt.
+      let requestedSessionName: string | null = null;
       const outOfTurnExtensionErrors: Array<PrimeRpcRecord> = [];
-      let lastKnownLeaf: string | null = null;
-      /**
-       * Set when a `get_entries` capture failed. Prime may have advanced past
-       * `lastKnownLeaf` since, so the cursor no longer bounds a single turn
-       * and the next capture re-syncs it instead of trusting it.
-       */
-      let leafCursorStale = false;
       // Prime's own configured defaults, captured from the first `get_state` so
       // that selecting the displayed "Prime default" again can restore them. Prime
       // has no "unset" commands, so the baselines have to be replayed
@@ -645,7 +632,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       const updateProviderThread = (
         state: PrimeThreadState,
         patch: Partial<OrchestrationV2ProviderThread>,
-        retainedNativeTurnIds?: ReadonlyArray<string>,
       ) =>
         Effect.gen(function* () {
           const updatedAt = yield* DateTime.now;
@@ -654,7 +640,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             type: "provider_thread.updated",
             driver: PRIME_PROVIDER,
             providerThread: state.providerThread,
-            ...(retainedNativeTurnIds === undefined ? {} : { retainedNativeTurnIds }),
           });
         });
 
@@ -1491,66 +1476,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         });
       });
 
-      const listSessionEntries = (since: string | null, timeoutMs: number) =>
-        request({ type: "get_entries", ...(since === null ? {} : { since }) }, timeoutMs).pipe(
-          Effect.map((data) => {
-            const leafId = recordField(data, "leafId");
-            const entries = primeSessionEntries(recordField(data, "entries"));
-            return entries !== null && (typeof leafId === "string" || leafId === null)
-              ? { entries, leafId }
-              : null;
-          }),
-          Effect.orElseSucceed(() => null),
-        );
-
-      /**
-       * `get_entries` is append-ordered and keeps abandoned branches, so both come from walking
-       * the leaf's `parentId` chain, never from list order.
-       */
-      const captureTurnTreeRefs = Effect.fnUntraced(function* (
-        timeoutMs = PRIME_REQUEST_TIMEOUT_MS,
-      ): Effect.fn.Return<PrimeTurnTreeRefs | null> {
-        const cursorWasStale = leafCursorStale;
-        const previousLeaf = lastKnownLeaf;
-        const fullListing = cursorWasStale || previousLeaf === null;
-        const listing = yield* listSessionEntries(fullListing ? null : previousLeaf, timeoutMs);
-        const turnWalk =
-          listing === null ? null : walkPrimeBranch(listing.entries, listing.leafId, previousLeaf);
-        const rewound = turnWalk !== null && previousLeaf !== null && !turnWalk.reachedStop;
-        // A `since` window ends at the previous leaf; the rewound branch
-        // continues past it, so its ancestry needs the whole tree.
-        const tree = rewound && !fullListing ? yield* listSessionEntries(null, timeoutMs) : listing;
-        if (listing === null || turnWalk === null || tree === null) {
-          leafCursorStale = true;
-          return null;
-        }
-        lastKnownLeaf = listing.leafId;
-        leafCursorStale = false;
-        const turnStartEntryId = turnWalk.userEntryIds.at(-1);
-        // Only a branch walked to its root lists every survivor; a partial or
-        // cyclic walk would roll back runs that are still in the conversation.
-        // A replaced session has a different tree. Only an old leaf still in
-        // this tree proves an in-session rewind rather than a session switch.
-        const branch =
-          rewound && previousLeaf !== null && tree.entries.has(previousLeaf)
-            ? walkPrimeBranch(tree.entries, listing.leafId, null)
-            : undefined;
-        return {
-          // Without a trustworthy cursor the walk spans more than one turn, so its earliest user
-          // entry belongs to an earlier turn. Keep the synthetic ref rather than pointing
-          // rollback too far back; the next turn gets an accurate ref again.
-          nativeTurnRef: cursorWasStale
-            ? undefined
-            : turnStartEntryId !== undefined
-              ? providerRef(turnStartEntryId)
-              : turnWalk.entryCount === 0
-                ? null
-                : undefined,
-          leafId: listing.leafId,
-          retainedNativeTurnIds: branch?.reachedStop === true ? branch.userEntryIds : undefined,
-        };
-      });
-
       const finalizeTurn = Effect.fnUntraced(function* (state: PrimeThreadState, readUsage = true) {
         const turn = state.activeTurn;
         if (turn === null) return;
@@ -1573,8 +1498,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           }
         }
         yield* cancelPendingPrompts(completedAt);
-        const treeRefs =
-          turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
+        // Prime 1.0.0 has no get_entries (modes/rpc/rpc-mode.ts), so a turn keeps
+        // its synthetic ref and the conversation head is not tracked.
         const tokenUsage = readUsage
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
@@ -1585,27 +1510,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           threadId: turn.turnInput.threadId,
           providerTurn: {
             ...turn.providerTurn,
-            ...(treeRefs === null || treeRefs.nativeTurnRef === undefined
-              ? {}
-              : { nativeTurnRef: treeRefs.nativeTurnRef }),
             status: interrupted ? "interrupted" : failure !== null ? "failed" : "completed",
             completedAt,
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
           },
         });
-        yield* updateProviderThread(
-          state,
-          {
-            status: "idle",
-            ...(treeRefs === null
-              ? {}
-              : {
-                  nativeConversationHeadRef:
-                    treeRefs.leafId === null ? null : providerRef(treeRefs.leafId),
-                }),
-          },
-          treeRefs?.retainedNativeTurnIds,
-        );
+        yield* updateProviderThread(state, { status: "idle" });
         yield* updateProviderSession(
           failure !== null ? "error" : "ready",
           failure?.message ?? null,
@@ -2311,7 +2221,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           threadState = null;
           appliedModel = null;
           appliedThinking = null;
-          appliedSessionName = null;
+          requestedSessionName = null;
           baselineModel = null;
           baselineThinking = null;
           contextWindow = null;
@@ -2394,11 +2304,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 updatedAt: createdAt,
               };
         threadState = { providerThread, activeTurn: null };
-        const baselineEntries = yield* request({ type: "get_entries" }).pipe(
-          Effect.orElseSucceed(() => undefined),
-        );
-        lastKnownLeaf = recordString(baselineEntries, "leafId") ?? null;
-        leafCursorStale = baselineEntries === undefined;
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
@@ -2570,13 +2475,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               turnInput.message.createdBy === "agent" &&
               turnInput.message.creationSource === "provider";
             if (!continuation) yield* applySelection(turnInput.modelSelection);
-            if (turnInput.appThread.title !== appliedSessionName) {
-              yield* request({
-                type: "set_session_name",
-                name: turnInput.appThread.title,
-              }).pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => (appliedSessionName = turnInput.appThread.title)),
+            if (turnInput.appThread.title !== requestedSessionName) {
+              requestedSessionName = turnInput.appThread.title;
+              yield* request({ type: "set_session_name", name: requestedSessionName }).pipe(
+                Effect.tapError((error) =>
+                  Effect.logWarning("Prime rejected set_session_name; the turn continues.", {
+                    error: error.message,
+                  }),
                 ),
                 Effect.ignore,
               );
@@ -2821,18 +2726,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               if (interruptInput.requestRuntimeRestart === true && !turn.sawAgentEnd) {
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
-              // Terminating fails every later request, so read the stopped
-              // turn's session-tree refs first: rolling back past this turn
-              // forks at its user entry. Holding the event permit also lets a
-              // finalize that is already reading them finish before the kill.
-              yield* sessionEventPermit.withPermits(1)(
-                Effect.gen(function* () {
-                  if (threadState?.activeTurn === turn && turn.stopTreeRefs === undefined) {
-                    turn.stopTreeRefs = yield* captureTurnTreeRefs(2_000);
-                  }
-                  yield* connection.terminate;
-                }),
-              );
+              // Holding the event permit lets a finalize that is already
+              // running finish before the kill.
+              yield* sessionEventPermit.withPermits(1)(connection.terminate);
               return;
             }
             yield* request({ type: "abort" }).pipe(
@@ -3081,9 +2977,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                       lastNativeThreadId = forkSessionFile;
                       appliedModel = null;
                       appliedThinking = null;
-                      appliedSessionName = null;
-                      lastKnownLeaf = leafId;
-                      leafCursorStale = entriesData === undefined;
+                      requestedSessionName = null;
                       yield* updateProviderThread(state, {
                         nativeThreadRef: providerRef(forkSessionFile),
                         nativeConversationHeadRef: leafId === null ? null : providerRef(leafId),
@@ -3225,57 +3119,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
   });
 });
 
-interface PrimeSessionEntry {
-  readonly parentId: string | null;
-  readonly isUserMessage: boolean;
-}
-
-function primeSessionEntries(entries: unknown): ReadonlyMap<string, PrimeSessionEntry> | null {
-  const byId = new Map<string, PrimeSessionEntry>();
-  if (!Array.isArray(entries)) return null;
-  for (const entry of entries) {
-    const id = recordString(entry, "id");
-    const parentId = recordField(entry, "parentId");
-    if (id === undefined || byId.has(id) || (parentId !== null && typeof parentId !== "string"))
-      return null;
-    byId.set(id, {
-      parentId,
-      isUserMessage:
-        recordField(entry, "type") === "message" &&
-        recordString(recordField(entry, "message"), "role") === "user",
-    });
-  }
-  return byId;
-}
-
-function walkPrimeBranch(
-  entries: ReadonlyMap<string, PrimeSessionEntry>,
-  leafId: string | null,
-  stopAt: string | null,
-): {
-  readonly entryCount: number;
-  readonly userEntryIds: ReadonlyArray<string>;
-  readonly reachedStop: boolean;
-} | null {
-  const visited = new Set<string>();
-  const userEntryIds: Array<string> = [];
-  let current = leafId;
-  while (current !== null && current !== stopAt) {
-    const entry = entries.get(current);
-    if (entry === undefined) break;
-    if (visited.has(current)) return null;
-    visited.add(current);
-    if (entry.isUserMessage) userEntryIds.push(current);
-    current = entry.parentId;
-  }
-  return { entryCount: visited.size, userEntryIds, reachedStop: current === stopAt };
-}
-
 /**
  * Turns without a ref left nothing on the active branch, so the boundary is the first discarded
  * turn that has one. Returns `null` when no such turn follows the target (nothing to discard) and
- * `undefined` when the boundary turn has no captured entry ref (only turn-boundary refs recorded
- * by `captureTurnTreeRefs` are strong).
+ * `undefined` when the boundary turn has no strong entry ref.
  */
 function primeRollbackForkEntry(input: {
   readonly target:

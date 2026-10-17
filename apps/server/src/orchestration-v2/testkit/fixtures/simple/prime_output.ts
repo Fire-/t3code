@@ -39,7 +39,9 @@ function isIdlePrimeState(data: unknown): boolean {
  * Prime has no settled event: each turn settles on `agent_end` plus an idle
  * `get_state` probe. The recording must show that probe only after the run's
  * `agent_end` (no polling), its last answer idle, and the projection must hold
- * exactly one completed provider turn per prompt.
+ * exactly one completed provider turn per prompt. Prime 1.0.0 rejects
+ * `get_entries`, and a rejected session name would be rejected again, so
+ * neither may appear more than the recording needs.
  */
 export function assertPrimeTurnsSettleOnce(
   result: OrchestratorV2ScenarioResult,
@@ -51,6 +53,20 @@ export function assertPrimeTurnsSettleOnce(
     (entry) => entry.direction === "out" && field(entry.frame, "type") === "prompt",
   );
   assert.lengthOf(prompts, expectedTurns, "one prompt per turn");
+  const outboundTypes = frames.flatMap((entry) =>
+    entry.direction === "out" ? [field(entry.frame, "type")] : [],
+  );
+  assert.notInclude(outboundTypes, "get_entries");
+  const sessionNames = frames.flatMap((entry) =>
+    entry.direction === "out" && field(entry.frame, "type") === "set_session_name"
+      ? [field(entry.frame, "name")]
+      : [],
+  );
+  assert.lengthOf(
+    sessionNames,
+    new Set(sessionNames).size,
+    "an unchanged session name is sent once",
+  );
 
   let sawPrompt = false;
   let sawAgentEndSincePrompt = false;

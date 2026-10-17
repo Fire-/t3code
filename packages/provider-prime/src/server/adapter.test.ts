@@ -83,7 +83,6 @@ interface FakePrime {
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly emit: (record: PrimeRpcRecord, chunkBytes?: number) => Effect.Effect<void>;
   readonly takeRequest: (type: string) => Effect.Effect<PrimeRpcRecord>;
-  readonly queueEntries: (data: unknown) => void;
   readonly queueMessages: (data: unknown) => void;
   readonly vetoNextSwitch: () => void;
   readonly queueState: (data: Record<string, unknown>) => void;
@@ -117,8 +116,13 @@ interface FakePrime {
   readonly setCompacting: (compacting: boolean) => void;
   /** Prime's id-less error response (daemon post-acceptance failure, unknown command). */
   readonly emitOrphanError: (command: string, error: string) => Effect.Effect<void>;
-  /** Answers `type` the way Prime answers a command it lacks: an id-less unknown-command error. */
+  /**
+   * Answers `type` the way Prime answers a command it lacks: an id-less
+   * unknown-command error. `get_entries` is always answered this way.
+   */
   readonly answerAsUnknownCommand: (type: string) => void;
+  /** Fails every `type` request with `error`, keeping the request id. */
+  readonly failCommand: (type: string, error: string) => void;
   /** Types of every command T3 wrote to stdin, in order. */
   readonly commandLog: () => ReadonlyArray<string>;
 }
@@ -167,7 +171,6 @@ const recordedIdleState = (sessionFile: string) => ({
 const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
   const requests = yield* Queue.unbounded<PrimeRpcRecord>();
-  const entriesQueue: Array<unknown> = [];
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
@@ -187,7 +190,9 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   let isCompacting = false;
   let sessionActions: FakeSessionActions = IDLE_ACTIONS;
   let stdinBuffer = "";
-  const unknownCommands = new Set<string>();
+  // Prime 1.0.0 has no get_entries (modes/rpc/rpc-mode.ts default branch).
+  const unknownCommands = new Set<string>(["get_entries"]);
+  const commandFailures = new Map<string, string>();
 
   const emit = (record: PrimeRpcRecord, chunkBytes?: number) =>
     Effect.gen(function* () {
@@ -215,6 +220,8 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
       command: String(record["type"]),
       success: true,
     };
+    const commandFailure = commandFailures.get(String(record["type"]));
+    if (commandFailure !== undefined) return { ...base, success: false, error: commandFailure };
     switch (record["type"]) {
       case "get_state":
         if (failState) {
@@ -258,8 +265,6 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
         vetoSwitch = false;
         return { ...base, data: { cancelled } };
       }
-      case "get_entries":
-        return { ...base, data: entriesQueue.shift() ?? { entries: [], leafId: null } };
       case "get_messages":
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
@@ -335,7 +340,6 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
     spawner,
     emit,
     takeRequest,
-    queueEntries: (data) => entriesQueue.push(data),
     queueMessages: (data) => messagesQueue.push(data),
     deferNextState: () => {
       deferState = true;
@@ -396,6 +400,9 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
     emitOrphanError: (command, error) => emit({ type: "response", command, success: false, error }),
     answerAsUnknownCommand: (type) => {
       unknownCommands.add(type);
+    },
+    failCommand: (type, error) => {
+      commandFailures.set(type, error);
     },
     commandLog: () => allRequests.map((request) => String(request["type"])),
   } satisfies FakePrime;
@@ -475,14 +482,18 @@ const openRuntime = Effect.fnUntraced(function* (
 const advanceClockUntil = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.raceFirst(effect, Effect.forever(TestClock.adjust(Duration.seconds(1))));
 
-const makeAppThread = Effect.fnUntraced(function* (model: string, threadId = THREAD_ID) {
+const makeAppThread = Effect.fnUntraced(function* (
+  model: string,
+  threadId = THREAD_ID,
+  title = "Prime test thread",
+) {
   const now = yield* DateTime.now;
   return {
     createdBy: "user",
     creationSource: "web",
     id: threadId,
     projectId: "project:fixture:prime" as OrchestrationV2AppThread["projectId"],
-    title: "Prime test thread",
+    title,
     providerInstanceId: PRIME_INSTANCE_ID,
     modelSelection: modelSelection(model),
     runtimeMode: "full-access",
@@ -512,8 +523,9 @@ const startTurn = Effect.fnUntraced(function* (
   runOrdinal = 1,
   threadId = THREAD_ID,
   continuation = false,
+  title?: string,
 ) {
-  const appThread = yield* makeAppThread(model, threadId);
+  const appThread = yield* makeAppThread(model, threadId, title);
   const runId = RunId.make(`run:${threadId}:${runOrdinal}`);
   yield* runtime.startTurn({
     appThread,
@@ -2716,252 +2728,101 @@ describe("PrimeAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect.each([false, true])("follows an extension rewind with summarize=%s", (summarize) =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePrime;
-      const { runtime, takeEvent } = yield* openRuntime(fake);
-      const root = { type: "model_change", id: "root", parentId: null };
-      const user = (id: string, parentId: string) => ({
-        type: "message",
-        id,
-        parentId,
-        message: { role: "user", content: [{ type: "text", text: id }] },
-      });
-      const reply = (id: string, parentId: string) => ({
-        type: "message",
-        id,
-        parentId,
-        message: { role: "assistant", content: [] },
-      });
-      fake.queueEntries({ entries: [root], leafId: "root" });
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      const settle = Effect.fnUntraced(function* (
-        text: string,
-        runOrdinal: number,
-        ...listings: ReadonlyArray<unknown>
-      ) {
-        yield* startTurn(runtime, providerThread, "default", [], text, undefined, runOrdinal);
-        yield* fake.takeRequest("prompt");
-        for (const listing of listings) fake.queueEntries(listing);
-        yield* fake.emit({ type: "response", command: "prompt", success: true });
-        if (!text.startsWith("/")) {
+  it.effect(
+    "sends no get_entries when registering a thread or settling turns, so each turn keeps its synthetic ref",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        for (const runOrdinal of [1, 2]) {
+          yield* startTurn(
+            runtime,
+            providerThread,
+            "default",
+            [],
+            `prompt ${runOrdinal}`,
+            undefined,
+            runOrdinal,
+          );
+          yield* fake.takeRequest("prompt");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
           yield* fake.emit({ type: "agent_start" });
-          yield* fake.emit({ type: "agent_end", messages: [] });
+          yield* fake.emit(agentEnd());
+          const turn = yield* takeEvent(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+          );
+          const thread = yield* takeEvent(
+            (event) =>
+              event.type === "provider_thread.updated" && event.providerThread.status === "idle",
+          );
+          yield* takeEvent((event) => event.type === "turn.terminal");
+          assert.equal(
+            turn.type === "provider_turn.updated"
+              ? turn.providerTurn.nativeTurnRef?.strength
+              : null,
+            "weak",
+          );
+          assert.isTrue(
+            thread.type === "provider_thread.updated" &&
+              thread.providerThread.nativeConversationHeadRef === null &&
+              thread.retainedNativeTurnIds === undefined,
+          );
         }
-        const turn = yield* takeEvent(
-          (event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
-        );
-        const thread = yield* takeEvent(
-          (event) =>
-            event.type === "provider_thread.updated" && event.providerThread.status === "idle",
-        );
-        yield* takeEvent((event) => event.type === "turn.terminal");
-        return {
-          turnRef:
-            turn.type === "provider_turn.updated" ? turn.providerTurn.nativeTurnRef : undefined,
-          head:
-            thread.type === "provider_thread.updated"
-              ? thread.providerThread.nativeConversationHeadRef?.nativeId
-              : undefined,
-          retained:
-            thread.type === "provider_thread.updated" ? thread.retainedNativeTurnIds : undefined,
-        };
-      });
-
-      yield* settle("prompt A", 1, {
-        entries: [user("uA", "root"), reply("aA", "uA")],
-        leafId: "aA",
-      });
-      const promptB = yield* settle("prompt B", 2, {
-        entries: [user("uB", "aA"), reply("aB", "uB")],
-        leafId: "aB",
-      });
-      assert.equal(promptB.turnRef?.nativeId, "uB");
-      assert.isUndefined(promptB.retained);
-
-      const rewoundLeaf = summarize ? "summary" : "aA";
-      const summary = summarize ? [{ type: "branch_summary", id: "summary", parentId: "aA" }] : [];
-      const rewind = yield* settle(
-        "/rewind",
-        3,
-        { entries: summary, leafId: rewoundLeaf },
-        {
-          entries: [
-            root,
-            user("uA", "root"),
-            reply("aA", "uA"),
-            user("uB", "aA"),
-            reply("aB", "uB"),
-            ...summary,
-          ],
-          leafId: rewoundLeaf,
-        },
-      );
-      assert.deepEqual(rewind.retained, ["uA"]);
-      assert.equal(rewind.head, rewoundLeaf);
-      if (summarize) {
-        assert.equal(rewind.turnRef?.strength, "weak");
-      } else {
-        assert.isNull(rewind.turnRef);
-      }
-
-      const promptC = yield* settle("prompt C", 4, {
-        entries: [
-          ...(summarize ? [] : [user("uB", "aA"), reply("aB", "uB")]),
-          user("uC", rewoundLeaf),
-          reply("aC", "uC"),
-        ],
-        leafId: "aC",
-      });
-      assert.deepEqual(promptC.turnRef, {
-        driver: PRIME_PROVIDER,
-        nativeId: "uC",
-        strength: "strong",
-      });
-      assert.isUndefined(promptC.retained);
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        assert.notInclude(fake.commandLog(), "get_entries");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect.each(["turn window", "full tree"] as const)(
-    "finishes a turn whose %s has a parentId cycle",
-    (cycleIn) =>
+  it.effect(
+    "does not resend a failed set_session_name until the thread title changes, and the turns still complete",
+    () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePrime;
+        // Prime's answer on a private daemon socket, observed while recording.
+        fake.failCommand("set_session_name", "Daemon catalog exited during startup (1)");
         const { runtime, takeEvent } = yield* openRuntime(fake);
-        const root = { type: "model_change", id: "root", parentId: null };
-        const cycle = [
-          { type: "message", id: "x", parentId: "y", message: { role: "user", content: [] } },
-          { type: "message", id: "y", parentId: "x", message: { role: "assistant", content: [] } },
-        ];
-        fake.queueEntries({ entries: [root], leafId: "root" });
         const providerThread = yield* runtime.ensureThread({
           threadId: THREAD_ID,
           modelSelection: modelSelection("default"),
           runtimePolicy,
         });
-        yield* startTurn(runtime, providerThread, "default", [], "prompt", undefined, 1);
-        yield* fake.takeRequest("prompt");
-        if (cycleIn === "turn window") {
-          fake.queueEntries({ entries: cycle, leafId: "x" });
-        } else {
-          fake.queueEntries({ entries: [], leafId: "x" });
-          fake.queueEntries({ entries: [root, ...cycle], leafId: "x" });
-        }
-        yield* fake.emit({ type: "response", command: "prompt", success: true });
-        yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_end", messages: [] });
-        yield* takeEvent(
-          (event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
-        );
-        const thread = yield* takeEvent(
-          (event) =>
-            event.type === "provider_thread.updated" && event.providerThread.status === "idle",
-        );
-        assert.isUndefined(
-          thread.type === "provider_thread.updated" ? thread.retainedNativeTurnIds : null,
+        const runTurn = Effect.fnUntraced(function* (runOrdinal: number, title: string) {
+          yield* startTurn(
+            runtime,
+            providerThread,
+            "default",
+            [],
+            "Hello prime-agent",
+            undefined,
+            runOrdinal,
+            THREAD_ID,
+            false,
+            title,
+          );
+          yield* fake.takeRequest("prompt");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit(agentEnd());
+          const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        });
+        yield* runTurn(1, "First title");
+        yield* runTurn(2, "First title");
+        yield* runTurn(3, "Renamed title");
+        yield* runTurn(4, "Renamed title");
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .filter((request) => request["type"] === "set_session_name")
+            .map((request) => request["name"]),
+          ["First title", "Renamed title"],
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
-
-  it.effect.each(["missing parent", "invalid parent", "duplicate id"] as const)(
-    "does not reconcile malformed session entries: %s",
-    (malformed) =>
-      Effect.gen(function* () {
-        const fake = yield* makeFakePrime;
-        const { runtime, takeEvent } = yield* openRuntime(fake);
-        const root = { type: "model_change", id: "root", parentId: null };
-        fake.queueEntries({ entries: [root], leafId: "root" });
-        const providerThread = yield* runtime.ensureThread({
-          threadId: THREAD_ID,
-          modelSelection: modelSelection("default"),
-          runtimePolicy,
-        });
-        yield* startTurn(runtime, providerThread);
-        yield* fake.takeRequest("prompt");
-        const entry = {
-          type: "message",
-          id: "x",
-          message: { role: "user", content: [] },
-          ...(malformed === "missing parent"
-            ? {}
-            : { parentId: malformed === "invalid parent" ? 42 : null }),
-        };
-        fake.queueEntries({ entries: [], leafId: "x" });
-        fake.queueEntries({
-          entries: [
-            root,
-            entry,
-            ...(malformed === "duplicate id" ? [{ ...entry, parentId: "root" }] : []),
-          ],
-          leafId: "x",
-        });
-        yield* fake.emit({ type: "response", command: "prompt", success: true });
-        yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_end", messages: [] });
-        yield* takeEvent(
-          (event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
-        );
-        const thread = yield* takeEvent(
-          (event) =>
-            event.type === "provider_thread.updated" && event.providerThread.status === "idle",
-        );
-        assert.isUndefined(
-          thread.type === "provider_thread.updated" ? thread.retainedNativeTurnIds : null,
-        );
-        yield* takeEvent((event) => event.type === "turn.terminal");
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
-
-  it.effect("does not reconcile a replacement session tree as a native rewind", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePrime;
-      fake.queueEntries({
-        entries: [{ type: "model_change", id: "old-leaf", parentId: null }],
-        leafId: "old-leaf",
-      });
-      const { runtime, takeEvent } = yield* openRuntime(fake);
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      const finish = Effect.fnUntraced(function* () {
-        yield* startTurn(runtime, providerThread);
-        yield* fake.takeRequest("prompt");
-        yield* fake.emit({ type: "response", command: "prompt", success: true });
-        yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_end", messages: [] });
-        const update = yield* takeEvent(
-          (event) =>
-            event.type === "provider_thread.updated" && event.providerThread.status === "idle",
-        );
-        yield* takeEvent((event) => event.type === "turn.terminal");
-        assert.isUndefined(
-          update.type === "provider_thread.updated" ? update.retainedNativeTurnIds : null,
-        );
-      });
-      fake.queueEntries({ entries: [] });
-      yield* finish();
-      fake.queueEntries({
-        entries: [
-          {
-            type: "message",
-            id: "new-user",
-            parentId: null,
-            message: { role: "user", content: [] },
-          },
-        ],
-        leafId: "new-user",
-      });
-      yield* finish();
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("rolls back past turns that left nothing in the session tree", () =>
@@ -3101,6 +2962,8 @@ describe("PrimeAdapterV2", () => {
       );
       yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "abort"));
+      // Prime has no session-tree listing to read before the restart.
+      assert.notInclude(fake.commandLog(), "get_entries");
       yield* fake.closeStdout;
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
@@ -4454,13 +4317,13 @@ describe("Prime settle engine", () => {
   );
 
   it.effect(
-    "[VAL-TURN-001] Prime's id-less unknown-command answer to get_entries fails that request at once, so registering and settling never wait out a request timeout",
+    "[VAL-TURN-001] Prime's id-less unknown-command answer fails the matching request at once, so settling never waits out a request timeout",
     () =>
       Effect.gen(function* () {
-        // Prime 1.0.0 has no get_entries; the clock stays frozen, so only an
-        // immediate failure lets registration and the settled turn finish.
+        // The clock stays frozen, so only an immediate failure of the
+        // settle-time stats read lets the turn finish.
         const { fake, seen, record, begin } = yield* openTurn((fake) =>
-          fake.answerAsUnknownCommand("get_entries"),
+          fake.answerAsUnknownCommand("get_session_stats"),
         );
         const afterPrompt = yield* begin();
         yield* fake.emit({ type: "agent_start" });
@@ -4468,7 +4331,7 @@ describe("Prime settle engine", () => {
         yield* fake.emit(agentEnd());
         const terminal = yield* record((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-        assert.include(commandsSince(fake, afterPrompt), "get_entries");
+        assert.include(commandsSince(fake, afterPrompt), "get_session_stats");
         assert.lengthOf(terminals(seen), 1);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
