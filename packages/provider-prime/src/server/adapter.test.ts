@@ -6002,6 +6002,156 @@ describe("Prime settle engine", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    const steerOrdinaryTurn = Effect.fnUntraced(function* (
+      open: Effect.Success<ReturnType<typeof openTurn>>,
+      text: string,
+      outcome: "accepted" | "rejected" = "accepted",
+    ) {
+      const { fake } = open;
+      yield* open.begin();
+      const running = yield* open.record(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      yield* fake.emit({ type: "agent_start" });
+      yield* replyText(fake, "Plain reply");
+      yield* open.record(isAssistantText("Plain reply"));
+      yield* open.runtime.steerTurn({
+        threadId: THREAD_ID,
+        runId: RunId.make("run:thread-prime-test:1"),
+        providerThread: open.providerThread,
+        providerTurnId: (running as Extract<AdapterEvent, { type: "provider_turn.updated" }>)
+          .providerTurn.id,
+        message: {
+          messageId: `message:thread-prime-test:steer:${text}` as never,
+          text,
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+      });
+      const steer = yield* fake.takeRequest("prompt");
+      assert.equal(steer["message"], text);
+      assert.equal(steer["streamingBehavior"], "steer");
+      if (outcome === "rejected") {
+        yield* fake.emit({
+          type: "response",
+          command: "prompt",
+          success: false,
+          error: "Steering message rejected",
+        });
+        return;
+      }
+      // Same order as the steered /compact probe: ack, then the queued command's action.
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
+      yield* fake.setSessionActions({
+        ...IDLE_ACTIONS,
+        active: { kind: "session_command", phase: "running", label: text },
+      });
+      yield* fake.emit(agentEnd());
+      yield* emitCustomMessage(fake, sessionCommandEcho(text));
+    });
+
+    it.effect(
+      "[VAL-CMD-003] an ordinary turn steered with /refine that ends in refine_failed settles once as failed with the error",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* steerOrdinaryTurn(open, "/refine rollback");
+          yield* fake.emit({ type: "refine_failed", error: "Rollback requires a refinement id" });
+          yield* emitCustomMessage(
+            fake,
+            sessionCommandResult(
+              "/refine rollback",
+              "Command failed: Rollback requires a refinement id",
+              false,
+            ),
+          );
+          yield* pumpBarrier(fake, record, "before the action clears");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "failed" &&
+              terminal.failure.message === "Rollback requires a refinement id",
+          );
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("[VAL-CMD-003] an ordinary turn steered with a successful /refine completes", () =>
+      Effect.gen(function* () {
+        const open = yield* openTurn();
+        const { fake, seen, record } = open;
+        yield* steerOrdinaryTurn(open, "/refine");
+        yield* fake.emit({
+          type: "refine_complete",
+          result: { appliedEdits: [{ applied: true }] },
+        });
+        yield* emitCustomMessage(
+          fake,
+          sessionCommandResult(
+            "/refine",
+            "Refined continual harness state: 1 edit applied.",
+            true,
+            false,
+          ),
+        );
+        yield* fake.setSessionActions(IDLE_ACTIONS);
+        const terminal = yield* record(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.lengthOf(terminals(seen), 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CMD-003] a /refine steer that Prime rejects does not make a later self-started refine_failed fail the turn",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* steerOrdinaryTurn(open, "/refine", "rejected");
+          yield* fake.emit({ type: "refine_failed", error: "Refinement skipped by extension" });
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CMD-007] an ordinary turn steered with a session command whose result row fails settles once as failed",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* steerOrdinaryTurn(open, "/reload");
+          yield* emitCustomMessage(
+            fake,
+            sessionCommandResult(
+              "/reload",
+              "Command failed: Wait for compaction to finish before reloading.",
+              false,
+            ),
+          );
+          yield* pumpBarrier(fake, record, "before the action clears");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "failed" &&
+              terminal.failure.message === "Wait for compaction to finish before reloading.",
+          );
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect(
       "[VAL-CMD-004] /goal <objective> stays open across agent_end while the goal action is active and settles once after it clears",
       () =>

@@ -431,8 +431,12 @@ interface ActivePrimeTurn {
   sawAgentActivity: boolean;
   adoptedWake: boolean;
   readonly promptMayBeCommandOnly: boolean;
-  /** Prime's built-in session command this turn's prompt names (`compact`, `goal`, ...). */
-  readonly sessionCommand: string | undefined;
+  /**
+   * Prime's built-in session commands (`compact`, `refine`, ...) this turn's
+   * prompt or accepted steers named. Only these may fail the turn: Prime also
+   * reports self-started refinement through the same frames.
+   */
+  readonly sessionCommands: Set<string>;
   latestCompactionAfterTokens: number | null;
   lastLiveUsedTokens: number | null;
   /** Bumped by every transition that can make an in-flight `get_state` probe stale. */
@@ -632,6 +636,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       const pendingPromptResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
         readonly kind: "turn_start" | "steer";
+        readonly sessionCommand?: string | undefined;
       }> = [];
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
@@ -1808,7 +1813,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (turn === null) return;
             const message = event["message"];
             if (recordString(message, "role") === "custom") {
-              const failure = primeSessionCommandFailure(message, turn.sessionCommand);
+              const failure = primeSessionCommandFailure(message, turn.sessionCommands);
               if (failure !== undefined && turn.failure === null) {
                 turn.failure = makeProviderFailure({ message: failure, class: "provider_error" });
               }
@@ -1978,7 +1983,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           }
           case "refine_failed": {
             // Self-started refinement also reports here; only a /refine turn owns it.
-            if (turn === null || turn.sessionCommand !== "refine" || turn.failure !== null) return;
+            if (turn === null || !turn.sessionCommands.has("refine") || turn.failure !== null)
+              return;
             turn.failure = makeProviderFailure({
               message: recordString(event, "error") ?? "Prime refinement failed.",
               class: "provider_error",
@@ -2051,6 +2057,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             const responseTurn =
               pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
             if (event["success"] === true) {
+              if (pendingPrompt?.sessionCommand !== undefined && responseTurn !== null) {
+                responseTurn.sessionCommands.add(pendingPrompt.sessionCommand);
+              }
               // Deferred success ack. Command-only prompts (pure extension
               // slash commands) never start an agent run and never emit
               // `agent_end`, so probe for idleness. The probe result is
@@ -2586,6 +2595,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               startedAt,
               completedAt: null,
             };
+            const initialSessionCommand =
+              payload === null ? undefined : primeSessionCommandName(payload.message);
             const activeTurn: ActivePrimeTurn = {
               turnInput,
               providerTurn,
@@ -2603,8 +2614,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               sawAgentActivity: false,
               adoptedWake: false,
               promptMayBeCommandOnly: payload?.message.trimStart().startsWith("/") ?? false,
-              sessionCommand:
-                payload === null ? undefined : primeSessionCommandName(payload.message),
+              sessionCommands: new Set(
+                initialSessionCommand === undefined ? [] : [initialSessionCommand],
+              ),
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
@@ -2737,6 +2749,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 pendingPromptResponses.push({
                   providerTurnId: turn.providerTurn.id,
                   kind: "steer",
+                  sessionCommand: primeSessionCommandName(payload.message),
                 });
                 turn.settleProbeGeneration += 1;
               }),

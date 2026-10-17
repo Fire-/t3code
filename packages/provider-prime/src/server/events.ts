@@ -57,13 +57,13 @@ export function isPrimeBusyRejection(error: string | undefined): boolean {
  */
 export function primeSessionCommandFailure(
   message: unknown,
-  sessionCommand: string | undefined,
+  sessionCommands: ReadonlySet<string>,
 ): string | undefined {
-  if (sessionCommand === undefined) return undefined;
   if (recordString(message, "customType") !== "session_slash_command_result") return undefined;
   const details = recordField(message, "details");
   if (recordField(details, "success") !== false) return undefined;
-  if (recordString(recordField(details, "command"), "name") !== sessionCommand) return undefined;
+  const sessionCommand = recordString(recordField(details, "command"), "name");
+  if (sessionCommand === undefined || !sessionCommands.has(sessionCommand)) return undefined;
   return (
     nonBlank(recordString(details, "error")) ??
     nonBlank(primeContentText(recordField(message, "content"))) ??
