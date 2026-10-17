@@ -71,6 +71,7 @@ const PRIME_RECORDING_SCENARIOS: Readonly<Record<string, PrimeRecordingScenario>
   message_steering: { bridge: false },
   provider_thread_resume: { bridge: false, awaitPreviousExit: true },
   turn_interrupt_mid_tool: { bridge: false },
+  prime_approval: { bridge: true, runtimeMode: "approval-required" },
 };
 
 /** Model turns cost real credits, so only the two models agreed for fixtures may record. */
@@ -78,6 +79,15 @@ const RECORDABLE_MODELS = new Set(["mistral/ministral-3b-latest", "mistral/zai-g
 
 /** Keeps the user's skills, context files and discovered extensions out of the recording. */
 const HERMETIC_LAUNCH_ARGS = ["--no-skills", "--no-context-files", "--no-extensions"];
+/**
+ * The replay harness has no T3 MCP server, so a bridge recording gets an
+ * endpoint that refuses connections: the bridge takes its real
+ * connection-failure path and the user's own T3 session is never reachable.
+ */
+const UNREACHABLE_MCP_ENV = {
+  T3_MCP_URL: "http://127.0.0.1:9/mcp",
+  T3_MCP_BEARER_TOKEN: "not-a-real-t3-token",
+};
 const CLOCK_TICK = Duration.millis(20);
 const PREVIOUS_EXIT_TIMEOUT = Duration.seconds(20);
 
@@ -408,7 +418,10 @@ function makeIsolatingSpawner(
         }
       }
       invocations.push(`prime-agent ${args.join(" ")}`);
-      const handle = yield* live.spawn(ChildProcess.make(command.command, args, command.options));
+      const options = bridge
+        ? { ...command.options, env: { ...command.options.env, ...UNREACHABLE_MCP_ENV } }
+        : command.options;
+      const handle = yield* live.spawn(ChildProcess.make(command.command, args, options));
       previousExit = handle.exitCode.pipe(Effect.ignore);
       return handle;
     });

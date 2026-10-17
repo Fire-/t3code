@@ -2885,6 +2885,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             pending.runtimeRequest = {
               ...pending.runtimeRequest,
               status: "resolved",
+              ...(requestInput.decision === undefined ? {} : { decision: requestInput.decision }),
               resolvedAt,
             };
             yield* emit({

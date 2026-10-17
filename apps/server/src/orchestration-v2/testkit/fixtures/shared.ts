@@ -101,6 +101,8 @@ export const TURN_INTERRUPT_PROMPT =
   "Do not answer immediately. First run the local shell command `sleep 30`, then respond with exactly: interrupt fixture should not finish naturally.";
 export const TURN_INTERRUPT_MID_TOOL_PROMPT =
   "Run this exact local command: `node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"`. Do not answer until it completes, then respond exactly: interrupt fixture should not finish naturally.";
+export const PRIME_APPROVAL_PROMPT =
+  'Use the ipython tool to run exactly one cell containing `print("prime approval fixture ran")`. Run nothing else. After it runs, respond exactly: prime approval fixture complete';
 /** A command that prints over a few seconds, with colour and a carriage-return redraw. */
 const COMMAND_OUTPUT_STREAMING_COMMAND =
   "for i in 1 2 3 4; do printf '\\033[32mstream line %s\\033[0m\\n' $i; sleep 1; done; printf 'progress 50%%\\rprogress 100%%\\n'";

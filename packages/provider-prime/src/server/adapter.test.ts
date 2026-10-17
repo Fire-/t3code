@@ -461,13 +461,14 @@ const openRuntime = Effect.fnUntraced(function* (
   providerSessionId = SESSION_ID,
   forkFake?: FakePrime,
   continuationRequests?: PrimeAdapterV2Options["continuationRequests"],
+  policy = runtimePolicy,
 ) {
   const adapter = yield* makeAdapter(fake, "", forkFake, continuationRequests);
   const runtime = yield* adapter.openSession({
     threadId,
     providerSessionId,
     modelSelection: modelSelection(model),
-    runtimePolicy,
+    runtimePolicy: policy,
   });
   const emitted = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
   yield* runtime.events.pipe(
@@ -4256,10 +4257,21 @@ describe("PrimeAdapterV2", () => {
 describe("Prime settle engine", () => {
   type AdapterEvent = ProviderAdapter.ProviderAdapterV2Event;
 
-  const openTurn = Effect.fnUntraced(function* (configure?: (fake: FakePrime) => void) {
+  const openTurn = Effect.fnUntraced(function* (
+    configure?: (fake: FakePrime) => void,
+    runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"] = "full-access",
+  ) {
     const fake = yield* makeFakePrime;
     configure?.(fake);
-    const { runtime, takeEvent } = yield* openRuntime(fake);
+    const { runtime, takeEvent } = yield* openRuntime(
+      fake,
+      "default",
+      THREAD_ID,
+      SESSION_ID,
+      undefined,
+      undefined,
+      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({ ...runtimePolicy, runtimeMode }),
+    );
     const providerThread = yield* runtime.ensureThread({
       threadId: THREAD_ID,
       modelSelection: modelSelection("default"),
@@ -5286,6 +5298,448 @@ describe("Prime settle engine", () => {
             ),
           );
           assert.notInclude(fake.commandLog(), "prompt");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("extension UI requests", () => {
+    type RuntimeRequestEvent = Extract<AdapterEvent, { type: "runtime_request.updated" }>;
+    type BridgeToolCallHook = (
+      event: { toolName: string; input: unknown },
+      ctx: { ui: { confirm: (title: string, message?: string) => Promise<boolean> } },
+    ) => Promise<{ block: true; reason: string } | undefined>;
+
+    const isPendingRequest = (event: AdapterEvent) =>
+      event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending";
+
+    const takePendingRequest = (
+      record: (predicate: (event: AdapterEvent) => boolean) => Effect.Effect<AdapterEvent>,
+    ) =>
+      Effect.map(
+        record(isPendingRequest),
+        (event) => (event as RuntimeRequestEvent).runtimeRequest,
+      );
+
+    /** The last status each runtime request reported, by request id. */
+    const requestStatuses = (seen: ReadonlyArray<AdapterEvent>) => {
+      const statuses = new Map<string, string>();
+      for (const event of seen) {
+        if (event.type === "runtime_request.updated") {
+          statuses.set(String(event.runtimeRequest.id), event.runtimeRequest.status);
+        }
+      }
+      return statuses;
+    };
+
+    const requestDecisions = (seen: ReadonlyArray<AdapterEvent>) =>
+      seen.flatMap((event) =>
+        event.type === "runtime_request.updated" && event.runtimeRequest.status === "resolved"
+          ? [event.runtimeRequest.decision]
+          : [],
+      );
+
+    /**
+     * Runs the shipped bridge's `tool_call` hook in the runtime mode the adapter
+     * launched Prime with. Its `ctx.ui.confirm` travels over FakePrime's stdout
+     * the way Prime's RPC UI context sends it, and resolves from the adapter's
+     * `extension_ui_response` (modes/rpc/rpc-extension-ui-context.ts).
+     */
+    const runBridgeToolCall = (fake: FakePrime, toolName: string, input: unknown) =>
+      Effect.gen(function* () {
+        const runtimeMode = fake.lastSpawn().env.T3_PRIME_RUNTIME_MODE;
+        const bridge = yield* Effect.promise(() =>
+          loadMcpBridge({
+            ...(runtimeMode === undefined ? {} : { runtimeMode }),
+            unreachable: true,
+          }),
+        );
+        const hook = bridge.handlers.get("tool_call") as unknown as BridgeToolCallHook;
+        const dialogs: Array<{ readonly id: string; readonly response: PrimeRpcRecord }> = [];
+        const titles: Array<string> = [];
+        const result = yield* Effect.promise(() =>
+          hook(
+            { toolName, input },
+            {
+              ui: {
+                confirm: (title, message) => {
+                  titles.push(title);
+                  const id = `dlg-${titles.length}`;
+                  return Effect.runPromise(
+                    Effect.gen(function* () {
+                      yield* fake.emit({
+                        type: "extension_ui_request",
+                        id,
+                        method: "confirm",
+                        title,
+                        message,
+                      });
+                      const response = yield* fake.takeRequest("extension_ui_response");
+                      dialogs.push({ id, response });
+                      return response["cancelled"] !== true && response["confirmed"] === true;
+                    }),
+                  );
+                },
+              },
+            },
+          ),
+        );
+        return { result, titles, dialogs };
+      });
+
+    const ipythonCell = (fake: FakePrime, toolCallId: string, code: string, blockedBy?: string) =>
+      Effect.gen(function* () {
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId,
+          toolName: "ipython",
+          args: { code },
+        });
+        yield* fake.emit({
+          type: "tool_execution_end",
+          toolCallId,
+          toolName: "ipython",
+          isError: blockedBy !== undefined,
+          result:
+            blockedBy === undefined
+              ? {
+                  content: [{ type: "text", text: "approved\n" }],
+                  details: { status: "ok", stdout: "approved\n" },
+                }
+              : { content: [{ type: "text", text: blockedBy }], details: {} },
+        });
+      });
+
+    const finalCommandStatus = (seen: ReadonlyArray<AdapterEvent>, toolCallId: string) =>
+      seen
+        .flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "command_execution" &&
+          event.turnItem.nativeItemRef?.nativeId === toolCallId
+            ? [event.turnItem.status]
+            : [],
+        )
+        .at(-1);
+
+    it.effect.each(["approval-required", "auto-accept-edits"] as const)(
+      "[VAL-REQ-001] APPROVE_ME in %s: the bridge's ipython confirm becomes one pending approval, accept answers {confirmed: true} with the same id, the cell runs, and the turn completes once",
+      (runtimeMode) =>
+        Effect.gen(function* () {
+          const { fake, runtime, seen, record, begin } = yield* openTurn(undefined, runtimeMode);
+          assert.equal(fake.lastSpawn().env.T3_PRIME_RUNTIME_MODE, runtimeMode);
+          yield* begin("APPROVE_ME");
+          yield* fake.emit({ type: "agent_start" });
+          const gate = yield* runBridgeToolCall(fake, "ipython", {
+            code: "print('approved')",
+          }).pipe(Effect.forkScoped);
+
+          const request = yield* takePendingRequest(record);
+          assert.equal(request.kind, "command");
+          assert.equal(request.nativeRequestRef?.nativeId, "dlg-1");
+          assert.isNotNull(request.providerTurnId);
+          const approval = yield* record(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "approval_request",
+          );
+          assert.isTrue(
+            approval.type === "turn_item.updated" &&
+              approval.turnItem.type === "approval_request" &&
+              approval.turnItem.title === "Allow ipython?" &&
+              approval.turnItem.requestKind === "command" &&
+              approval.turnItem.status === "waiting",
+          );
+
+          yield* runtime.respondToRuntimeRequest({ requestId: request.id, decision: "accept" });
+          const { result, titles, dialogs } = yield* Fiber.join(gate);
+          assert.deepEqual(titles, ["Allow ipython?"]);
+          assert.isUndefined(result, "the bridge lets the approved cell run");
+          assert.deepEqual(dialogs[0]?.response, {
+            type: "extension_ui_response",
+            id: "dlg-1",
+            confirmed: true,
+          });
+          yield* record(
+            (event) =>
+              event.type === "runtime_request.updated" &&
+              event.runtimeRequest.id === request.id &&
+              event.runtimeRequest.status === "resolved",
+          );
+
+          yield* ipythonCell(fake, "cell-1", "print('approved')");
+          yield* replyText(fake, "approved");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(finalCommandStatus(seen, "cell-1"), "completed");
+          assert.deepEqual([...requestStatuses(seen).values()], ["resolved"]);
+          assert.deepEqual(requestDecisions(seen), ["accept"]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-REQ-001] APPROVE_ME in full-access: the bridge runs ipython without a dialog, no runtime request opens, and the turn completes",
+      () =>
+        Effect.gen(function* () {
+          const { fake, seen, record, begin } = yield* openTurn(undefined, "full-access");
+          assert.equal(fake.lastSpawn().env.T3_PRIME_RUNTIME_MODE, "full-access");
+          yield* begin("APPROVE_ME");
+          yield* fake.emit({ type: "agent_start" });
+          const { result, titles } = yield* runBridgeToolCall(fake, "ipython", {
+            code: "print('approved')",
+          });
+          assert.isUndefined(result);
+          assert.deepEqual(titles, []);
+          yield* ipythonCell(fake, "cell-1", "print('approved')");
+          yield* replyText(fake, "approved");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.equal(finalCommandStatus(seen, "cell-1"), "completed");
+          assert.isFalse(seen.some((event) => event.type === "runtime_request.updated"));
+          assert.notInclude(fake.commandLog(), "extension_ui_response");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-REQ-001] a confirm that still arrives in full-access opens an approval as in Pi's v2 adapter, and completing the turn cancels it so none stays pending",
+      () =>
+        Effect.gen(function* () {
+          const { fake, seen, record, begin } = yield* openTurn(undefined, "full-access");
+          yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({
+            type: "extension_ui_request",
+            id: "other-extension",
+            method: "confirm",
+            title: "Deploy to staging?",
+            message: "A user extension asks this.",
+          });
+          const request = yield* takePendingRequest(record);
+          assert.equal(request.kind, "command");
+          yield* replyText(fake, "done");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.equal(requestStatuses(seen).get(String(request.id)), "cancelled");
+          const cancelledAt = seen.findIndex(
+            (event) =>
+              event.type === "runtime_request.updated" &&
+              event.runtimeRequest.id === request.id &&
+              event.runtimeRequest.status === "cancelled",
+          );
+          assert.isBelow(cancelledAt, seen.indexOf(terminal));
+          const response = yield* fake.takeRequest("extension_ui_response");
+          assert.deepEqual(response, {
+            type: "extension_ui_response",
+            id: "other-extension",
+            cancelled: true,
+          });
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-REQ-002] declining answers {confirmed: false} with the same id; the bridge blocks the cell and the turn continues and settles once",
+      () =>
+        Effect.gen(function* () {
+          const { fake, runtime, seen, record, begin } = yield* openTurn(
+            undefined,
+            "approval-required",
+          );
+          yield* begin("APPROVE_ME");
+          yield* fake.emit({ type: "agent_start" });
+          const gate = yield* runBridgeToolCall(fake, "ipython", {
+            code: "import shutil; shutil.rmtree('build')",
+          }).pipe(Effect.forkScoped);
+          const request = yield* takePendingRequest(record);
+          yield* runtime.respondToRuntimeRequest({ requestId: request.id, decision: "decline" });
+          const { result, dialogs } = yield* Fiber.join(gate);
+          assert.deepEqual(dialogs[0]?.response, {
+            type: "extension_ui_response",
+            id: "dlg-1",
+            confirmed: false,
+          });
+          assert.deepEqual(result, { block: true, reason: "ipython was declined in T3 Code." });
+          yield* ipythonCell(fake, "cell-1", "import shutil", result?.reason);
+          yield* replyText(fake, "The cell was declined, so nothing ran.");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(finalCommandStatus(seen, "cell-1"), "failed");
+          assert.isTrue(seen.some(isAssistantText("The cell was declined, so nothing ran.")));
+          assert.deepEqual([...requestStatuses(seen).values()], ["resolved"]);
+          assert.deepEqual(requestDecisions(seen), ["decline"]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      {
+        method: "select",
+        dialog: { title: "Deploy where?", options: ["staging", "production"] },
+        answer: "production",
+      },
+      {
+        method: "input",
+        dialog: { title: "Release name", placeholder: "v1.2.3" },
+        answer: "v2.0.0",
+      },
+      {
+        method: "editor",
+        dialog: { title: "Commit message", prefill: "fix: draft" },
+        answer: "fix: final message\n",
+      },
+    ])(
+      "[VAL-REQ-003] $method becomes a user-input request; an answer returns {value} and a cancel returns {cancelled: true}",
+      ({ method, dialog, answer }) =>
+        Effect.gen(function* () {
+          const { fake, runtime, seen, record, begin } = yield* openTurn(
+            undefined,
+            "approval-required",
+          );
+          yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+
+          yield* fake.emit({ type: "extension_ui_request", id: `${method}-1`, method, ...dialog });
+          const request = yield* takePendingRequest(record);
+          assert.equal(request.kind, "user_input");
+          const item = yield* record(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
+          );
+          assert.isTrue(
+            item.type === "turn_item.updated" && item.turnItem.type === "user_input_request",
+          );
+          if (item.type !== "turn_item.updated" || item.turnItem.type !== "user_input_request")
+            return;
+          const question = item.turnItem.questions[0];
+          assert.equal(question?.id, `${method}-1`);
+          assert.equal(question?.header, dialog.title);
+          if (method === "select") {
+            assert.deepEqual(
+              question?.options.map((option) => option.value),
+              ["staging", "production"],
+              "Prime's option strings are the answer values",
+            );
+          }
+          yield* runtime.respondToRuntimeRequest({
+            requestId: request.id,
+            answers: { [`${method}-1`]: answer },
+          });
+          assert.deepEqual(yield* fake.takeRequest("extension_ui_response"), {
+            type: "extension_ui_response",
+            id: `${method}-1`,
+            value: answer,
+          });
+
+          yield* fake.emit({ type: "extension_ui_request", id: `${method}-2`, method, ...dialog });
+          const second = yield* takePendingRequest(record);
+          yield* runtime.respondToRuntimeRequest({ requestId: second.id, decision: "cancel" });
+          assert.deepEqual(yield* fake.takeRequest("extension_ui_response"), {
+            type: "extension_ui_response",
+            id: `${method}-2`,
+            cancelled: true,
+          });
+
+          yield* replyText(fake, "answered");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.notInclude([...requestStatuses(seen).values()], "pending");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([{ path: "interrupt" }, { path: "failure" }, { path: "process exit" }] as const)(
+      "[VAL-REQ-004] $path cancels every open request before turn.terminal and leaves none pending",
+      ({ path }) =>
+        Effect.gen(function* () {
+          const { fake, runtime, providerThread, seen, record, begin } = yield* openTurn(
+            undefined,
+            "approval-required",
+          );
+          yield* begin();
+          const running = yield* record(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+          );
+          const providerTurnId =
+            running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({
+            type: "extension_ui_request",
+            id: "open-confirm",
+            method: "confirm",
+            title: "Allow ipython?",
+            message: "{}",
+          });
+          const confirm = yield* takePendingRequest(record);
+          yield* fake.emit({
+            type: "extension_ui_request",
+            id: "open-select",
+            method: "select",
+            title: "Pick one",
+            options: ["a", "b"],
+          });
+          const select = yield* takePendingRequest(record);
+
+          if (path === "interrupt") {
+            yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
+            yield* fake.takeRequest("abort");
+            yield* fake.emit(agentEnd(true));
+          } else if (path === "failure") {
+            yield* fake.emit({
+              type: "agent_end",
+              messages: [
+                { role: "assistant", content: [], stopReason: "error", errorMessage: "boom" },
+              ],
+            });
+          } else {
+            yield* fake.exit(1);
+          }
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === (path === "interrupt" ? "interrupted" : "failed"),
+          );
+          const statuses = requestStatuses(seen);
+          assert.equal(statuses.get(String(confirm.id)), "cancelled");
+          assert.equal(statuses.get(String(select.id)), "cancelled");
+          const terminalIndex = seen.indexOf(terminal);
+          for (const id of [confirm.id, select.id]) {
+            const cancelledAt = seen.findIndex(
+              (event) =>
+                event.type === "runtime_request.updated" &&
+                event.runtimeRequest.id === id &&
+                event.runtimeRequest.status === "cancelled",
+            );
+            assert.isBelow(cancelledAt, terminalIndex);
+          }
+          const requestItemStatuses = new Map<string, string>();
+          for (const event of seen) {
+            if (
+              event.type === "turn_item.updated" &&
+              (event.turnItem.type === "approval_request" ||
+                event.turnItem.type === "user_input_request")
+            ) {
+              requestItemStatuses.set(String(event.turnItem.id), event.turnItem.status);
+            }
+          }
+          assert.deepEqual([...requestItemStatuses.values()], ["cancelled", "cancelled"]);
+          const late = yield* Effect.result(
+            runtime.respondToRuntimeRequest({ requestId: confirm.id, decision: "accept" }),
+          );
+          assert.equal(late._tag, "Failure", "a closed request cannot be answered");
+          if (path !== "process exit") {
+            const cancelled = fake
+              .allRequests()
+              .filter((request) => request["type"] === "extension_ui_response");
+            assert.deepEqual(
+              cancelled.map((request) => [request["id"], request["cancelled"]]),
+              [
+                ["open-confirm", true],
+                ["open-select", true],
+              ],
+            );
+          }
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
