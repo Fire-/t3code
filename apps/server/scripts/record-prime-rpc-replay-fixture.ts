@@ -14,11 +14,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import * as Net from "node:net";
 import * as OS from "node:os";
 
 import {
@@ -35,6 +33,7 @@ import { ORCHESTRATOR_REPLAY_FIXTURES } from "../src/orchestration-v2/testkit/fi
 import { materializeFixtureInput } from "../src/orchestration-v2/testkit/fixtures/shared.ts";
 import { runOrchestratorV2ProviderReplayScenario } from "../src/orchestration-v2/testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
+import { withPrimeRecorderDaemonCleanup } from "./primeRecorderDaemon.ts";
 
 /**
  * How each recordable Prime scenario launches. The fixture registration in
@@ -80,9 +79,7 @@ const RECORDABLE_MODELS = new Set(["mistral/ministral-3b-latest", "mistral/zai-g
 /** Keeps the user's skills, context files and discovered extensions out of the recording. */
 const HERMETIC_LAUNCH_ARGS = ["--no-skills", "--no-context-files", "--no-extensions"];
 const CLOCK_TICK = Duration.millis(20);
-const DAEMON_SHUTDOWN_TIMEOUT = Duration.seconds(10);
 const PREVIOUS_EXIT_TIMEOUT = Duration.seconds(20);
-const PRIME_DAEMON_PROTOCOL_NAME = "prime-agent.daemon";
 
 function readArgValue(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -418,147 +415,145 @@ function makeIsolatingSpawner(
   });
 }
 
-interface DaemonHello {
-  readonly clientId: string;
-  readonly supervisorPid: number;
-  readonly protocolVersion: number;
-}
-
-interface DaemonShutdownReply {
-  readonly hello: DaemonHello;
-  readonly accepted: boolean;
-}
-
-/**
- * Prime's own per-socket stop (`cli/daemon-launch.ts` `shutdownDaemonAndWait`):
- * read `daemon_hello`, send one `shutdown` command for that client, and let the
- * supervisor close. `prime-agent shutdown` would stop every daemon, the user's
- * included, so it is never used.
- */
-const sendDaemonShutdown = (socketPath: string) =>
-  Effect.callback<DaemonShutdownReply, PrimeRecorderError>((resume) => {
-    const socket = Net.createConnection(socketPath);
-    let buffer = "";
-    let hello: DaemonHello | undefined;
-    let accepted = false;
-    let settled = false;
-    const fail = (detail: string) => Effect.fail(new PrimeRecorderError({ detail }));
-    const finish = (effect: Effect.Effect<DaemonShutdownReply, PrimeRecorderError>) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resume(effect);
-    };
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        let message: unknown;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (!isRecord(message)) continue;
-        if (message.type === "daemon_hello" && hello === undefined) {
-          const protocol = isRecord(message.protocol) ? message.protocol : {};
-          if (typeof message.clientId !== "string" || typeof message.supervisorPid !== "number") {
-            finish(fail("daemon_hello lacks clientId or supervisorPid"));
-            return;
-          }
-          hello = {
-            clientId: message.clientId,
-            supervisorPid: message.supervisorPid,
-            protocolVersion: typeof protocol.version === "number" ? protocol.version : 7,
-          };
-          socket.write(
-            `${JSON.stringify({
-              type: "command",
-              id: "ctl_1",
-              protocol: { name: PRIME_DAEMON_PROTOCOL_NAME, version: hello.protocolVersion },
-              clientId: hello.clientId,
-              command: { type: "shutdown", id: "ctl_1" },
-            })}\n`,
-          );
-        } else if (message.type === "response" && message.command === "shutdown") {
-          accepted = message.success === true;
-          if (!accepted) {
-            finish(fail(`daemon refused shutdown: ${line}`));
-            return;
-          }
-        } else if (message.type === "daemon_closing" && hello !== undefined) {
-          finish(Effect.succeed({ hello, accepted }));
-          return;
-        }
-      }
-    });
-    socket.on("error", (error) => finish(fail(`daemon socket error: ${error.message}`)));
-    socket.on("close", () =>
-      finish(
-        hello === undefined
-          ? fail("daemon socket closed before daemon_hello")
-          : Effect.succeed({ hello, accepted }),
-      ),
-    );
-    return Effect.sync(() => socket.destroy());
-  });
-
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-/** Stops the recorder's private daemon and confirms its socket, lock and supervisor are gone. */
-const stopPrivateDaemon = (socketPath: string) =>
+const recordTranscript = (input: {
+  readonly paths: RecordingPaths;
+  readonly primeVersion: string;
+  readonly outputPath: string;
+  readonly fixtureInput: ReturnType<typeof fixture.buildInput>;
+  readonly invocations: Array<string>;
+}) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    if (!(yield* fs.exists(socketPath))) {
-      yield* Console.log(`private daemon: none was started on ${socketPath}`);
-      return;
-    }
-    const reply = yield* sendDaemonShutdown(socketPath).pipe(
-      Effect.timeoutOrElse({
-        duration: DAEMON_SHUTDOWN_TIMEOUT,
-        orElse: () =>
-          Effect.fail(new PrimeRecorderError({ detail: "no daemon_closing within the timeout" })),
-      }),
-    );
-    const gone = Effect.gen(function* () {
-      const socketLeft = yield* fs.exists(socketPath);
-      const lockLeft = yield* fs.exists(`${socketPath}.lock`);
-      return !socketLeft && !lockLeft && !processExists(reply.hello.supervisorPid);
-    });
-    const stopped = yield* gone.pipe(
-      Effect.repeat({
-        until: (done) => done,
-        schedule: Schedule.spaced(Duration.millis(100)),
-      }),
-      Effect.timeoutOrElse({
-        duration: DAEMON_SHUTDOWN_TIMEOUT,
-        orElse: () => Effect.succeed(false),
-      }),
-    );
-    if (!stopped) {
+    const path = yield* Path.Path;
+    const { paths, primeVersion, outputPath, fixtureInput, invocations } = input;
+    const entries: Array<ProviderReplayEntry> = [];
+    const placeholder: ProviderReplayTranscript = {
+      provider: PRIME_PROVIDER,
+      protocol: PRIME_RPC_REPLAY_PROTOCOL,
+      version: primeVersion,
+      scenario: fixture.name,
+      entries: [],
+    };
+    const layerRecordingSpawner = Layer.effect(
+      ChildProcessSpawner.ChildProcessSpawner,
+      Effect.map(Effect.service(ChildProcessSpawner.ChildProcessSpawner), (live) =>
+        makePrimeRecordingSpawner(
+          makeIsolatingSpawner(live, {
+            paths,
+            bridge: scenario.bridge,
+            awaitPreviousExit: scenario.awaitPreviousExit ?? false,
+            invocations,
+          }),
+          entries,
+        ),
+      ),
+    ).pipe(Layer.provide(NodeServices.layer));
+
+    const materializeInput = materializeFixtureInput({
+      scenario: fixture.name,
+      fixtureInput,
+      driver: variant.driver,
+      modelSelection: variant.modelSelection,
+    }).pipe(Effect.provide(IdAllocator.layer));
+    const continuationOptions =
+      variant.runContinuationWorker === true ? { runContinuationWorker: true } : {};
+
+    yield* Effect.gen(function* () {
+      yield* followWallClock.pipe(Effect.forkScoped);
+      const materialized = yield* materializeInput;
+      yield* runOrchestratorV2ProviderReplayScenario(
+        {
+          name: `${fixture.name}/prime-agent:record`,
+          transcript: placeholder,
+          commands: materialized.commands,
+          steps: materialized.steps,
+          projectionThreadIds: materialized.projectionThreadIds,
+          runtimePolicyOverride: { ...variant.runtimePolicyOverride, cwd: paths.workspace },
+        },
+        {
+          driver: PRIME_PROVIDER,
+          decodeTranscript: Effect.succeed,
+          makeProviderAdapterRegistryLayer: () =>
+            PrimeAdapterV2Testkit.layer({
+              scenario: fixture.name,
+              binaryPath: primeBinary,
+              launchArgs,
+              spawner: layerRecordingSpawner,
+            }),
+        },
+        continuationOptions,
+      );
+    }).pipe(Effect.scoped, provideDeterministicTestRuntime);
+
+    const transcript = {
+      ...placeholder,
+      metadata: {
+        generatedBy: "live-prime-recorder",
+        primeVersion,
+        model: variant.modelSelection.model,
+        launchArgs,
+        bridge: scenario.bridge,
+        recorderIsolation:
+          "--daemon-socket <private /tmp socket> --session-dir /sessions added below the adapter",
+      },
+      entries: normalizeEntries({ entries, paths, modelSlug: variant.modelSelection.model }),
+    } satisfies ProviderReplayTranscript;
+
+    const encoded = encodeTranscriptNdjson(transcript);
+    // A rejected recording stays on this machine, outside the worktree, so it can
+    // be inspected or fixed without spending another model turn.
+    const rejectedPath = `/tmp/pv2r/${fixture.name}.rejected.ndjson`;
+    const keepRejected = (reason: string) =>
+      fs
+        .writeFileString(rejectedPath, encoded)
+        .pipe(
+          Effect.andThen(Console.error(`${reason}; normalized transcript kept at ${rejectedPath}`)),
+          Effect.ignore,
+        );
+    const leaks = forbiddenTranscriptContent(paths).filter(([, pattern]) => pattern.test(encoded));
+    if (leaks.length > 0) {
+      const lines = encoded.split("\n");
+      const details = leaks.map(([name, pattern]) => {
+        const line = lines.findIndex((candidate) => pattern.test(candidate));
+        return `${name} (transcript line ${line + 1})`;
+      });
+      yield* keepRejected("Scrub check failed");
       return yield* new PrimeRecorderError({
-        detail: `private daemon on ${socketPath} (supervisorPid ${reply.hello.supervisorPid}) did not exit`,
+        detail: `Refusing to write ${outputPath}: normalization left ${details.join(", ")}.`,
       });
     }
-    yield* Console.log(
-      `private daemon: shutdown accepted=${reply.accepted}; supervisorPid ${reply.hello.supervisorPid} exited; ${socketPath} and its lock removed`,
+
+    // The live projection still holds raw session paths, so the fixture's
+    // assertions run on a replay of the normalized transcript. A recording that
+    // fails them never replaces the existing fixture.
+    yield* Effect.gen(function* () {
+      const replayWorkspace = yield* checkpointWorkspace(fixture.name, fixtureInput.workspaceFiles);
+      const materialized = yield* materializeInput;
+      const replayResult = yield* runOrchestratorV2ProviderReplayScenario(
+        {
+          name: `${fixture.name}/prime-agent:verify`,
+          transcript: yield* PrimeOrchestratorReplayHarness.decodeTranscript(transcript),
+          commands: materialized.commands,
+          steps: materialized.steps,
+          projectionThreadIds: materialized.projectionThreadIds,
+          runtimePolicyOverride: { ...variant.runtimePolicyOverride, cwd: replayWorkspace },
+        },
+        PrimeOrchestratorReplayHarness,
+        continuationOptions,
+      );
+      variant.assertOutput(replayResult, transcript);
+    }).pipe(
+      Effect.scoped,
+      provideDeterministicTestRuntime,
+      Effect.tapCause(() => keepRejected("Verification failed")),
     );
-  }).pipe(
-    Effect.catch((error) =>
-      Console.error(
-        `private daemon: FAILED to stop ${socketPath}: ${String(error)}. Stop it with the per-socket shutdown message; never with \`prime-agent shutdown\`.`,
-      ),
-    ),
-  );
+
+    yield* fs.makeDirectory(path.dirname(outputPath), { recursive: true });
+    yield* fs.writeFileString(outputPath, encoded);
+    yield* Console.log(
+      `Wrote ${transcript.entries.length} Prime RPC replay entries to ${outputPath}`,
+    );
+  });
 
 const record = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -578,145 +573,16 @@ const record = Effect.gen(function* () {
   };
   yield* fs.makeDirectory(paths.sessionDir, { recursive: true });
   yield* makeRecordingWorkspace(paths.workspace, fixtureInput.workspaceFiles ?? {});
-  yield* Effect.addFinalizer(() =>
-    fs.remove(root, { recursive: true, force: true }).pipe(Effect.ignore),
-  );
   const invocations: Array<string> = [`prime-agent --version (printed ${primeVersion})`];
-  // Registered after the workspace cleanup so it runs first, and on every exit path.
-  yield* Effect.addFinalizer(() =>
-    Effect.gen(function* () {
-      for (const invocation of invocations) yield* Console.log(`invocation: ${invocation}`);
-      yield* stopPrivateDaemon(paths.daemonSocket);
-    }).pipe(Effect.provideService(FileSystem.FileSystem, fs)),
-  );
-
-  const entries: Array<ProviderReplayEntry> = [];
-  const placeholder: ProviderReplayTranscript = {
-    provider: PRIME_PROVIDER,
-    protocol: PRIME_RPC_REPLAY_PROTOCOL,
-    version: primeVersion,
-    scenario: fixture.name,
-    entries: [],
-  };
-  const layerRecordingSpawner = Layer.effect(
-    ChildProcessSpawner.ChildProcessSpawner,
-    Effect.map(Effect.service(ChildProcessSpawner.ChildProcessSpawner), (live) =>
-      makePrimeRecordingSpawner(
-        makeIsolatingSpawner(live, {
-          paths,
-          bridge: scenario.bridge,
-          awaitPreviousExit: scenario.awaitPreviousExit ?? false,
-          invocations,
-        }),
-        entries,
-      ),
-    ),
-  ).pipe(Layer.provide(NodeServices.layer));
-
-  const materializeInput = materializeFixtureInput({
-    scenario: fixture.name,
-    fixtureInput,
-    driver: variant.driver,
-    modelSelection: variant.modelSelection,
-  }).pipe(Effect.provide(IdAllocator.layer));
-  const continuationOptions =
-    variant.runContinuationWorker === true ? { runContinuationWorker: true } : {};
-
-  yield* Effect.gen(function* () {
-    yield* followWallClock.pipe(Effect.forkScoped);
-    const materialized = yield* materializeInput;
-    yield* runOrchestratorV2ProviderReplayScenario(
-      {
-        name: `${fixture.name}/prime-agent:record`,
-        transcript: placeholder,
-        commands: materialized.commands,
-        steps: materialized.steps,
-        projectionThreadIds: materialized.projectionThreadIds,
-        runtimePolicyOverride: { ...variant.runtimePolicyOverride, cwd: paths.workspace },
-      },
-      {
-        driver: PRIME_PROVIDER,
-        decodeTranscript: Effect.succeed,
-        makeProviderAdapterRegistryLayer: () =>
-          PrimeAdapterV2Testkit.layer({
-            scenario: fixture.name,
-            binaryPath: primeBinary,
-            launchArgs,
-            spawner: layerRecordingSpawner,
-          }),
-      },
-      continuationOptions,
-    );
-  }).pipe(Effect.scoped, provideDeterministicTestRuntime);
-
-  const transcript = {
-    ...placeholder,
-    metadata: {
-      generatedBy: "live-prime-recorder",
-      primeVersion,
-      model: variant.modelSelection.model,
-      launchArgs,
-      bridge: scenario.bridge,
-      recorderIsolation:
-        "--daemon-socket <private /tmp socket> --session-dir /sessions added below the adapter",
+  yield* withPrimeRecorderDaemonCleanup(
+    recordTranscript({ paths, primeVersion, outputPath, fixtureInput, invocations }),
+    {
+      socketPath: paths.daemonSocket,
+      root,
+      workspace: paths.workspace,
+      invocations,
     },
-    entries: normalizeEntries({ entries, paths, modelSlug: variant.modelSelection.model }),
-  } satisfies ProviderReplayTranscript;
-
-  const encoded = encodeTranscriptNdjson(transcript);
-  // A rejected recording stays on this machine, outside the worktree, so it can
-  // be inspected or fixed without spending another model turn.
-  const rejectedPath = `/tmp/pv2r/${fixture.name}.rejected.ndjson`;
-  const keepRejected = (reason: string) =>
-    fs
-      .writeFileString(rejectedPath, encoded)
-      .pipe(
-        Effect.andThen(Console.error(`${reason}; normalized transcript kept at ${rejectedPath}`)),
-        Effect.ignore,
-      );
-  const leaks = forbiddenTranscriptContent(paths).filter(([, pattern]) => pattern.test(encoded));
-  if (leaks.length > 0) {
-    const lines = encoded.split("\n");
-    const details = leaks.map(([name, pattern]) => {
-      const line = lines.findIndex((candidate) => pattern.test(candidate));
-      return `${name} (transcript line ${line + 1})`;
-    });
-    yield* keepRejected("Scrub check failed");
-    return yield* new PrimeRecorderError({
-      detail: `Refusing to write ${outputPath}: normalization left ${details.join(", ")}.`,
-    });
-  }
-
-  // The live projection still holds raw session paths, so the fixture's
-  // assertions run on a replay of the normalized transcript. A recording that
-  // fails them never replaces the existing fixture.
-  yield* Effect.gen(function* () {
-    const replayWorkspace = yield* checkpointWorkspace(fixture.name, fixtureInput.workspaceFiles);
-    const materialized = yield* materializeInput;
-    const replayResult = yield* runOrchestratorV2ProviderReplayScenario(
-      {
-        name: `${fixture.name}/prime-agent:verify`,
-        transcript: yield* PrimeOrchestratorReplayHarness.decodeTranscript(transcript),
-        commands: materialized.commands,
-        steps: materialized.steps,
-        projectionThreadIds: materialized.projectionThreadIds,
-        runtimePolicyOverride: { ...variant.runtimePolicyOverride, cwd: replayWorkspace },
-      },
-      PrimeOrchestratorReplayHarness,
-      continuationOptions,
-    );
-    variant.assertOutput(replayResult, transcript);
-  }).pipe(
-    Effect.scoped,
-    provideDeterministicTestRuntime,
-    Effect.tapCause(() => keepRejected("Verification failed")),
-  );
-
-  yield* fs.makeDirectory(path.dirname(outputPath), { recursive: true });
-  yield* fs.writeFileString(outputPath, encoded);
-  yield* Console.log(
-    `Wrote ${transcript.entries.length} Prime RPC replay entries to ${outputPath}`,
   );
 });
 
-record.pipe(Effect.scoped, Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+record.pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
