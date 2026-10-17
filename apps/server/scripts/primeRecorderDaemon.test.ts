@@ -9,6 +9,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
+import * as Console from "effect/Console";
 import * as Net from "node:net";
 
 import {
@@ -21,7 +22,7 @@ const BOUND = Duration.seconds(5);
 const SUPERVISOR_PID = 424_242;
 
 /**
- * - `accept`: answers like Prime and removes its socket before `daemon_closing`.
+ * - `accept`: answers like Prime and removes its socket and lock before `daemon_closing`.
  * - `accept-keep-listening`: answers like Prime but its socket stays.
  * - `refuse`: answers the shutdown with `success: false`.
  * - `silent`: never answers the shutdown.
@@ -46,6 +47,8 @@ const shortTempDirectory = Effect.acquireRelease(
 
 const fakeDaemon = (socketPath: string, behavior: FakeDaemonBehavior) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
     const shutdownReceived = yield* Deferred.make<string>();
     const connections = new Set<Net.Socket>();
     const server = Net.createServer((connection) => {
@@ -71,7 +74,9 @@ const fakeDaemon = (socketPath: string, behavior: FakeDaemonBehavior) =>
           case "accept":
             connection.write(`{"type":"response","command":"shutdown","success":true}\n`);
             server.close();
-            connection.end(`{"type":"daemon_closing"}\n`);
+            void runPromise(fs.remove(`${socketPath}.lock`, { recursive: true, force: true })).then(
+              () => connection.end(`{"type":"daemon_closing"}\n`),
+            );
             return;
           case "accept-keep-listening":
             connection.write(`{"type":"response","command":"shutdown","success":true}\n`);
@@ -107,6 +112,31 @@ const supervisorAlive = (alive: boolean) =>
     const checked = yield* Deferred.make<number>();
     const isProcessAlive = (pid: number) => Deferred.succeed(checked, pid).pipe(Effect.as(alive));
     return { checked, isProcessAlive };
+  });
+
+/**
+ * Lets the real FileSystem through and resolves `lockSeen` the first time the
+ * daemon lock is found, which is when the stop starts waiting on the clock.
+ */
+const watchLock = (lockPath: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const lockSeen = yield* Deferred.make<void>();
+    const watched = FileSystem.FileSystem.of({
+      ...fs,
+      exists: (path) =>
+        fs
+          .exists(path)
+          .pipe(
+            Effect.tap((found) =>
+              path === lockPath && found ? Deferred.succeed(lockSeen, undefined) : Effect.void,
+            ),
+          ),
+    });
+    // Also returns when the stop finishes without waiting, so a broken stop fails the test instead of hanging it.
+    const waiting = <A, E>(fiber: Fiber.Fiber<A, E>) =>
+      Effect.raceFirst(Deferred.await(lockSeen), Effect.asVoid(Fiber.await(fiber)));
+    return { lockSeen, waiting, provide: Effect.provideService(FileSystem.FileSystem, watched) };
   });
 
 const withFakeDaemon = <A, E, R>(
@@ -299,4 +329,97 @@ it.effect(
         assert.isFalse(yield* fs.exists(root));
       }),
     ),
+);
+
+it.effect(
+  "[VAL-FIX-012] a lock left without a socket past the bound fails cleanup and keeps the workspace",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* shortTempDirectory;
+      const socketPath = `${directory}/d.sock`;
+      // Prime's socket lease is a proper-lockfile directory with no pid inside.
+      yield* fs.makeDirectory(`${socketPath}.lock`);
+      const root = `${directory}/recording`;
+      const workspace = `${root}/ws`;
+      yield* fs.makeDirectory(workspace, { recursive: true });
+      const printed: Array<string> = [];
+      const testConsole = {
+        ...globalThis.console,
+        error: (...args: ReadonlyArray<unknown>) => {
+          printed.push(args.join(" "));
+        },
+      } satisfies Console.Console;
+      const lock = yield* watchLock(`${socketPath}.lock`);
+      const fiber = yield* withPrimeRecorderDaemonCleanup(Effect.succeed("recorded"), {
+        socketPath,
+        root,
+        workspace,
+        invocations: [],
+        stopOptions: { bound: BOUND },
+      }).pipe(
+        lock.provide,
+        Effect.provideService(Console.Console, testConsole),
+        Effect.flip,
+        Effect.forkScoped,
+      );
+      yield* lock.waiting(fiber);
+      yield* TestClock.adjust(BOUND);
+      const error = yield* Fiber.join(fiber);
+      assert.instanceOf(error, PrimeRecorderDaemonStopError);
+      assert.strictEqual(error.socketPath, socketPath);
+      assert.isNull(error.supervisorPid);
+      assert.include(error.detail, `${socketPath}.lock`);
+      assert.isTrue(yield* fs.exists(workspace));
+      const output = printed.join("\n");
+      assert.include(output, socketPath);
+      assert.include(output, "supervisorPid: unknown");
+      assert.include(output, workspace);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("[VAL-FIX-012] a lock that goes away within the bound means no daemon was started", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* shortTempDirectory;
+    const socketPath = `${directory}/d.sock`;
+    yield* fs.makeDirectory(`${socketPath}.lock`);
+    const lock = yield* watchLock(`${socketPath}.lock`);
+    const fiber = yield* stopPrimeRecorderDaemon(socketPath, { bound: BOUND }).pipe(
+      lock.provide,
+      Effect.forkScoped,
+    );
+    yield* lock.waiting(fiber);
+    yield* fs.remove(`${socketPath}.lock`, { recursive: true });
+    yield* TestClock.adjust(Duration.seconds(1));
+    assert.deepStrictEqual(yield* Fiber.join(fiber), { _tag: "NotStarted" });
+    assert.isTrue(yield* Deferred.isDone(lock.lockSeen));
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "[VAL-FIX-012] a socket that appears next to the lock within the bound is shut down",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* shortTempDirectory;
+      const socketPath = `${directory}/d.sock`;
+      yield* fs.makeDirectory(`${socketPath}.lock`);
+      const lock = yield* watchLock(`${socketPath}.lock`);
+      const supervisor = yield* supervisorAlive(false);
+      const fiber = yield* stopPrimeRecorderDaemon(socketPath, {
+        bound: BOUND,
+        isProcessAlive: supervisor.isProcessAlive,
+      }).pipe(lock.provide, Effect.forkScoped);
+      yield* lock.waiting(fiber);
+      const daemon = yield* fakeDaemon(socketPath, "accept");
+      yield* TestClock.adjust(Duration.seconds(1));
+      assert.deepStrictEqual(yield* Fiber.join(fiber), {
+        _tag: "Stopped",
+        supervisorPid: SUPERVISOR_PID,
+      });
+      const command = JSON.parse(yield* Deferred.await(daemon.shutdownReceived));
+      assert.deepStrictEqual(command.command, { type: "shutdown", id: "ctl_1" });
+      assert.isFalse(yield* fs.exists(`${socketPath}.lock`));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

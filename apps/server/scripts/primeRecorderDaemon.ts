@@ -24,7 +24,10 @@ export class PrimeRecorderDaemonStopError extends Schema.TaggedError<PrimeRecord
 }
 
 interface StopOptions {
-  /** How long to wait for `daemon_closing`, and again for the socket, lock and supervisor to go. */
+  /**
+   * How long to wait for a socket next to a leftover lock, then for
+   * `daemon_closing`, and again for the socket, lock and supervisor to go.
+   */
   readonly bound?: Duration.Duration;
   readonly isProcessAlive?: (pid: number) => Effect.Effect<boolean>;
 }
@@ -120,7 +123,8 @@ const sendDaemonShutdown = (socketPath: string, onHello: (supervisorPid: number)
 /**
  * Stops the recorder's private daemon and confirms its socket, lock and
  * supervisor are gone. Every way that can fall short fails with the socket
- * path and, once the daemon said hello, its supervisor pid.
+ * path and, once the daemon said hello, its supervisor pid. NotStarted means
+ * neither the socket nor its lock exists.
  */
 export const stopPrimeRecorderDaemon = (socketPath: string, options: StopOptions = {}) =>
   Effect.gen(function* () {
@@ -136,7 +140,36 @@ export const stopPrimeRecorderDaemon = (socketPath: string, options: StopOptions
         .exists(path)
         .pipe(Effect.mapError((error) => stopError(`checking ${path} failed: ${error.message}`)));
 
-    if (!(yield* exists(socketPath))) return { _tag: "NotStarted" } as const;
+    const lockPath = `${socketPath}.lock`;
+
+    // A lock without a socket is a daemon still starting (it may listen after
+    // the recording gave up) or one that died uncleanly. Prime's lock is a
+    // proper-lockfile directory (modes/daemon/daemon-socket.ts
+    // acquireDaemonSocketPathLease), so it names no pid.
+    const presence = Effect.gen(function* () {
+      if (yield* exists(socketPath)) return "socket" as const;
+      return (yield* exists(lockPath)) ? ("lock-only" as const) : ("none" as const);
+    });
+    const last: { state: "socket" | "lock-only" | "none" } = { state: "lock-only" };
+    const resolved = yield* presence.pipe(
+      Effect.tap((state) =>
+        Effect.sync(() => {
+          last.state = state;
+        }),
+      ),
+      Effect.repeat({
+        until: (state) => state !== "lock-only",
+        schedule: Schedule.spaced(Duration.millis(100)),
+      }),
+      Effect.as(true),
+      Effect.timeoutOrElse({ duration: bound, orElse: () => Effect.succeed(false) }),
+    );
+    if (!resolved) {
+      return yield* stopError(
+        `${lockPath} still present without a socket ${Duration.format(bound)} after the recording ended (the daemon may still be starting or died uncleanly)`,
+      );
+    }
+    if (last.state === "none") return { _tag: "NotStarted" } as const;
 
     yield* sendDaemonShutdown(socketPath, (pid) => {
       daemon.supervisorPid = pid;
