@@ -11,9 +11,10 @@
 #   - re-execs itself when this script changes (adopting the live server)
 #
 # Idle probe reads projection_thread_sessions from the server's SQLite
-# database directly (read-only, WAL) - no HTTP endpoint or upstream patch
-# required: status IN ('starting','running') means a provider session is
-# active.
+# database directly (read-only, WAL): status IN ('starting','running') means
+# a provider session is active. Background work that outlives its turn
+# (subagents, workflows, watch loops) exists only in server memory, so the
+# probe also asks the server's loopback-only /api/daemon/background-work.
 #
 # Started via: mise run daemon  (nohup + disown, survives everything)
 
@@ -34,6 +35,7 @@ HOST="${T3_HOST:-0.0.0.0}"
 # time; unset/invalid inside the server falls back to its 30-day default).
 export T3CODE_SESSION_TTL="${T3CODE_SESSION_TTL:-180}"
 HEALTH_URL="http://127.0.0.1:$PORT/"
+BACKGROUND_WORK_URL="http://127.0.0.1:$PORT/api/daemon/background-work"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 # Tuning
@@ -48,6 +50,7 @@ HEALTH_DELAY=2
 server_pid=""
 last_binary_mtime=0
 consecutive_idle=0
+busy_reason=""
 crash_count=0
 # A self-re-exec passes the baseline of the server it leaves running.
 handoff_baseline=""
@@ -137,7 +140,20 @@ is_idle() {
 	busy=$(sqlite3 "$DB" \
 		"SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running');" \
 		2>/dev/null || echo 0)
-	[[ "$busy" == "0" ]]
+	if [[ "$busy" != "0" ]]; then
+		busy_reason="thread session active"
+		return 1
+	fi
+	# A build without the endpoint, or a server still starting, gives no
+	# count: fall back to the database check alone.
+	local threads
+	threads=$(curl -sf --max-time 3 "$BACKGROUND_WORK_URL" 2>/dev/null |
+		sed -nE 's/.*"backgroundWorkThreads":([0-9]+).*/\1/p' || true)
+	if [[ -n "$threads" && "$threads" != "0" ]]; then
+		busy_reason="$threads thread(s) with background work"
+		return 1
+	fi
+	return 0
 }
 
 current_binary_mtime() { stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0; }
@@ -330,7 +346,7 @@ while true; do
 				log "Idle check $consecutive_idle/$IDLE_THRESHOLD"
 			fi
 		else
-			log "Server busy (thread session active), will retry next cycle"
+			log "Server busy ($busy_reason), will retry next cycle"
 			consecutive_idle=0
 		fi
 	else

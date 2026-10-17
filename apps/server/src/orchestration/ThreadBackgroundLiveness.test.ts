@@ -226,4 +226,26 @@ describe("ThreadBackgroundLiveness", () => {
     a.clearThreadLiveness("t");
     expect(a.getThreadBackgroundLiveness("t")).toBeNull();
   });
+
+  it("counts threads with live work until their last task ends", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const record = (
+      threadId: string,
+      taskId: string,
+      taskType: string,
+      kind: "started" | "completed",
+    ) => liveness.recordTaskLiveness({ threadId, taskId, taskType, status: undefined, kind });
+    record("agents", "a1", "subagent", "started");
+    record("agents", "a2", "subagent", "started");
+    record("watch", "m1", "monitor", "started");
+    record("inert", "p1", "plan", "started");
+    expect(liveness.countThreadsWithLiveWork()).toBe(2);
+
+    record("agents", "a1", "subagent", "completed");
+    expect(liveness.countThreadsWithLiveWork()).toBe(2);
+    record("agents", "a2", "subagent", "completed");
+    expect(liveness.countThreadsWithLiveWork()).toBe(1);
+    liveness.clearThreadLiveness("watch");
+    expect(liveness.countThreadsWithLiveWork()).toBe(0);
+  });
 });

@@ -69,6 +69,9 @@ export class ThreadBackgroundLivenessService extends Context.Service<
      * "monitoring" only when watch loops are the ONLY live work.
      */
     readonly getThreadBackgroundLiveness: (threadId: string) => ThreadBackgroundLiveness;
+
+    /** Threads with any live work, "working" or "monitoring". */
+    readonly countThreadsWithLiveWork: () => number;
   }
 >()("t3/orchestration/ThreadBackgroundLiveness/ThreadBackgroundLivenessService") {}
 
@@ -166,6 +169,9 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       }
       return null;
     },
+
+    // `drop` deletes a thread's entry once its last task goes, so every entry is live.
+    countThreadsWithLiveWork: () => stateByThreadId.size,
   };
 }
 
