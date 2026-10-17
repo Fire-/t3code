@@ -36,12 +36,40 @@ function isIdlePrimeState(data: unknown): boolean {
 }
 
 /**
+ * Settle probes are transition-driven: no `get_state` goes out after the first
+ * prompt until an `agent_end` has arrived, and the last probe answer is idle.
+ * This holds even when a steer reopens the run between `agent_end` and the probe.
+ */
+export function assertPrimeSettleProbesFollowAgentEnd(transcript: ProviderReplayTranscript) {
+  let sawPrompt = false;
+  let sawAgentEnd = false;
+  let lastProbeAnswer: unknown;
+  for (const entry of primeFrames(transcript)) {
+    const type = field(entry.frame, "type");
+    if (entry.direction === "out" && type === "prompt") sawPrompt = true;
+    else if (sawPrompt && entry.direction === "in" && type === "agent_end") sawAgentEnd = true;
+    else if (sawPrompt && entry.direction === "out" && type === "get_state") {
+      assert.isTrue(sawAgentEnd, "get_state is probed only after an agent_end");
+    } else if (
+      sawPrompt &&
+      entry.direction === "in" &&
+      type === "response" &&
+      field(entry.frame, "command") === "get_state"
+    ) {
+      lastProbeAnswer = field(entry.frame, "data");
+    }
+  }
+  assert.isTrue(isIdlePrimeState(lastProbeAnswer), "the last settle probe answers idle");
+}
+
+/**
  * Prime has no settled event: each turn settles on `agent_end` plus an idle
  * `get_state` probe. The recording must show that probe only after the run's
  * `agent_end` (no polling), its last answer idle, and the projection must hold
  * exactly one completed provider turn per prompt. Prime 1.0.0 rejects
  * `get_entries`, and a rejected session name would be rejected again, so
- * neither may appear more than the recording needs.
+ * neither may appear more than the recording needs: one name per title per
+ * Prime process (a respawned process starts without the name).
  */
 export function assertPrimeTurnsSettleOnce(
   result: OrchestratorV2ScenarioResult,
@@ -57,15 +85,19 @@ export function assertPrimeTurnsSettleOnce(
     entry.direction === "out" ? [field(entry.frame, "type")] : [],
   );
   assert.notInclude(outboundTypes, "get_entries");
-  const sessionNames = frames.flatMap((entry) =>
-    entry.direction === "out" && field(entry.frame, "type") === "set_session_name"
-      ? [field(entry.frame, "name")]
-      : [],
-  );
+  let processIndex = 0;
+  const sessionNames = frames.flatMap((entry) => {
+    if (entry.direction !== "out") return [];
+    const type = field(entry.frame, "type");
+    if (type === "process_start") processIndex += 1;
+    return type === "set_session_name"
+      ? [`${processIndex}:${String(field(entry.frame, "name"))}`]
+      : [];
+  });
   assert.lengthOf(
     sessionNames,
     new Set(sessionNames).size,
-    "an unchanged session name is sent once",
+    "an unchanged session name is sent once per Prime process",
   );
 
   let sawPrompt = false;

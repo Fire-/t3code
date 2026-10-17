@@ -42,6 +42,12 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePrimeCompactCommand, type PrimeCompactCommand } from "./commands.ts";
+import {
+  isPrimeBusyRejection,
+  primeAgentEndErrorMessage,
+  primeAgentEndFailed,
+  primeErrorMessage,
+} from "./events.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -62,7 +68,7 @@ import {
   isPrimeStateIdle,
   makePrimeRpcConnection,
   parsePrimeModelSlug,
-  type PrimeRpcError,
+  PrimeRpcError,
   type PrimeRpcTimeoutError,
   primeRecordField as recordField,
   primeRecordNumber as recordNumber,
@@ -122,6 +128,18 @@ function primeRunAborted(agentEnd: PrimeRpcRecord): boolean {
     }
   }
   return false;
+}
+
+const PRIME_MODEL_ERROR = "Prime reported a model error.";
+const isPrimeRpcError = Schema.is(PrimeRpcError);
+
+/** The transport's own diagnosis (for example the exit code) says why Prime died. */
+function primeExitMessage(cause: Cause.Cause<unknown>): string {
+  const error = Cause.squash(cause);
+  const detail = isPrimeRpcError(error) ? error.detail : undefined;
+  return detail === undefined
+    ? "Prime process exited unexpectedly."
+    : `Prime process exited unexpectedly: ${detail}.`;
 }
 
 function primeSessionIdFromPath(sessionPath: string): string {
@@ -396,6 +414,8 @@ interface ActivePrimeTurn {
   readonly streamItems: Map<string, PrimeStreamItemState>;
   readonly toolArgs: Map<string, unknown>;
   readonly toolStartedAt: Map<string, DateTime.Utc>;
+  /** Tool calls started without a matching end, by tool name, so a terminal can close them. */
+  readonly openToolCalls: Map<string, string>;
   interrupted: boolean;
   nativeAborted: boolean;
   sawAgentActivity: boolean;
@@ -1039,12 +1059,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         turn: ActivePrimeTurn,
         event: PrimeRpcRecord,
         phase: "start" | "update" | "end",
+        closedStatus?: "interrupted" | "failed",
       ) {
         const toolCallId = recordString(event, "toolCallId");
         const toolName = recordString(event, "toolName") ?? "tool";
         if (toolCallId === undefined) return;
         if (phase === "start") {
           turn.toolArgs.set(toolCallId, event["args"]);
+          turn.openToolCalls.set(toolCallId, toolName);
+        } else if (phase === "end") {
+          turn.openToolCalls.delete(toolCallId);
         }
         const args = event["args"] ?? turn.toolArgs.get(toolCallId);
         const emittedAt = yield* DateTime.now;
@@ -1055,11 +1079,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         const resultRecord = completed ? event["result"] : event["partialResult"];
         const outputText = contentText(recordField(resultRecord, "content"));
         const status = completed
-          ? isError
-            ? turn.interrupted
-              ? "interrupted"
-              : "failed"
-            : "completed"
+          ? closedStatus !== undefined
+            ? closedStatus
+            : isError
+              ? turn.interrupted
+                ? "interrupted"
+                : "failed"
+              : "completed"
           : "running";
         const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);
         yield* emitItemNode(
@@ -1483,6 +1509,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         const interrupted = turn.interrupted || turn.nativeAborted;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
+        // Prime does not send tool_execution_end for a tool cut off by an
+        // abort or a process exit, so its item would stay running forever.
+        for (const [toolCallId, toolName] of turn.openToolCalls) {
+          yield* emitToolItem(
+            turn,
+            { type: "tool_execution_end", toolCallId, toolName },
+            "end",
+            interrupted ? "interrupted" : "failed",
+          );
+        }
         if (turn.activeCompaction !== null) {
           const status = interrupted ? "cancelled" : turn.failure === null ? "completed" : "failed";
           yield* emitCompaction(turn, turn.activeCompaction, status);
@@ -1764,7 +1800,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
-                message: recordString(message, "errorMessage") ?? "Prime reported a model error.",
+                message: primeErrorMessage(message) ?? PRIME_MODEL_ERROR,
                 class: "provider_error",
               });
             }
@@ -1938,6 +1974,23 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (awaitingPromptAck && !turn.adoptedWake && !turn.sawAgentActivity) return;
             turn.nativeAborted = primeRunAborted(event);
             turn.sawAgentEnd = true;
+            if (!turn.nativeAborted) {
+              const errorMessage = primeAgentEndErrorMessage(event);
+              if (
+                errorMessage !== undefined &&
+                (turn.failure === null || turn.failure.message === PRIME_MODEL_ERROR)
+              ) {
+                turn.failure = makeProviderFailure({
+                  message: errorMessage,
+                  class: "provider_error",
+                });
+              } else if (turn.failure === null && primeAgentEndFailed(event)) {
+                turn.failure = makeProviderFailure({
+                  message: PRIME_MODEL_ERROR,
+                  class: "provider_error",
+                });
+              }
+            }
             if (turn.adoptedWake && awaitingPromptAck) return;
             yield* requestSettle(turn);
             return;
@@ -2045,6 +2098,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 : pendingPrompt === undefined && event["id"] === undefined
                   ? turn
                   : null;
+            if (
+              failedTurn !== null &&
+              failedTurn.sawAgentActivity &&
+              isPrimeBusyRejection(recordString(event, "error"))
+            ) {
+              yield* Effect.logWarning("Prime refused a message while busy; the turn continues.", {
+                errorLength: recordString(event, "error")?.length,
+              });
+              return;
+            }
             if (failedTurn !== null) {
               const failure = makeProviderFailure({
                 message: recordString(event, "error") ?? "Prime rejected the prompt.",
@@ -2148,12 +2211,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 );
               pendingWake = null;
               const interrupted = state?.activeTurn?.interrupted === true;
+              const exitMessage = primeExitMessage(cause);
               if (state?.activeTurn != null) {
                 state.activeTurn.failure = interrupted
                   ? null
                   : makeProviderFailure({
                       cause,
-                      message: "Prime process exited unexpectedly.",
+                      message: exitMessage,
                       class: "transport_error",
                     });
                 yield* finalizeTurn(state, false);
@@ -2169,7 +2233,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               } else {
                 yield* updateProviderSession(
                   "error",
-                  interrupted ? "Prime process was stopped." : "Prime process exited unexpectedly.",
+                  interrupted ? "Prime process was stopped." : exitMessage,
                 );
                 yield* Queue.fail(
                   events,
@@ -2526,6 +2590,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               streamItems: new Map(),
               toolArgs: new Map(),
               toolStartedAt: new Map(),
+              openToolCalls: new Map(),
               interrupted: false,
               nativeAborted: false,
               sawAgentActivity: false,

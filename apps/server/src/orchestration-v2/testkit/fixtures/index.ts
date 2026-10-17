@@ -56,6 +56,7 @@ import { assertCursorMessageSteeringOutput } from "./message_steering/cursor_out
 import { assertGrokMessageSteeringOutput } from "./message_steering/grok_output.ts";
 import { messageSteeringInput } from "./message_steering/input.ts";
 import { assertPiMessageSteeringOutput } from "./message_steering/pi_output.ts";
+import { assertPrimeMessageSteeringOutput } from "./message_steering/prime_output.ts";
 import { MUSE_PERMISSION_DECLINED_FILE, musePermissionInput } from "./muse_permission/input.ts";
 import { assertMusePermissionOutput } from "./muse_permission/output.ts";
 import { museSubagentApprovalInput } from "./muse_subagent_approval/input.ts";
@@ -71,6 +72,7 @@ import { piCompactionInput } from "./pi_compaction/input.ts";
 import { assertPiCompactionOutput } from "./pi_compaction/output.ts";
 import { providerThreadResumeInput } from "./provider_thread_resume/input.ts";
 import { assertPiProviderThreadResumeOutput } from "./provider_thread_resume/pi_output.ts";
+import { assertPrimeProviderThreadResumeOutput } from "./provider_thread_resume/prime_output.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { assertPiMultiTurnOutput } from "./multi_turn/pi_output.ts";
@@ -1332,6 +1334,15 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiProviderThreadResumeOutput,
       },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL(
+          "./provider_thread_resume/prime_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeProviderThreadResumeOutput,
+      },
     ],
   },
   {
@@ -1532,6 +1543,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./message_steering/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiMessageSteeringOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./message_steering/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeMessageSteeringOutput,
       },
     ],
   },

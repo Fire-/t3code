@@ -276,7 +276,14 @@ export interface PrimeRpcConnection {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const TERMINATION_GRACE = Duration.seconds(1);
+/**
+ * SIGTERM runs Prime's own shutdown (modes/rpc/rpc-mode.ts `shutdown`), whose
+ * dispose sends `complete_owned_session` and waits while the daemon stops the
+ * worker (up to 5 s for the worker's shutdown request). A SIGKILL before that
+ * leaves the worker in its 30 s disconnect grace, and a resume of the same
+ * session then fails with SessionAlreadyActiveError until the grace ends.
+ */
+export const PRIME_TERMINATION_GRACE = Duration.seconds(10);
 
 interface PendingPrimeRequest {
   readonly command: string;
@@ -357,15 +364,16 @@ function parsePrimeRecord(line: string): PrimeRpcRecord | undefined {
  * gone its pid/pgid can be recycled by the OS, so escalating blindly could
  * deliver SIGKILL to an unrelated process.
  */
-const terminatePrimeProcess = (
+export const terminatePrimeProcess = (
   kill: (signal: NodeJS.Signals) => boolean,
   hasExited: () => boolean,
+  awaitExit: Effect.Effect<void>,
 ) =>
   Effect.gen(function* () {
     if (hasExited()) return;
     if (!kill("SIGTERM")) return;
-    yield* Effect.sleep(TERMINATION_GRACE);
-    if (hasExited()) return;
+    const exited = yield* awaitExit.pipe(Effect.timeoutOption(PRIME_TERMINATION_GRACE));
+    if (Option.isSome(exited) || hasExited()) return;
     kill("SIGKILL");
   });
 
@@ -391,6 +399,25 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
 
   let childExited = false;
   let diagnosingStdoutClose = false;
+  const exitDeferred = yield* Deferred.make<number, PrimeRpcError>();
+
+  // Forked first. Before the reader, so an immediate crash populates
+  // `exitDeferred` before stdout-close diagnosis runs. Before the terminate
+  // finalizer, because finalizers run in reverse order: the watcher is then
+  // still running while terminate waits for the exit, instead of being
+  // interrupted first and making every close wait out the whole grace.
+  yield* child.exitCode.pipe(
+    Effect.matchEffect({
+      onFailure: (cause) =>
+        Deferred.fail(exitDeferred, new PrimeRpcError({ operation: "exit", cause })),
+      onSuccess: (code) =>
+        Effect.suspend(() => {
+          childExited = true;
+          return Deferred.succeed(exitDeferred, Number(code));
+        }),
+    }),
+    Effect.forkIn(scope),
+  );
 
   const killProcessGroup = (signal: NodeJS.Signals): boolean => {
     try {
@@ -432,7 +459,16 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
   const terminateProcess =
     platform === "win32"
       ? terminateWindowsTree
-      : terminatePrimeProcess(killProcessGroup, hasExited);
+      : terminatePrimeProcess(
+          killProcessGroup,
+          hasExited,
+          Deferred.await(exitDeferred).pipe(Effect.ignore),
+        ).pipe(
+          // The grace bounds a real process's shutdown, so it runs on wall
+          // time: under a TestClock, a large pending adjustment would expire
+          // it at once and SIGKILL Prime before it releases its session lease.
+          Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+        );
 
   // Registered before any further setup: an interrupt or failure between the
   // spawn and the rest of this constructor would otherwise leak a detached
@@ -443,7 +479,6 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
   const events = yield* Queue.unbounded<PrimeRpcRecord, PrimeRpcError>();
   const outgoing = yield* Queue.unbounded<Uint8Array, PrimeRpcError>();
   const transportDown = yield* Deferred.make<never, PrimeRpcError>();
-  const exitDeferred = yield* Deferred.make<number, PrimeRpcError>();
   let nextRequestId = 0;
 
   const failTransport = (error: PrimeRpcError) =>
@@ -502,21 +537,6 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
       }
       yield* Queue.offer(events, record);
     });
-
-  // Watch exit before the reader so an immediate crash can populate
-  // `exitDeferred` before stdout-close diagnosis runs.
-  yield* child.exitCode.pipe(
-    Effect.matchEffect({
-      onFailure: (cause) =>
-        Deferred.fail(exitDeferred, new PrimeRpcError({ operation: "exit", cause })),
-      onSuccess: (code) =>
-        Effect.suspend(() => {
-          childExited = true;
-          return Deferred.succeed(exitDeferred, Number(code));
-        }),
-    }),
-    Effect.forkIn(scope),
-  );
 
   yield* Effect.gen(function* () {
     const frame = makeJsonlFramer();

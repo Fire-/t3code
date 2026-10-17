@@ -20,6 +20,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -97,6 +98,8 @@ interface FakePrime {
   readonly allRequests: () => ReadonlyArray<PrimeRpcRecord>;
   readonly queueStats: (data: unknown) => void;
   readonly closeStdout: Effect.Effect<void>;
+  /** The process exits with `code`, then its stdout closes. */
+  readonly exit: (code: number) => Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv;
@@ -170,6 +173,7 @@ const recordedIdleState = (sessionFile: string) => ({
 });
 const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
+  const exitCode = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
   const requests = yield* Queue.unbounded<PrimeRpcRecord>();
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
@@ -314,7 +318,7 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
       }
       return ChildProcessSpawner.makeHandle({
         pid: ChildProcessSpawner.ProcessId(FAKE_PID),
-        exitCode: Effect.never,
+        exitCode: Deferred.await(exitCode),
         isRunning: Effect.succeed(true),
         kill: () => Effect.void,
         unref: Effect.succeed(Effect.void),
@@ -382,6 +386,10 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
     },
     queueStats: (data) => statsQueue.push(data),
     closeStdout: Queue.end(stdout),
+    exit: (code) =>
+      Deferred.succeed(exitCode, ChildProcessSpawner.ExitCode(code)).pipe(
+        Effect.andThen(Queue.end(stdout)),
+      ),
     lastSpawn: () => spawns.at(-1) ?? { args: [], env: {} },
     spawns: () => spawns,
     failSwitches: (count, error) => {
@@ -4598,6 +4606,521 @@ describe("Prime settle engine", () => {
         assert.isTrue(seen.indexOf(first) < seen.indexOf(secondText!));
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  describe("turn control paths", () => {
+    const FAIL_ME_ERROR =
+      'Mistral API error (400): {"object":"error","message":"Invalid request payload: Expected at most one leading ThinkChunk, got 2","type":"invalid_request_invalid_args","code":"3051"}';
+    const failedAssistant = (errorMessage: string) => ({
+      role: "assistant",
+      id: "mock-failed-asst",
+      content: [],
+      stopReason: "error",
+      errorMessage,
+    });
+
+    const runningTurnId = (
+      record: (predicate: (event: AdapterEvent) => boolean) => Effect.Effect<AdapterEvent>,
+    ) =>
+      Effect.gen(function* () {
+        const running = yield* record(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        assert.isTrue(running.type === "provider_turn.updated");
+        return (running as Extract<AdapterEvent, { type: "provider_turn.updated" }>).providerTurn
+          .id;
+      });
+
+    const steerMessage = (text: string) => ({
+      messageId: `message:thread-prime-test:steer:${text}` as never,
+      text,
+      attachments: [],
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+    });
+
+    const promptsSince = (fake: FakePrime, index: number) =>
+      fake
+        .allRequests()
+        .slice(index)
+        .filter((request) => request["type"] === "prompt");
+
+    const finalToolStatus = (seen: ReadonlyArray<AdapterEvent>, toolCallId: string) =>
+      seen
+        .flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.nativeItemRef?.nativeId === toolCallId
+            ? [event.turnItem.status]
+            : [],
+        )
+        .at(-1);
+
+    it.effect(
+      "[VAL-TURN-007] STEER_ME: input during an open turn goes out as prompt with streamingBehavior steer and lands in the same turn",
+      () =>
+        Effect.gen(function* () {
+          const { fake, runtime, providerThread, seen, record, begin } = yield* openTurn();
+          const afterPrompt = yield* begin();
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "mock reply");
+          yield* record(isAssistantText("mock reply"));
+
+          yield* runtime.steerTurn({
+            threadId: THREAD_ID,
+            runId: RunId.make("run:thread-prime-test:1"),
+            providerThread,
+            providerTurnId,
+            message: steerMessage("focus on tests"),
+          });
+          const steer = yield* fake.takeRequest("prompt");
+          assert.equal(steer["message"], "focus on tests");
+          assert.equal(steer["streamingBehavior"], "steer");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+          yield* fake.emit({
+            type: "message_start",
+            message: { role: "user", content: [{ type: "text", text: "focus on tests" }] },
+          });
+          yield* fake.emit({
+            type: "message_end",
+            message: { role: "user", content: [{ type: "text", text: "focus on tests" }] },
+          });
+          yield* replyText(fake, "steered: focus on tests");
+          yield* fake.emit(agentEnd());
+
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "completed" &&
+              terminal.providerTurnId === providerTurnId,
+          );
+          assert.isTrue(seen.some(isAssistantText("steered: focus on tests")));
+          assert.lengthOf(terminals(seen), 1);
+          assert.notInclude(commandsSince(fake, afterPrompt), "abort");
+          assert.notInclude(commandsSince(fake, afterPrompt), "steer");
+          assert.lengthOf(promptsSince(fake, 0), 2);
+          assert.lengthOf(
+            seen.filter(
+              (event) =>
+                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+            ),
+            1,
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-007] a busy Prime that rejects plain prompts still receives the turn and the steer, and a busy rejection does not fail the turn",
+      () =>
+        Effect.gen(function* () {
+          // FakePrime answers a prompt without streamingBehavior with Prime's
+          // busy error while streaming, and acks everything else on its own.
+          const { fake, runtime, providerThread, seen, record } = yield* openTurn((fake) =>
+            fake.setStreaming(true),
+          );
+          yield* startTurn(runtime, providerThread);
+          const prompt = yield* fake.takeRequest("prompt");
+          assert.equal(prompt["streamingBehavior"], "steer");
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "busy after this");
+
+          yield* runtime.steerTurn({
+            threadId: THREAD_ID,
+            runId: RunId.make("run:thread-prime-test:1"),
+            providerThread,
+            providerTurnId,
+            message: steerMessage("continue?"),
+          });
+          const steer = yield* fake.takeRequest("prompt");
+          assert.equal(steer["message"], "continue?");
+          assert.equal(steer["streamingBehavior"], "steer");
+          // Prime's busy rejection without a request id, as its daemon reports it.
+          yield* fake.emitOrphanError(
+            "prompt",
+            "Agent has queued work. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+          );
+          yield* pumpBarrier(fake, record, "after busy rejection");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* replyText(fake, "mock reply");
+          fake.setStreaming(false);
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          assert.isFalse(
+            seen.some(
+              (event) =>
+                event.type === "provider_session.updated" &&
+                event.providerSession.status === "error",
+            ),
+          );
+          for (const request of promptsSince(fake, 0)) {
+            assert.equal(request["streamingBehavior"], "steer");
+          }
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-008] ABORT_ME: interrupt sends abort, the aborted agent_end yields one interrupted terminal, the open tool item closes, and the queued steer is not resent",
+      () =>
+        Effect.gen(function* () {
+          const { fake, runtime, providerThread, seen, record, begin } = yield* openTurn();
+          yield* begin();
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({
+            type: "tool_execution_start",
+            toolCallId: "tool-abort-1",
+            toolName: "bash",
+            args: { command: "sleep 60" },
+          });
+          yield* record(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId === "tool-abort-1" &&
+              event.turnItem.status === "running",
+          );
+          yield* runtime.steerTurn({
+            threadId: THREAD_ID,
+            runId: RunId.make("run:thread-prime-test:1"),
+            providerThread,
+            providerTurnId,
+            message: steerMessage("queued while the tool runs"),
+          });
+          yield* fake.takeRequest("prompt");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+
+          yield* runtime.interruptTurn({ providerThread, providerTurnId });
+          yield* fake.takeRequest("abort");
+          const afterAbort = fake.commandLog().length;
+          yield* fake.emit({ type: "turn_end" });
+          yield* fake.emit(agentEnd(true));
+
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "interrupted" &&
+              terminal.providerTurnId === providerTurnId,
+          );
+          assert.equal(finalToolStatus(seen, "tool-abort-1"), "interrupted");
+          assert.notInclude(commandsSince(fake, afterAbort), "prompt");
+          assert.notInclude(commandsSince(fake, afterAbort), "steer");
+
+          // The next turn sends only its own prompt; the queued steer stays Prime's.
+          const afterNext = fake.allRequests().length;
+          yield* begin("Next question", 2);
+          assert.deepEqual(
+            promptsSince(fake, afterNext).map((request) => request["message"]),
+            ["Next question"],
+          );
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Next answer");
+          yield* fake.emit(agentEnd());
+          const next = yield* record(
+            (event) => event.type === "turn.terminal" && event.providerTurnId !== providerTurnId,
+          );
+          assert.isTrue(next.type === "turn.terminal" && next.status === "completed");
+          assert.lengthOf(terminals(seen), 2);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      { shape: "message_end and agent_end", withMessageEnd: true },
+      { shape: "agent_end only", withMessageEnd: false },
+    ])(
+      "[VAL-TURN-009] FAIL_ME: the errorMessage from $shape reaches turn.terminal failure.message",
+      ({ withMessageEnd }) =>
+        Effect.gen(function* () {
+          const { fake, runtime, seen, record, begin } = yield* openTurn();
+          yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "turn_start" });
+          if (withMessageEnd) {
+            yield* fake.emit({ type: "message_start", message: failedAssistant(FAIL_ME_ERROR) });
+            yield* fake.emit({ type: "message_end", message: failedAssistant(FAIL_ME_ERROR) });
+          }
+          yield* fake.emit({ type: "turn_end" });
+          yield* fake.emit({
+            type: "agent_end",
+            messages: [
+              { role: "user", content: "did something happen?" },
+              failedAssistant(FAIL_ME_ERROR),
+            ],
+          });
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
+          const failure = terminal.type === "turn.terminal" ? terminal.failure : null;
+          assert.include(failure?.message ?? "", "Expected at most one leading ThinkChunk");
+          assert.equal(failure?.class, "provider_error");
+          assert.isTrue(
+            seen.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "error" &&
+                event.turnItem.failure.message === failure?.message,
+            ),
+          );
+          assert.isFalse(
+            seen.some(
+              (event) =>
+                event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
+            ),
+            "the empty failed assistant message leaves no assistant bubble",
+          );
+          assert.include(runtime.providerSession.lastError ?? "", "leading ThinkChunk");
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-009] a provider error retried by Prime, in the live frame order, settles once as completed",
+      () =>
+        Effect.gen(function* () {
+          // Order recorded live in message_steering: the failed run's agent_end
+          // arrives before auto_retry_start, while the turn action stays running.
+          const capacityError =
+            'Mistral API error (429): {"object":"error","message":"Not enough capacity available for this request, please retry later.","code":"3801"}';
+          const { fake, seen, record, begin } = yield* openTurn();
+          const afterPrompt = yield* begin();
+          yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "turn_start" });
+          yield* fake.emit({ type: "message_start", message: failedAssistant(capacityError) });
+          yield* fake.emit({ type: "message_end", message: failedAssistant(capacityError) });
+          yield* fake.emit({ type: "turn_end" });
+          yield* fake.emit({ type: "agent_end", messages: [failedAssistant(capacityError)] });
+          yield* fake.emit({
+            type: "auto_retry_start",
+            attempt: 1,
+            maxAttempts: 30,
+            delayMs: 976,
+            errorMessage: capacityError,
+          });
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "turn_start" });
+          yield* replyText(fake, "steering fixture observed");
+          yield* fake.emit({ type: "auto_retry_end", success: true, attempt: 1 });
+          yield* fake.emit({ type: "turn_end" });
+          yield* fake.emit(agentEnd());
+          yield* record(isAssistantText("steering fixture observed"));
+          assert.equal(probesSince(fake, afterPrompt), 0, "a running turn action defers the probe");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(probesSince(fake, afterPrompt), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-009] an error stopReason with a blank errorMessage fails the turn with a generic message",
+      () =>
+        Effect.gen(function* () {
+          const { fake, seen, record, begin } = yield* openTurn();
+          yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "agent_end", messages: [failedAssistant("   ")] });
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "failed" &&
+              terminal.failure.message === "Prime reported a model error.",
+          );
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-010] DIE: Prime exiting mid-turn fails the turn once with the exit reason, closes its tool item, and reports the session errored",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePrime;
+          const adapter = yield* makeAdapter(fake);
+          const runtime = yield* adapter.openSession({
+            threadId: THREAD_ID,
+            providerSessionId: SESSION_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          const seen: Array<AdapterEvent> = [];
+          const stream = yield* runtime.events.pipe(
+            Stream.runForEach((event) => Effect.sync(() => seen.push(event))),
+            Effect.flip,
+            Effect.forkScoped,
+          );
+          const providerThread = yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          yield* startTurn(runtime, providerThread);
+          yield* fake.takeRequest("prompt");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({
+            type: "tool_execution_start",
+            toolCallId: "tool-die-1",
+            toolName: "bash",
+            args: { command: "make" },
+          });
+          yield* fake.exit(1);
+
+          const error = yield* Fiber.join(stream);
+          assert.equal(error._tag, "ProviderAdapterEventStreamError");
+          const ended = terminals(seen);
+          assert.lengthOf(ended, 1);
+          const terminal = ended[0];
+          assert.isTrue(terminal?.type === "turn.terminal" && terminal.status === "failed");
+          const failure = terminal?.type === "turn.terminal" ? terminal.failure : null;
+          assert.include(failure?.message ?? "", "prime-agent process exited with code 1");
+          assert.equal(failure?.class, "transport_error");
+          assert.equal(finalToolStatus(seen, "tool-die-1"), "failed");
+          const sessionStates = seen.flatMap((event) =>
+            event.type === "provider_session.updated" ? [event.providerSession] : [],
+          );
+          const last = sessionStates.at(-1);
+          assert.equal(last?.status, "error");
+          assert.include(last?.lastError ?? "", "prime-agent process exited with code 1");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-012] assistant, tool, and custom frames with no open turn and no pending wake are dropped without a turn or session error, and the next turn behaves normally",
+      () =>
+        Effect.gen(function* () {
+          const { fake, runtime, seen, record, begin } = yield* openTurn();
+          const probesBefore = fake.commandLog().filter((type) => type === "get_state").length;
+          yield* fake.emit({ type: "turn_start" });
+          yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+          yield* fake.emit({
+            type: "message_update",
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "stray text" },
+          });
+          yield* fake.emit({
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "stray text" }] },
+          });
+          yield* fake.emit({
+            type: "tool_execution_start",
+            toolCallId: "stray-tool",
+            toolName: "bash",
+            args: { command: "ls" },
+          });
+          yield* fake.emit({
+            type: "tool_execution_end",
+            toolCallId: "stray-tool",
+            toolName: "bash",
+            result: { content: [{ type: "text", text: "README.md" }] },
+          });
+          const custom = {
+            role: "custom",
+            customType: "autonomous_status",
+            content: "stray notice",
+            display: true,
+            details: {},
+          };
+          yield* fake.emit({ type: "message_start", message: custom });
+          yield* fake.emit({ type: "message_end", message: custom });
+          yield* fake.emit({ type: "turn_end" });
+          yield* fake.emit(agentEnd());
+          // A session-scoped dialog is the first event the pump can surface,
+          // so answering it proves every stray frame above was handled.
+          yield* fake.emit({
+            type: "extension_ui_request",
+            id: "ui-barrier",
+            method: "confirm",
+            title: "Barrier",
+          });
+          const pending = yield* record(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          );
+          assert.isTrue(pending.type === "runtime_request.updated");
+          yield* runtime.respondToRuntimeRequest({
+            requestId: (pending as Extract<AdapterEvent, { type: "runtime_request.updated" }>)
+              .runtimeRequest.id,
+            decision: "accept",
+          });
+          yield* fake.takeRequest("extension_ui_response");
+          assert.isFalse(
+            seen.some(
+              (event) =>
+                event.type === "provider_turn.updated" ||
+                event.type === "turn_item.updated" ||
+                event.type === "turn.terminal",
+            ),
+          );
+          assert.equal(
+            fake.commandLog().filter((type) => type === "get_state").length,
+            probesBefore,
+            "stray frames never trigger a settle probe",
+          );
+
+          yield* begin("Real question");
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Real answer");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          const texts = seen.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+              ? [event.turnItem.text]
+              : [],
+          );
+          assert.notInclude(texts.join("\n"), "stray text");
+          assert.isFalse(
+            seen.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.nativeItemRef?.nativeId === "stray-tool",
+            ),
+          );
+          assert.isFalse(
+            seen.some(
+              (event) =>
+                event.type === "provider_session.updated" &&
+                event.providerSession.status === "error",
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-012] an agent_start with no open turn and no continuation path is rejected as a session error and never becomes a turn",
+      () =>
+        Effect.gen(function* () {
+          const { fake, seen, record } = yield* openTurn();
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+          yield* fake.emit({
+            type: "message_update",
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "invisible" },
+          });
+          const sessionError = yield* record(
+            (event) =>
+              event.type === "provider_session.updated" && event.providerSession.status === "error",
+          );
+          assert.isTrue(
+            sessionError.type === "provider_session.updated" &&
+              sessionError.providerSession.lastError?.includes("outside an active T3 turn") ===
+                true,
+          );
+          assert.isFalse(
+            seen.some(
+              (event) =>
+                event.type === "provider_turn.updated" ||
+                event.type === "turn_item.updated" ||
+                event.type === "turn.terminal",
+            ),
+          );
+          assert.notInclude(fake.commandLog(), "prompt");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
 });
 
 describe("PrimeRpc framing", () => {

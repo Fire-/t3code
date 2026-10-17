@@ -5,12 +5,14 @@ import type {
   ProviderReplayTranscript,
   RuntimeMode,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -46,19 +48,29 @@ import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
  *   gates `ipython` from it), checked before any model turn is spent.
  * - `launchArgs`: extra Prime flags such as `--autonomous-gate <command>`.
  *   They become part of the transcript's launch args, so replay passes them too.
+ * - `awaitPreviousExit`: start a Prime process only after the previous one
+ *   exited. Prime's daemon keeps the session lease until the old client's
+ *   SIGTERM shutdown finishes, which in production ends long before the
+ *   user's next message after an idle release; a fixture sends that message
+ *   immediately, so without this the resume races the shutdown and records
+ *   `SessionAlreadyActiveError` retries that a frozen replay clock never
+ *   advances past.
  *
- * Steering, interrupt, resume and rollback scenarios need no entry beyond
- * `{ bridge: false }`: their behaviour comes from the fixture input steps.
+ * Steering and interrupt scenarios need no entry beyond `{ bridge: false }`:
+ * their behaviour comes from the fixture input steps.
  */
 interface PrimeRecordingScenario {
   readonly bridge: boolean;
   readonly runtimeMode?: RuntimeMode;
   readonly launchArgs?: ReadonlyArray<string>;
+  readonly awaitPreviousExit?: boolean;
 }
 
 const PRIME_RECORDING_SCENARIOS: Readonly<Record<string, PrimeRecordingScenario>> = {
   simple: { bridge: false },
   multi_turn: { bridge: false },
+  message_steering: { bridge: false },
+  provider_thread_resume: { bridge: false, awaitPreviousExit: true },
 };
 
 /** Model turns cost real credits, so only the two models agreed for fixtures may record. */
@@ -68,6 +80,7 @@ const RECORDABLE_MODELS = new Set(["mistral/ministral-3b-latest", "mistral/zai-g
 const HERMETIC_LAUNCH_ARGS = ["--no-skills", "--no-context-files", "--no-extensions"];
 const CLOCK_TICK = Duration.millis(20);
 const DAEMON_SHUTDOWN_TIMEOUT = Duration.seconds(10);
+const PREVIOUS_EXIT_TIMEOUT = Duration.seconds(20);
 const PRIME_DAEMON_PROTOCOL_NAME = "prime-agent.daemon";
 
 function readArgValue(name: string): string | undefined {
@@ -366,10 +379,12 @@ function makeIsolatingSpawner(
   input: {
     readonly paths: RecordingPaths;
     readonly bridge: boolean;
+    readonly awaitPreviousExit: boolean;
     readonly invocations: Array<string>;
   },
 ): ChildProcessSpawner.ChildProcessSpawner["Service"] {
-  const { paths, bridge, invocations } = input;
+  const { paths, bridge, awaitPreviousExit, invocations } = input;
+  let previousExit: Effect.Effect<void> = Effect.void;
   return ChildProcessSpawner.make((command) => {
     if (!ChildProcess.isStandardCommand(command) || command.command !== primeBinary) {
       return live.spawn(command);
@@ -381,8 +396,24 @@ function makeIsolatingSpawner(
       "--session-dir",
       paths.sessionDir,
     ];
-    invocations.push(`prime-agent ${args.join(" ")}`);
-    return live.spawn(ChildProcess.make(command.command, args, command.options));
+    return Effect.gen(function* () {
+      if (awaitPreviousExit) {
+        const exited = yield* previousExit.pipe(
+          Effect.timeoutOption(PREVIOUS_EXIT_TIMEOUT),
+          // Wall time: the recording's TestClock can jump past this bound.
+          Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+        );
+        if (Option.isNone(exited)) {
+          return yield* Effect.die(
+            new PrimeRecorderError({ detail: "the previous Prime process did not exit" }),
+          );
+        }
+      }
+      invocations.push(`prime-agent ${args.join(" ")}`);
+      const handle = yield* live.spawn(ChildProcess.make(command.command, args, command.options));
+      previousExit = handle.exitCode.pipe(Effect.ignore);
+      return handle;
+    });
   });
 }
 
@@ -570,7 +601,12 @@ const record = Effect.gen(function* () {
     ChildProcessSpawner.ChildProcessSpawner,
     Effect.map(Effect.service(ChildProcessSpawner.ChildProcessSpawner), (live) =>
       makePrimeRecordingSpawner(
-        makeIsolatingSpawner(live, { paths, bridge: scenario.bridge, invocations }),
+        makeIsolatingSpawner(live, {
+          paths,
+          bridge: scenario.bridge,
+          awaitPreviousExit: scenario.awaitPreviousExit ?? false,
+          invocations,
+        }),
         entries,
       ),
     ),

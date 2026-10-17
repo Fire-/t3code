@@ -1,7 +1,18 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
+import * as TestClock from "effect/testing/TestClock";
 
-import { classifyPrimeEvent, decodePrimeState, isPrimeStateIdle } from "./rpc.ts";
+import {
+  classifyPrimeEvent,
+  decodePrimeState,
+  isPrimeStateIdle,
+  PRIME_TERMINATION_GRACE,
+  terminatePrimeProcess,
+} from "./rpc.ts";
 
 // Shape observed from a live Prime get_state (research/dependency-readiness.md).
 const liveIdleState = {
@@ -133,4 +144,46 @@ describe("Prime RPC frames", () => {
     assert.isFalse(isPrimeStateIdle({ ...state, isCompacting: true }));
     assert.isTrue(Option.isNone(decodePrimeState({ sessionFile: "/x.jsonl" })));
   });
+});
+
+describe("terminatePrimeProcess", () => {
+  const fakeProcess = Effect.gen(function* () {
+    const exit = yield* Deferred.make<number>();
+    const signals: Array<NodeJS.Signals> = [];
+    let exited = false;
+    return {
+      signals,
+      exitNow: Effect.sync(() => (exited = true)).pipe(Effect.andThen(Deferred.succeed(exit, 143))),
+      terminate: terminatePrimeProcess(
+        (signal) => {
+          signals.push(signal);
+          return true;
+        },
+        () => exited,
+        Deferred.await(exit).pipe(Effect.asVoid),
+      ),
+    };
+  });
+
+  it.effect("lets a SIGTERM shutdown that takes seconds finish without SIGKILL", () =>
+    Effect.gen(function* () {
+      const prime = yield* fakeProcess;
+      const fiber = yield* prime.terminate.pipe(Effect.forkScoped);
+      yield* TestClock.adjust(Duration.seconds(4));
+      assert.deepEqual(prime.signals, ["SIGTERM"]);
+      yield* prime.exitNow;
+      yield* Fiber.join(fiber);
+      assert.deepEqual(prime.signals, ["SIGTERM"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("escalates to SIGKILL when Prime has not exited within the grace", () =>
+    Effect.gen(function* () {
+      const prime = yield* fakeProcess;
+      const fiber = yield* prime.terminate.pipe(Effect.forkScoped);
+      yield* TestClock.adjust(PRIME_TERMINATION_GRACE);
+      yield* Fiber.join(fiber);
+      assert.deepEqual(prime.signals, ["SIGTERM", "SIGKILL"]);
+    }).pipe(Effect.scoped),
+  );
 });
