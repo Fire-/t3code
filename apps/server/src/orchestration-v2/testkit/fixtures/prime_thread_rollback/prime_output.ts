@@ -10,10 +10,10 @@ import {
   assertVisibleUserMessagesExclude,
   assertVisibleUserMessagesInclude,
   projectionFor,
-  THREAD_ROLLBACK_AFTER_PROMPT,
   THREAD_ROLLBACK_FIRST_PROMPT,
   THREAD_ROLLBACK_SECOND_PROMPT,
 } from "../shared.ts";
+import { PRIME_THREAD_ROLLBACK_REPLIES_PROMPT } from "./input.ts";
 
 function field(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
@@ -25,7 +25,7 @@ function field(value: unknown, key: string): unknown {
  * first discarded prompt (Prime echoes that prompt back as the fork's text),
  * and the provider thread moved to the session file `fork` switched to.
  */
-function assertPrimeRollbackForkedBefore(
+export function assertPrimeRollbackForkedBefore(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
   discardedPrompt: string,
@@ -107,11 +107,11 @@ export function assertPrimeThreadRollbackOutput(
   assertUserMessagesInclude(projection, [
     THREAD_ROLLBACK_FIRST_PROMPT,
     THREAD_ROLLBACK_SECOND_PROMPT,
-    THREAD_ROLLBACK_AFTER_PROMPT,
+    PRIME_THREAD_ROLLBACK_REPLIES_PROMPT,
   ]);
   assertVisibleUserMessagesInclude(projection, [
     THREAD_ROLLBACK_FIRST_PROMPT,
-    THREAD_ROLLBACK_AFTER_PROMPT,
+    PRIME_THREAD_ROLLBACK_REPLIES_PROMPT,
   ]);
   assertVisibleUserMessagesExclude(projection, [THREAD_ROLLBACK_SECOND_PROMPT]);
   assertPrimeRollbackForkedBefore(result, transcript, THREAD_ROLLBACK_SECOND_PROMPT);

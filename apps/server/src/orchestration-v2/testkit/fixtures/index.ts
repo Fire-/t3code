@@ -81,6 +81,10 @@ import { primeRlmChildrenInput } from "./prime_rlm_children/input.ts";
 import { assertPrimeRlmChildrenOutput } from "./prime_rlm_children/prime_output.ts";
 import { primeSessionCommandInput } from "./prime_session_command/input.ts";
 import { assertPrimeSessionCommandOutput } from "./prime_session_command/prime_output.ts";
+import { primeThreadRollbackInput } from "./prime_thread_rollback/input.ts";
+import { assertPrimeThreadRollbackOutput } from "./prime_thread_rollback/prime_output.ts";
+import { primeThreadRollbackAfterStopInput } from "./prime_thread_rollback_after_stop/input.ts";
+import { assertPrimeThreadRollbackAfterStopOutput } from "./prime_thread_rollback_after_stop/prime_output.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { assertPiMultiTurnOutput } from "./multi_turn/pi_output.ts";
@@ -162,7 +166,6 @@ import { assertClaudeThreadRollbackOutput } from "./thread_rollback/claude_outpu
 import { assertThreadRollbackOutput } from "./thread_rollback/codex_output.ts";
 import { threadRollbackInput } from "./thread_rollback/input.ts";
 import { assertPiThreadRollbackOutput } from "./thread_rollback/pi_output.ts";
-import { assertPrimeThreadRollbackOutput } from "./thread_rollback/prime_output.ts";
 import { assertThreadRollbackAfterRestartOutput } from "./thread_rollback_after_restart/codex_output.ts";
 import { threadRollbackAfterRestartInput } from "./thread_rollback_after_restart/input.ts";
 import { threadRollbackAfterStopInput } from "./thread_rollback_after_stop/input.ts";
@@ -1735,6 +1738,33 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "prime_thread_rollback",
+    buildInput: primeThreadRollbackInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_thread_rollback/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeThreadRollbackOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_thread_rollback_after_stop",
+    buildInput: primeThreadRollbackAfterStopInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL(
+          "./prime_thread_rollback_after_stop/prime_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeThreadRollbackAfterStopOutput,
+      },
+    ],
+  },
+  {
     name: "turn_interrupt_restart",
     buildInput: turnInterruptRestartInput,
     providers: [
@@ -1771,12 +1801,6 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./thread_rollback/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiThreadRollbackOutput,
-      },
-      {
-        driver: ProviderDriverKind.make("prime-agent"),
-        transcriptFile: new URL("./thread_rollback/prime_transcript.ndjson", import.meta.url),
-        modelSelection: PRIME_MODEL_SELECTION,
-        assertOutput: assertPrimeThreadRollbackOutput,
       },
     ],
   },

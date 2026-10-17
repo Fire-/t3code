@@ -481,6 +481,13 @@ interface ActivePrimeTurn {
   sawCompaction: boolean;
   activeCompaction: PrimeCompactionState | null;
   activeProviderRetry: PrimeProviderRetryState | null;
+  /**
+   * Between `auto_retry_start` and `auto_retry_end`. Prime sends the retry
+   * after the failed run's `agent_end` and reports an idle `get_state` (no
+   * active action) while it waits out the delay, so only this keeps the
+   * turn open (core/agent-session.ts `_retryAfterDelay`).
+   */
+  autoRetryPending: boolean;
   failure: ReturnType<typeof makeProviderFailure> | null;
   rejectedPromptFailure: ReturnType<typeof makeProviderFailure> | null;
 }
@@ -1845,6 +1852,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         Effect.gen(function* () {
           if (!turn.sawAgentEnd && !turn.sessionCommandDone) return;
           if (sessionActionsBusy(latestSessionActions) || turn.activeCompaction !== null) return;
+          if (turn.autoRetryPending && !turn.nativeAborted && !turn.interrupted) return;
           turn.settleProbeGeneration += 1;
           yield* scheduleSettleProbe(turn, true);
         });
@@ -2264,11 +2272,15 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 itemOrdinal(turn, `terminal-failure:${turn.providerTurn.id}`),
             } satisfies PrimeProviderRetryState;
             turn.activeProviderRetry = providerRetry;
+            turn.autoRetryPending = true;
+            // A probe sent on the failed run's agent_end would answer idle.
+            turn.settleProbeGeneration += 1;
             yield* emitProviderRetry(turn, providerRetry, "running", emittedAt);
             return;
           }
           case "auto_retry_end": {
             if (turn === null) return;
+            turn.autoRetryPending = false;
             const emittedAt = yield* DateTime.now;
             if (event["success"] === true) {
               // Prime reports the failed attempt as a model error before
@@ -2313,6 +2325,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             turn.activeProviderRetry = providerRetry;
             turn.failure = failure;
             yield* emitProviderRetry(turn, providerRetry, "failed", emittedAt);
+            // Prime sends no further agent_end when it gives up.
+            yield* requestSettle(turn);
             return;
           }
           case "extension_ui_request":
@@ -2995,6 +3009,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               sawCompaction: false,
               activeCompaction: null,
               activeProviderRetry: null,
+              autoRetryPending: false,
               failure: null,
               rejectedPromptFailure: null,
             };

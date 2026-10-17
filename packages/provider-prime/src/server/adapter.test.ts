@@ -2290,7 +2290,7 @@ describe("PrimeAdapterV2", () => {
       expectedForks: ["entry-2"],
     },
   ])(
-    "natively forks $label into an independent session",
+    "[VAL-FORK-002] natively forks $label into an independent session",
     ({ turns, sourceEntries, expectedForks }) =>
       Effect.gen(function* () {
         const fake = yield* makeFakePrime;
@@ -2961,7 +2961,7 @@ describe("PrimeAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("rolls back past turns that added no user entries to the session", () =>
+  it.effect("[VAL-FORK-002] rolls back past turns that added no user entries to the session", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePrime;
       const { runtime } = yield* openRuntime(fake);
@@ -3011,75 +3011,79 @@ describe("PrimeAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("rolls back a live thread to before the discarded turn's prompt, steer included", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePrime;
-      const { runtime, takeEvent } = yield* openRuntime(fake);
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      const settled: Array<OrchestrationV2ProviderTurn> = [];
-      for (const [runOrdinal, texts] of [
-        [1, ["first prompt"]],
-        [2, ["second prompt", "second steer"]],
-      ] as const) {
-        yield* startTurn(runtime, providerThread, "default", [], texts[0], undefined, runOrdinal);
-        yield* fake.takeRequest("prompt");
-        yield* fake.emit({ type: "response", command: "prompt", success: true });
-        yield* fake.emit({ type: "agent_start" });
-        for (const text of texts) {
-          yield* fake.emit({
-            type: "message_end",
-            message: { role: "user", content: [{ type: "text", text }] },
-          });
-        }
-        yield* emitCustomMessage(fake, {
-          role: "custom",
-          customType: "harness_digest",
-          content: "not a user entry",
-          display: false,
+  it.effect(
+    "[VAL-FORK-002] rolls back a live thread to before the discarded turn's prompt, steer included",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
         });
-        yield* fake.emit(agentEnd());
-        const terminal = yield* takeEvent(
-          (event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
-        );
-        if (terminal.type === "provider_turn.updated") settled.push(terminal.providerTurn);
-        yield* takeEvent((event) => event.type === "turn.terminal");
-      }
-      assert.deepEqual(
-        settled.map((turn) => [turn.nativeTurnRef?.strength, turn.nativeTurnRef?.fingerprint]),
-        [
-          ["weak", primeUserEntriesFingerprint([primeUserEntryHash("first prompt")])],
+        const settled: Array<OrchestrationV2ProviderTurn> = [];
+        for (const [runOrdinal, texts] of [
+          [1, ["first prompt"]],
+          [2, ["second prompt", "second steer"]],
+        ] as const) {
+          yield* startTurn(runtime, providerThread, "default", [], texts[0], undefined, runOrdinal);
+          yield* fake.takeRequest("prompt");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+          yield* fake.emit({ type: "agent_start" });
+          for (const text of texts) {
+            yield* fake.emit({
+              type: "message_end",
+              message: { role: "user", content: [{ type: "text", text }] },
+            });
+          }
+          yield* emitCustomMessage(fake, {
+            role: "custom",
+            customType: "harness_digest",
+            content: "not a user entry",
+            display: false,
+          });
+          yield* fake.emit(agentEnd());
+          const terminal = yield* takeEvent(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+          );
+          if (terminal.type === "provider_turn.updated") settled.push(terminal.providerTurn);
+          yield* takeEvent((event) => event.type === "turn.terminal");
+        }
+        assert.deepEqual(
+          settled.map((turn) => [turn.nativeTurnRef?.strength, turn.nativeTurnRef?.fingerprint]),
           [
-            "weak",
-            primeUserEntriesFingerprint(["second prompt", "second steer"].map(primeUserEntryHash)),
+            ["weak", primeUserEntriesFingerprint([primeUserEntryHash("first prompt")])],
+            [
+              "weak",
+              primeUserEntriesFingerprint(
+                ["second prompt", "second steer"].map(primeUserEntryHash),
+              ),
+            ],
           ],
-        ],
-      );
-      const rolledBack = yield* runtime.rollbackThread({
-        providerThread,
-        target: {
-          type: "provider_turn",
-          checkpointId: CheckpointId.make("checkpoint-1"),
-          appRunOrdinal: 1,
-          providerTurn: settled[0]!,
-        },
-        providerThreadTurns: settled,
-      });
-      assert.deepEqual(
-        fake
-          .allRequests()
-          .filter((request) => request.type === "fork")
-          .map((request) => request.entryId),
-        ["entry-2"],
-      );
-      assert.equal(rolledBack.providerThread.nativeThreadRef?.nativeId, "/fake/fork-1.jsonl");
-      const listed = yield* fake.takeRequest("get_fork_messages");
-      assert.isString(listed["id"]);
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        );
+        const rolledBack = yield* runtime.rollbackThread({
+          providerThread,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint-1"),
+            appRunOrdinal: 1,
+            providerTurn: settled[0]!,
+          },
+          providerThreadTurns: settled,
+        });
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .filter((request) => request.type === "fork")
+            .map((request) => request.entryId),
+          ["entry-2"],
+        );
+        assert.equal(rolledBack.providerThread.nativeThreadRef?.nativeId, "/fake/fork-1.jsonl");
+        const listed = yield* fake.takeRequest("get_fork_messages");
+        assert.isString(listed["id"]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect.each([
@@ -3101,35 +3105,37 @@ describe("PrimeAdapterV2", () => {
       entries: [{ entryId: "u1", text: "one" }],
       listsEntries: false,
     },
-  ])("fails rollback without forking when $label", ({ second, entries, listsEntries }) =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePrime;
-      const { runtime } = yield* openRuntime(fake);
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      fake.setForkMessages(entries);
-      const first = recordedTurn(providerThread.id, 1, ["one"]);
-      const result = yield* runtime
-        .rollbackThread({
-          providerThread,
-          target: {
-            type: "provider_turn",
-            checkpointId: CheckpointId.make("checkpoint-1"),
-            appRunOrdinal: 1,
-            providerTurn: first,
-          },
-          providerThreadTurns: [first, { ...second, providerThreadId: providerThread.id }],
-        })
-        .pipe(Effect.result);
-      assert.equal(result._tag, "Failure");
-      assert.notInclude(fake.commandLog(), "fork");
-      assert.equal(fake.commandLog().includes("get_fork_messages"), listsEntries);
-      const resumed = yield* startTurn(runtime, providerThread).pipe(Effect.result);
-      assert.equal(resumed._tag, "Success", "a refused rollback leaves the session usable");
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  ])(
+    "[VAL-FORK-002] fails rollback without forking when $label",
+    ({ second, entries, listsEntries }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.setForkMessages(entries);
+        const first = recordedTurn(providerThread.id, 1, ["one"]);
+        const result = yield* runtime
+          .rollbackThread({
+            providerThread,
+            target: {
+              type: "provider_turn",
+              checkpointId: CheckpointId.make("checkpoint-1"),
+              appRunOrdinal: 1,
+              providerTurn: first,
+            },
+            providerThreadTurns: [first, { ...second, providerThreadId: providerThread.id }],
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        assert.notInclude(fake.commandLog(), "fork");
+        assert.equal(fake.commandLog().includes("get_fork_messages"), listsEntries);
+        const resumed = yield* startTurn(runtime, providerThread).pipe(Effect.result);
+        assert.equal(resumed._tag, "Success", "a refused rollback leaves the session usable");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("settles a command-only prompt from its deferred ack and idle probe", () =>
@@ -5330,6 +5336,117 @@ describe("Prime settle engine", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    it.effect(
+      "[VAL-TURN-009] an idle probe answered after auto_retry_start does not settle the retried turn",
+      () =>
+        Effect.gen(function* () {
+          // Order recorded live (prime_thread_rollback_after_stop, first attempt):
+          // agent_end of the failed run, auto_retry_start, then the settle probe
+          // answers idle because Prime reports no active action while it waits
+          // out the retry delay.
+          const degenerate = "Provider returned a degenerate response (degenerate_stream)";
+          const { fake, seen, record, begin } = yield* openTurn();
+          const afterPrompt = yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "message_end", message: failedAssistant(degenerate) });
+          fake.deferNextState();
+          yield* fake.emit({ type: "agent_end", messages: [failedAssistant(degenerate)] });
+          yield* fake.takeRequest("get_state");
+          yield* fake.emit({
+            type: "auto_retry_start",
+            attempt: 1,
+            maxAttempts: 3,
+            delayMs: 2_458,
+            errorMessage: degenerate,
+          });
+          yield* record(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "error" &&
+              event.turnItem.status === "running",
+          );
+          yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+          yield* fake.takeRequest("list_heartbeats");
+          yield* fake.emit({
+            type: "extension_ui_request",
+            method: "notify",
+            message: "probe seen",
+          });
+          yield* record(
+            (event) =>
+              event.type === "turn.terminal" ||
+              (event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool"),
+          );
+          assert.lengthOf(terminals(seen), 0, "an idle probe during a retry delay does not settle");
+
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "retried reply");
+          yield* fake.emit({ type: "auto_retry_end", success: true, attempt: 1 });
+          yield* fake.emit({ type: "turn_end" });
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            terminal.type === "turn.terminal" && terminal.status === "completed",
+            "the turn settles only after the retried run",
+          );
+          assert.isTrue(seen.some(isAssistantText("retried reply")));
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(probesSince(fake, afterPrompt), 2);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-009] a retry that gives up after agent_end settles the turn as failed with Prime's final error",
+      () =>
+        Effect.gen(function* () {
+          // Prime emits no further agent_end when retries run out
+          // (core/agent-session.ts _handleRetryableError), so auto_retry_end is the trigger.
+          const degenerate = "Provider returned a degenerate response (degenerate_stream)";
+          const finalError = "Mistral API error (503): service unavailable";
+          const { fake, seen, record, begin } = yield* openTurn();
+          yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "message_end", message: failedAssistant(degenerate) });
+          fake.deferNextState();
+          yield* fake.emit({ type: "agent_end", messages: [failedAssistant(degenerate)] });
+          yield* fake.takeRequest("get_state");
+          yield* fake.emit({
+            type: "auto_retry_start",
+            attempt: 1,
+            maxAttempts: 1,
+            delayMs: 1_000,
+            errorMessage: degenerate,
+          });
+          yield* record(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "error" &&
+              event.turnItem.status === "running",
+          );
+          yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+          yield* fake.takeRequest("list_heartbeats");
+          yield* fake.emit({
+            type: "extension_ui_request",
+            method: "notify",
+            message: "probe seen",
+          });
+          yield* record(
+            (event) =>
+              event.type === "turn.terminal" ||
+              (event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool"),
+          );
+          assert.lengthOf(terminals(seen), 0, "an idle probe during a retry delay does not settle");
+
+          yield* fake.emit({ type: "auto_retry_end", success: false, attempt: 1, finalError });
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "failed" &&
+              terminal.failure.message === finalError,
+          );
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
     it.effect(
       "[VAL-TURN-009] an error stopReason with a blank errorMessage fails the turn with a generic message",
       () =>

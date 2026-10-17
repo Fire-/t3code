@@ -75,7 +75,8 @@ const PRIME_RECORDING_SCENARIOS: Readonly<Record<string, PrimeRecordingScenario>
   prime_session_command: { bridge: false },
   prime_goal_autonomous: { bridge: false },
   prime_rlm_children: { bridge: false },
-  thread_rollback: { bridge: false },
+  prime_thread_rollback: { bridge: false },
+  prime_thread_rollback_after_stop: { bridge: false, awaitPreviousExit: true },
 };
 
 /** Model turns cost real credits, so only the two models agreed for fixtures may record. */
