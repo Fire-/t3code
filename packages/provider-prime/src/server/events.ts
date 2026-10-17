@@ -176,6 +176,50 @@ export function primeAutonomousNotice(message: unknown): string | undefined {
   return nonBlank(primeContentText(recordField(message, "content")));
 }
 
+/**
+ * Prime displays its echo of a session command's slash text, and goal steering
+ * as a custom message; T3 already shows the user's message and the goal state.
+ */
+const HIDDEN_CUSTOM_TYPES = new Set(["session_slash_command", "goal_context"]);
+
+export function primeCustomMessageHidden(message: unknown): boolean {
+  const customType = recordString(message, "customType");
+  return (
+    recordField(message, "display") === false ||
+    (customType !== undefined && HIDDEN_CUSTOM_TYPES.has(customType))
+  );
+}
+
+/** Rows with their own item mapping, or that fail the turn instead. */
+function hasDedicatedMapping(message: unknown, customType: string): boolean {
+  return (
+    AUTONOMOUS_NOTICE_TYPES.has(customType) ||
+    customType === "heartbeat_prompt" ||
+    (customType === "session_slash_command_result" &&
+      recordField(recordField(message, "details"), "success") === false)
+  );
+}
+
+/** Prime's restore row (core/agent-session.ts _onIpythonStateRestored) lists every revived name. */
+function ipythonRestoredSummary(content: string): string {
+  if (content.includes("could not be revived")) {
+    return "Python kernel state could not be revived — the kernel is starting fresh.";
+  }
+  const names = /available again:\s*([^.]*)\./u.exec(content)?.[1];
+  if (names === undefined) return "Python kernel state restored.";
+  const count = names.split(",").filter((name) => name.trim().length > 0).length;
+  return `Python kernel state restored — ${count} ${count === 1 ? "name" : "names"} revived.`;
+}
+
+/** The notice for a displayed custom message that no dedicated mapping covers. */
+export function primeCustomMessageNotice(message: unknown): string | undefined {
+  const customType = recordString(message, "customType");
+  if (customType === undefined || primeCustomMessageHidden(message)) return undefined;
+  if (hasDedicatedMapping(message, customType)) return undefined;
+  const content = primeContentText(recordField(message, "content"));
+  if (customType === "ipython_state_restored") return ipythonRestoredSummary(content);
+  return nonBlank(content);
+}
 export type PrimeFileChangeDetail = {
   readonly operation: string;
   readonly path: string;

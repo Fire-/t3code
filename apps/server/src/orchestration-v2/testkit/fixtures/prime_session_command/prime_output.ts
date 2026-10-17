@@ -29,7 +29,8 @@ function isIdlePrimeState(data: unknown): boolean {
  * `/goal status` is a Prime session command with no agent run: no
  * `agent_start`/`agent_end`, only the session_command action, Prime's hidden
  * echo, a `goal_update` and the result row. The turn settles once, on an idle
- * `get_state` answered after the action cleared, and the echo becomes no item.
+ * `get_state` answered after the action cleared, the echo becomes no item, and
+ * the result row becomes a system notice.
  */
 export function assertPrimeSessionCommandOutput(
   result: OrchestratorV2ScenarioResult,
@@ -110,5 +111,10 @@ export function assertPrimeSessionCommandOutput(
       .filter((item) => JSON.stringify(item).includes(PRIME_SESSION_COMMAND_TEXT)),
     [],
     "Prime's echo of the slash text produces no item",
+  );
+  assert.deepEqual(
+    projection.turnItems.flatMap((item) => (item.type === "system_notice" ? [item.message] : [])),
+    ["No active goal."],
+    "the result row is one system notice with its text",
   );
 }

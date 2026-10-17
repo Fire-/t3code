@@ -4,6 +4,8 @@ import {
   primeAgentEndErrorMessage,
   primeAutonomousContinuation,
   primeAutonomousNotice,
+  primeCustomMessageHidden,
+  primeCustomMessageNotice,
   primeHeartbeatNotification,
   primeIpythonFileChange,
   primeProviderGoal,
@@ -517,5 +519,89 @@ describe("primeAutonomousNotice", () => {
     assert.isUndefined(
       primeAutonomousNotice({ role: "custom", customType: "autonomous_stopped", content: " " }),
     );
+  });
+});
+describe("Prime custom messages", () => {
+  const custom = (customType: string, content: unknown, display = true, details: unknown = {}) => ({
+    role: "custom",
+    customType,
+    content,
+    display,
+    details,
+  });
+
+  it.each([
+    { name: "the session-command echo", message: custom("session_slash_command", "/goal status") },
+    {
+      name: "goal steering",
+      message: custom("goal_context", "[goal: continuation]\n\nContinue working."),
+    },
+    { name: "a display:false row", message: custom("prime_future_notice", "secret", false) },
+    {
+      name: "the compaction kernel note",
+      message: custom("ipython_state", "[python-state]\n\nYour kernel persisted.", false),
+    },
+    { name: "a display:false gate row", message: custom("autonomous_status", "on", false) },
+  ])("[VAL-MSG-001] hides $name", ({ message }) => {
+    assert.isTrue(primeCustomMessageHidden(message));
+    assert.isUndefined(primeCustomMessageNotice(message));
+  });
+
+  it("[VAL-MSG-002] RESTORE_KERNEL collapses the restored names into one line", () => {
+    const content =
+      "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: df, model, helpers.";
+    assert.equal(
+      primeCustomMessageNotice(custom("ipython_state_restored", content, true, { restored: true })),
+      "Python kernel state restored — 3 names revived.",
+    );
+  });
+
+  it.each([
+    {
+      name: "one name",
+      content:
+        "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: df.",
+      notice: "Python kernel state restored — 1 name revived.",
+    },
+    {
+      name: "a failed revive",
+      content:
+        "[python-state-restored]\n\nYour previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.",
+      notice: "Python kernel state could not be revived — the kernel is starting fresh.",
+    },
+    {
+      name: "no name list",
+      content: "[python-state-restored]\n\nSomething else.",
+      notice: "Python kernel state restored.",
+    },
+  ])("[VAL-MSG-002] the kernel restore with $name is one line", ({ content, notice }) => {
+    assert.equal(primeCustomMessageNotice(custom("ipython_state_restored", content)), notice);
+  });
+
+  it.each([
+    { customType: "session_slash_command_result", content: "No active goal." },
+    { customType: "prime_future_notice", content: "Something Prime wants shown." },
+    { customType: "async_bash_completion", content: '[bash-done pid:1 exit:0]\n\nCommand: "ls"' },
+  ])("[VAL-MSG-003] a displayed $customType becomes a notice with its text", (input) => {
+    assert.equal(primeCustomMessageNotice(custom(input.customType, input.content)), input.content);
+  });
+
+  it.each([
+    { name: "autonomous_status", message: custom("autonomous_status", "[autonomous-status: on]") },
+    {
+      name: "heartbeat_prompt",
+      message: custom("heartbeat_prompt", "[heartbeat: */5 * * * * run#1]\n\nCheck"),
+    },
+    {
+      name: "a failed session-command result",
+      message: custom("session_slash_command_result", "Command failed: nope", true, {
+        success: false,
+        error: "nope",
+      }),
+    },
+    { name: "a blank row", message: custom("prime_future_notice", "  ") },
+  ])("[VAL-MSG-003] leaves $name to its own mapping", ({ message }) => {
+    assert.isFalse(primeCustomMessageHidden(message));
+    assert.isUndefined(primeCustomMessageNotice(message));
   });
 });

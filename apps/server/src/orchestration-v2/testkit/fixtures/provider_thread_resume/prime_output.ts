@@ -78,4 +78,14 @@ export function assertPrimeProviderThreadResumeOutput(
   assert.lengthOf(answers, 2);
   assert.include(answers[1], FIRST_FINAL, "the resumed session must remember the first answer");
   assert.include(answers[1], SECOND_FINAL);
+  // The respawned process could not revive the first process's Python kernel.
+  assert.deepEqual(
+    projection.turnItems.flatMap((item) => (item.type === "system_notice" ? [item.message] : [])),
+    ["Python kernel state could not be revived — the kernel is starting fresh."],
+    "the kernel restore row is one line",
+  );
+  assert.isFalse(
+    projection.turnItems.some((item) => JSON.stringify(item).includes("[python-state-restored]")),
+    "the raw kernel restore text never reaches an item",
+  );
 }

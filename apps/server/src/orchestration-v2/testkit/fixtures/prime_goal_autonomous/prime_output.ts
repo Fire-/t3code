@@ -171,4 +171,34 @@ export function assertPrimeGoalAutonomousOutput(
     ),
     "the continuation never renders as assistant text",
   );
+
+  const displayedRows = inbound(goalPrompt!).flatMap((entry) => {
+    const message = field(entry.frame, "message");
+    return typeOf(entry.frame) === "message_end" &&
+      field(message, "role") === "custom" &&
+      (field(message, "customType") === "session_slash_command_result" ||
+        field(message, "customType") === "autonomous_status")
+      ? [messageText(message)]
+      : [];
+  });
+  assert.lengthOf(displayedRows, 2, "the /goal result row and the /autonomous status");
+  for (const row of displayedRows) {
+    assert.include(noticeMessages, row, "a displayed row is a system notice");
+  }
+  assert.isTrue(
+    inbound(goalPrompt!).some(
+      (entry) => field(field(entry.frame, "message"), "customType") === "goal_context",
+    ),
+    "Prime steered the goal with goal_context",
+  );
+  assert.isFalse(
+    projection.turnItems.some(
+      (item) =>
+        item.type !== "user_message" &&
+        [PRIME_GOAL_COMMAND, PRIME_AUTONOMOUS_COMMAND, "[goal: continuation]"].some((text) =>
+          JSON.stringify(item).includes(text),
+        ),
+    ),
+    "the slash echoes and goal_context produce no item",
+  );
 }

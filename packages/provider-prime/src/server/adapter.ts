@@ -49,6 +49,8 @@ import {
   primeAgentEndFailed,
   primeAutonomousContinuation,
   primeAutonomousNotice,
+  primeCustomMessageHidden,
+  primeCustomMessageNotice,
   primeContentText as contentText,
   primeErrorMessage,
   primeHeartbeatNotification,
@@ -1961,6 +1963,15 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               return;
             }
             if (role === "custom") {
+              // A failed result row fails the turn; it is not also a notice.
+              const failure = primeSessionCommandFailure(message, turn.sessionCommands);
+              if (failure !== undefined) {
+                if (turn.failure === null) {
+                  turn.failure = makeProviderFailure({ message: failure, class: "provider_error" });
+                }
+                return;
+              }
+              if (primeCustomMessageHidden(message)) return;
               // Gate rows can arrive as bare message pairs between runs while the
               // autonomous action keeps the turn open.
               const notice = primeAutonomousNotice(message);
@@ -1998,9 +2009,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 });
                 return;
               }
-              const failure = primeSessionCommandFailure(message, turn.sessionCommands);
-              if (failure !== undefined && turn.failure === null) {
-                turn.failure = makeProviderFailure({ message: failure, class: "provider_error" });
+              const customNotice = primeCustomMessageNotice(message);
+              if (customNotice !== undefined) {
+                yield* emitSystemNotice(
+                  turn,
+                  `custom:${turn.providerTurn.id}:${turn.nextItemOrdinal}`,
+                  customNotice,
+                );
               }
               return;
             }

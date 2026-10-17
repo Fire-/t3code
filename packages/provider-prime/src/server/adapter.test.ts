@@ -7285,7 +7285,7 @@ describe("Prime settle engine", () => {
     );
 
     it.effect(
-      "[VAL-AUTO-001][VAL-AUTO-003] two threads whose turns share a local ordinal keep distinct autonomous notice, continuation, heartbeat, notify, and extension-error items",
+      "[VAL-AUTO-001][VAL-AUTO-003][VAL-MSG-003] two threads whose turns share a local ordinal keep distinct autonomous notice, custom notice, continuation, heartbeat, notify, and extension-error items",
       () =>
         Effect.gen(function* () {
           /** Each thread runs its first turn, so both start at the same local item ordinal. */
@@ -7335,6 +7335,13 @@ describe("Prime settle engine", () => {
               display: true,
               details: { jobId: `job-${index}`, schedule: "*/5 * * * *", status: "active" },
             });
+            yield* emitCustomMessage(fake, {
+              role: "custom",
+              customType: "prime_future_notice",
+              content: `custom notice in thread ${index}`,
+              display: true,
+              details: {},
+            });
             yield* fake.emit({
               type: "extension_ui_request",
               method: "notify",
@@ -7374,7 +7381,14 @@ describe("Prime settle engine", () => {
             const items = syntheticItems(thread.seen);
             assert.sameMembers(
               items.map((item) => item.type),
-              ["system_notice", "user_message", "notification", "dynamic_tool", "error"],
+              [
+                "system_notice",
+                "system_notice",
+                "user_message",
+                "notification",
+                "dynamic_tool",
+                "error",
+              ],
             );
             assert.lengthOf(messageIds(thread.seen), 1);
           }
@@ -7409,6 +7423,220 @@ describe("Prime settle engine", () => {
             }
           }
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("custom messages and error detail", () => {
+    const custom = (customType: string, content: string, display = true) => ({
+      role: "custom",
+      customType,
+      content,
+      display,
+      details: {},
+    });
+    const latestItems = (seen: ReadonlyArray<AdapterEvent>) => {
+      const items = new Map<
+        string,
+        Extract<AdapterEvent, { type: "turn_item.updated" }>["turnItem"]
+      >();
+      for (const event of seen) {
+        if (event.type === "turn_item.updated") items.set(event.turnItem.id, event.turnItem);
+      }
+      return [...items.values()];
+    };
+    /** Items other than the reply and the barrier the test itself produced. */
+    const customItems = (seen: ReadonlyArray<AdapterEvent>) =>
+      latestItems(seen).filter(
+        (item) =>
+          item.type !== "assistant_message" &&
+          !(item.type === "dynamic_tool" && item.toolName === "notify"),
+      );
+    const runWith = Effect.fnUntraced(function* (messages: ReadonlyArray<Record<string, unknown>>) {
+      const open = yield* openTurn();
+      const { fake, seen, record } = open;
+      yield* open.begin();
+      const providerTurnId = yield* runningTurnId(record);
+      yield* fake.emit({ type: "agent_start" });
+      for (const message of messages) yield* emitCustomMessage(fake, message);
+      yield* replyText(fake, "done");
+      yield* fake.emit(agentEnd());
+      const terminal = yield* record((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      assert.lengthOf(terminals(seen), 1);
+      return { seen, providerTurnId };
+    });
+
+    it.effect(
+      "[VAL-MSG-001] session_slash_command, goal_context, and display:false custom messages produce no item",
+      () =>
+        Effect.gen(function* () {
+          const { seen } = yield* runWith([
+            custom("session_slash_command", "/goal ship it"),
+            custom("goal_context", "[goal: continuation]\n\nContinue working toward the goal."),
+            custom("prime_future_notice", "hidden future row", false),
+            custom("autonomous_status", "hidden status row", false),
+            custom("heartbeat_prompt", "[heartbeat: */5 * * * * run#1]\n\nhidden heartbeat", false),
+            custom("ipython_state", "[python-state]\n\nYour kernel persisted.", false),
+          ]);
+          assert.deepEqual(customItems(seen), []);
+          for (const text of ["/goal ship it", "[goal: continuation]", "hidden", "python-state"]) {
+            assert.isFalse(
+              seen.some(
+                (event) =>
+                  event.type === "turn_item.updated" &&
+                  JSON.stringify(event.turnItem).includes(text),
+              ),
+              `${text} leaked into an item`,
+            );
+          }
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-MSG-002] RESTORE_KERNEL: the ipython restore row is one system_notice with no raw dump",
+      () =>
+        Effect.gen(function* () {
+          const { seen, providerTurnId } = yield* runWith([
+            custom(
+              "ipython_state_restored",
+              "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: df, model, helpers.",
+            ),
+          ]);
+          const items = customItems(seen);
+          assert.lengthOf(items, 1);
+          const notice = items[0]!;
+          assert.isTrue(
+            notice.type === "system_notice" &&
+              notice.message === "Python kernel state restored — 3 names revived." &&
+              notice.status === "completed" &&
+              notice.providerTurnId === providerTurnId,
+          );
+          assert.include(notice.nativeItemRef?.nativeId ?? "", providerTurnId);
+          assert.isFalse(
+            seen.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                /python-state-restored|available again/u.test(JSON.stringify(event.turnItem)),
+            ),
+            "the raw restore text never reaches an item",
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      {
+        name: "autonomous_status",
+        message: custom("autonomous_status", "[autonomous-status: on]\n\nContinuations: 0/3."),
+        type: "system_notice",
+        text: "[autonomous-status: on]\n\nContinuations: 0/3.",
+      },
+      {
+        name: "heartbeat_prompt",
+        message: custom("heartbeat_prompt", "[heartbeat: */5 * * * * run#3]\n\nCheck the build"),
+        type: "notification",
+        text: "Check the build",
+      },
+      {
+        name: "an unknown displayed customType",
+        message: custom("prime_future_notice", "Something Prime wants shown."),
+        type: "system_notice",
+        text: "Something Prime wants shown.",
+      },
+      {
+        name: "a session_slash_command_result row",
+        message: custom("session_slash_command_result", "No active goal."),
+        type: "system_notice",
+        text: "No active goal.",
+      },
+    ] as const)(
+      "[VAL-MSG-003] $name becomes exactly one $type item with its text",
+      ({ message, type, text }) =>
+        Effect.gen(function* () {
+          const { seen, providerTurnId } = yield* runWith([message]);
+          const items = customItems(seen);
+          assert.lengthOf(items, 1);
+          const item = items[0]!;
+          assert.equal(item.type, type);
+          assert.equal(item.providerTurnId, providerTurnId);
+          assert.include(item.nativeItemRef?.nativeId ?? "", providerTurnId);
+          if (item.type === "system_notice") assert.equal(item.message, text);
+          else if (item.type === "notification") assert.equal(item.detail, text);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-MSG-003] a failed session-command result fails its turn once and adds no notice",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* startTurn(open.runtime, open.providerThread, "default", [], "/goal pause");
+          yield* fake.takeRequest("prompt");
+          yield* fake.acceptSessionCommand("/goal pause");
+          yield* emitCustomMessage(fake, sessionCommandEcho("/goal pause"));
+          yield* emitCustomMessage(
+            fake,
+            sessionCommandResult("/goal pause", "Command failed: No active goal to pause.", false),
+          );
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "failed" &&
+              terminal.failure.message === "No active goal to pause.",
+          );
+          assert.lengthOf(terminals(seen), 1);
+          assert.isFalse(
+            latestItems(seen).some((item) => item.type === "system_notice"),
+            "the failure is reported once, by the terminal",
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    const MISTRAL_400 =
+      'Mistral API error (400): {"message":"Invalid request payload: Expected at most one leading ThinkChunk, got 2","code":"3051"}';
+    it.effect.each([
+      {
+        name: "a Mistral 400 errorMessage",
+        messages: [
+          { role: "user", content: "did something happen?" },
+          { role: "assistant", content: [], stopReason: "error", errorMessage: MISTRAL_400 },
+        ],
+        failure: "Expected at most one leading ThinkChunk",
+      },
+      {
+        name: "stopReason stop with no error",
+        messages: [{ role: "assistant", content: [], stopReason: "stop" }],
+        failure: null,
+      },
+      { name: "empty messages", messages: [], failure: null },
+      {
+        name: "a whitespace-only errorMessage",
+        messages: [{ role: "assistant", content: [], errorMessage: "  " }],
+        failure: null,
+      },
+    ])("[VAL-ERR-001] agent_end with $name reaches turn.terminal", ({ messages, failure }) =>
+      Effect.gen(function* () {
+        const { fake, seen, record, begin } = yield* openTurn();
+        yield* begin();
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_end", messages });
+        const terminal = yield* record((event) => event.type === "turn.terminal");
+        assert.lengthOf(terminals(seen), 1);
+        if (terminal.type !== "turn.terminal") return assert.fail("expected a terminal");
+        if (failure === null) {
+          assert.equal(terminal.status, "completed");
+          assert.isNull(terminal.failure);
+          assert.isFalse(
+            seen.some(
+              (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
+            ),
+          );
+        } else {
+          assert.equal(terminal.status, "failed");
+          assert.include(terminal.failure?.message ?? "", failure);
+        }
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 });
