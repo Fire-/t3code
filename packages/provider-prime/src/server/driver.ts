@@ -142,6 +142,8 @@ export const PrimeDriver: ProviderDriver<PrimeSettings, PrimeDriverEnv, Path.Pat
       const checkProvider = checkPrimeProviderStatus(effectiveConfig, processEnv, cwd).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, pathService),
       );
 
       const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);

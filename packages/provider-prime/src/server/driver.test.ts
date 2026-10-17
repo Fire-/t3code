@@ -122,8 +122,10 @@ const create = (config: Partial<PrimeSettings> = {}, enabled = true) =>
     instanceId: ProviderInstanceId.make("prime-workspace-test"),
     displayName: "My Prime",
     accentColor: "#abcdef",
+    // Discovery only runs once Prime has credentials; the key keeps the agent dir untouched.
     environment: [
       { name: "PRIME_AGENT_CODING_AGENT_DIR", value: "/isolated-prime", sensitive: false },
+      { name: "PRIME_API_KEY", value: "not-a-real-prime-key", sensitive: true },
     ],
     enabled,
     config: { ...PrimeDriver.defaultConfig(), binaryPath: "custom-prime", ...config },

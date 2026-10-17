@@ -159,12 +159,18 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
 
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
   const isCodex = provider.driver === ProviderDriverKind.make("codex");
-  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
+  const isPrimeAgent = provider.driver === ProviderDriverKind.make("prime-agent");
+  if (
+    !isAntigravity &&
+    !isCodex &&
+    !isPrimeAgent &&
+    provider.driver !== ProviderDriverKind.make("opencode")
+  ) {
     return true;
   }
 
   if (
-    (isAntigravity || isCodex) &&
+    (isAntigravity || isCodex || isPrimeAgent) &&
     (!provider.enabled || provider.auth.status === "unauthenticated")
   ) {
     return false;
@@ -176,8 +182,15 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   const isPendingInitialProbe =
     provider.enabled && !provider.installed && provider.status === "warning";
   const didInstalledProviderProbeFail = provider.installed && provider.status === "error";
+  // Prime's get_available_models returns its whole inventory, so only a ready
+  // probe may replace the list; a degraded probe keeps the last-known models.
+  const isDegradedPrimeDiscovery =
+    isPrimeAgent && provider.installed && provider.status !== "ready";
   return (
-    isPendingAntigravityAuthentication || isPendingInitialProbe || didInstalledProviderProbeFail
+    isPendingAntigravityAuthentication ||
+    isPendingInitialProbe ||
+    didInstalledProviderProbeFail ||
+    isDegradedPrimeDiscovery
   );
 };
 
