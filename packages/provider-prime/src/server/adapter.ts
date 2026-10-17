@@ -46,7 +46,11 @@ import {
   isPrimeBusyRejection,
   primeAgentEndErrorMessage,
   primeAgentEndFailed,
+  primeContentText as contentText,
   primeErrorMessage,
+  primeIpythonFileChange,
+  primeIpythonUpdate,
+  primeToolItem,
 } from "./events.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -253,18 +257,6 @@ export interface PrimeAdapterV2Options {
   };
 }
 
-function contentText(content: unknown): string {
-  if (!Array.isArray(content)) {
-    return typeof content === "string" ? content : "";
-  }
-  return content
-    .map((block) => {
-      if (recordField(block, "type") === "text") return recordString(block, "text") ?? "";
-      return "";
-    })
-    .join("");
-}
-
 const MAX_STRUCTURED_TOOL_OUTPUT_BYTES = 64 * 1024;
 
 function isBoundedStructuredToolValue(value: unknown): boolean {
@@ -413,6 +405,8 @@ interface ActivePrimeTurn {
   messageOrdinal: number;
   readonly streamItems: Map<string, PrimeStreamItemState>;
   readonly toolArgs: Map<string, unknown>;
+  /** Accumulated ipython stream chunks, by tool call. */
+  readonly toolOutput: Map<string, string>;
   readonly toolStartedAt: Map<string, DateTime.Utc>;
   /** Tool calls started without a matching end, by tool name, so a terminal can close them. */
   readonly openToolCalls: Map<string, string>;
@@ -1071,21 +1065,34 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           turn.openToolCalls.delete(toolCallId);
         }
         const args = event["args"] ?? turn.toolArgs.get(toolCallId);
-        const emittedAt = yield* DateTime.now;
-        const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
-        turn.toolStartedAt.set(toolCallId, startedAt);
         const completed = phase === "end";
         const isError = event["isError"] === true;
         const resultRecord = completed ? event["result"] : event["partialResult"];
-        const outputText = contentText(recordField(resultRecord, "content"));
+        // ipython updates are single stream chunks, unlike Pi's cumulative ones.
+        let streamedOutput: string | undefined;
+        if (toolName === "ipython") {
+          if (phase === "update") {
+            const update = primeIpythonUpdate(resultRecord);
+            if (update.type === "progress") return;
+            streamedOutput = (turn.toolOutput.get(toolCallId) ?? "") + update.text;
+            turn.toolOutput.set(toolCallId, streamedOutput);
+          } else {
+            streamedOutput = turn.toolOutput.get(toolCallId);
+          }
+        }
+        const emittedAt = yield* DateTime.now;
+        const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
+        turn.toolStartedAt.set(toolCallId, startedAt);
+        const mapped = primeToolItem({ toolName, args, result: resultRecord, isError });
+        const mappedStatus = mapped?.type === "command_execution" ? mapped.status : undefined;
         const status = completed
           ? closedStatus !== undefined
             ? closedStatus
-            : isError
-              ? turn.interrupted
-                ? "interrupted"
-                : "failed"
-              : "completed"
+            : mappedStatus === "interrupted" || (isError && turn.interrupted)
+              ? "interrupted"
+              : isError || mappedStatus === "failed"
+                ? "failed"
+                : "completed"
           : "running";
         const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);
         yield* emitItemNode(
@@ -1100,66 +1107,65 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           ...base,
           status,
           completedAt: completed ? emittedAt : null,
+          title: toolName,
         } as const;
-        if (toolName === "bash" || toolName === "powershell") {
-          const exitCode =
-            recordNumber(recordField(resultRecord, "structuredContent"), "exit_code") ??
-            recordNumber(recordField(resultRecord, "details"), "exitCode");
+        if (mapped?.type === "command_execution") {
+          const { status: _status, ...item } = mapped;
+          const output = phase === "update" ? streamedOutput : (item.output ?? streamedOutput);
+          yield* emit({
+            type: "turn_item.updated",
+            driver: PRIME_PROVIDER,
+            turnItem: { ...shared, ...item, ...(output === undefined ? {} : { output }) },
+          });
+        } else if (mapped?.type === "file_change") {
           yield* emit({
             type: "turn_item.updated",
             driver: PRIME_PROVIDER,
             turnItem: {
               ...shared,
-              title: toolName,
-              type: "command_execution",
-              input: recordString(args, "command") ?? "",
-              ...(outputText.length > 0 ? { output: outputText } : {}),
-              ...(exitCode === undefined ? {} : { exitCode }),
+              ...mapped,
+              ...(mapped.changes === undefined ? {} : { changes: [...mapped.changes] }),
             },
           });
-          return;
+        } else {
+          const output = primeToolOutput(resultRecord, toolName);
+          yield* emit({
+            type: "turn_item.updated",
+            driver: PRIME_PROVIDER,
+            turnItem: {
+              ...shared,
+              type: "dynamic_tool",
+              ...mcpToolPresentation({ toolName }),
+              toolName,
+              input: args ?? {},
+              ...(output === undefined ? {} : { output }),
+            },
+          });
         }
-        if (toolName === "edit" || toolName === "write") {
-          const fileName = recordString(args, "path") ?? recordString(args, "file_path");
-          if (fileName !== undefined) {
-            const diffStr =
-              recordString(recordField(resultRecord, "details"), "patch") ??
-              (isError && outputText.trim().length > 0 ? outputText : undefined);
-            const newStr = toolName === "write" ? recordString(args, "content") : undefined;
+        if (completed && toolName === "ipython") {
+          turn.toolOutput.delete(toolCallId);
+          const fileChange = primeIpythonFileChange(resultRecord);
+          if (fileChange !== undefined) {
+            const nativeItemId = `${toolCallId}:diffs`;
+            yield* emitItemNode(turn, nativeItemId, "tool_call", "completed", emittedAt, emittedAt);
             yield* emit({
               type: "turn_item.updated",
               driver: PRIME_PROVIDER,
               turnItem: {
-                ...shared,
+                ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+                status: "completed",
+                completedAt: emittedAt,
                 title: toolName,
-                type: "file_change",
-                fileName,
-                ...(diffStr === undefined ? {} : { diffStr }),
-                ...(newStr === undefined ? {} : { newStr }),
+                ...fileChange,
+                ...(fileChange.changes === undefined ? {} : { changes: [...fileChange.changes] }),
               },
             });
-            return;
           }
         }
-        const output = primeToolOutput(resultRecord, toolName);
-        yield* emit({
-          type: "turn_item.updated",
-          driver: PRIME_PROVIDER,
-          turnItem: {
-            ...shared,
-            title: toolName,
-            type: "dynamic_tool",
-            ...mcpToolPresentation({ toolName }),
-            toolName,
-            input: args ?? {},
-            ...(output === undefined ? {} : { output }),
-          },
-        });
         if (toolName === "subagent") {
           yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed);
         }
       });
-
       const emitSubagentTasks = Effect.fnUntraced(function* (
         turn: ActivePrimeTurn,
         toolCallId: string,
@@ -1509,8 +1515,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         const interrupted = turn.interrupted || turn.nativeAborted;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
-        // Prime does not send tool_execution_end for a tool cut off by an
-        // abort or a process exit, so its item would stay running forever.
+        // A tool cut off by a process exit, or by Stop's terminate before Prime
+        // reports the abort, gets no tool_execution_end and would stay running.
         for (const [toolCallId, toolName] of turn.openToolCalls) {
           yield* emitToolItem(
             turn,
@@ -2589,6 +2595,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               messageOrdinal: 0,
               streamItems: new Map(),
               toolArgs: new Map(),
+              toolOutput: new Map(),
               toolStartedAt: new Map(),
               openToolCalls: new Map(),
               interrupted: false,

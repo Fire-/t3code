@@ -5123,6 +5123,276 @@ describe("Prime settle engine", () => {
   });
 });
 
+describe("Prime tool mapping", () => {
+  type AdapterEvent = ProviderAdapter.ProviderAdapterV2Event;
+  type TurnItem = Extract<AdapterEvent, { type: "turn_item.updated" }>["turnItem"];
+
+  const openToolTurn = Effect.fnUntraced(function* () {
+    const fake = yield* makeFakePrime;
+    const { runtime, takeEvent } = yield* openRuntime(fake);
+    const providerThread = yield* runtime.ensureThread({
+      threadId: THREAD_ID,
+      modelSelection: modelSelection("default"),
+      runtimePolicy,
+    });
+    yield* startTurn(runtime, providerThread);
+    yield* fake.takeRequest("prompt");
+    yield* fake.emit({ type: "response", command: "prompt", success: true });
+    yield* fake.emit({ type: "agent_start" });
+    const items: Array<TurnItem> = [];
+    /** Waits for the next item update matching the predicate, keeping every item seen. */
+    const nextItem = (predicate: (item: TurnItem) => boolean) =>
+      Effect.map(
+        takeEvent((event) => {
+          if (event.type !== "turn_item.updated") return false;
+          items.push(event.turnItem);
+          return predicate(event.turnItem);
+        }),
+        (event) => (event as Extract<AdapterEvent, { type: "turn_item.updated" }>).turnItem,
+      );
+    const itemsFor = (nativeId: string) =>
+      items.filter((item) => item.nativeItemRef?.nativeId === nativeId);
+    return { fake, nextItem, itemsFor };
+  });
+
+  const ipythonCode = "for i in range(3):\n    print(i)\nedit('src/a.py')";
+
+  it.effect(
+    "[VAL-TOOL-001][VAL-TOOL-002] ipython streams as one command execution, the heartbeat adds no output, and its diffs add a file change",
+    () =>
+      Effect.gen(function* () {
+        const { fake, nextItem, itemsFor } = yield* openToolTurn();
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "cell-1",
+          toolName: "ipython",
+          args: { code: ipythonCode },
+        });
+        const running = yield* nextItem((item) => item.nativeItemRef?.nativeId === "cell-1");
+        assert.isTrue(
+          running.type === "command_execution" &&
+            running.status === "running" &&
+            running.input === ipythonCode,
+        );
+        for (const partialResult of [
+          {
+            content: [{ type: "text", text: "Starting Python kernel..." }],
+            details: { status: "starting" },
+          },
+          { content: [{ type: "text", text: "0\n" }], details: { status: "ok" } },
+          {
+            content: [{ type: "text", text: "0\n[ipython cell still running (30s elapsed)]" }],
+            details: { status: "ok" },
+          },
+          { content: [{ type: "text", text: "1\n" }], details: { status: "ok" } },
+        ]) {
+          yield* fake.emit({
+            type: "tool_execution_update",
+            toolCallId: "cell-1",
+            toolName: "ipython",
+            args: { code: ipythonCode },
+            partialResult,
+          });
+        }
+        const streamed = yield* nextItem(
+          (item) =>
+            item.nativeItemRef?.nativeId === "cell-1" &&
+            item.type === "command_execution" &&
+            item.output === "0\n1\n",
+        );
+        assert.equal(streamed.status, "running");
+
+        yield* fake.emit({
+          type: "tool_execution_end",
+          toolCallId: "cell-1",
+          toolName: "ipython",
+          isError: false,
+          result: {
+            content: [{ type: "text", text: "0\n1\n2\n" }],
+            details: {
+              status: "ok",
+              stdout: "0\n1\n2\n",
+              stderr: "",
+              diffs: [
+                { path: "src/a.py", oldStr: "x = 1\n", newStr: "x = 2\n", startLine: 4 },
+                { path: "src/b.py", oldStr: "y = 1\n", newStr: "y = 2\n", startLine: 1 },
+              ],
+            },
+          },
+        });
+        const completed = yield* nextItem(
+          (item) => item.nativeItemRef?.nativeId === "cell-1" && item.status === "completed",
+        );
+        assert.isTrue(
+          completed.type === "command_execution" &&
+            completed.input === ipythonCode &&
+            completed.output === "0\n1\n2\n",
+        );
+        const fileChange = yield* nextItem((item) => item.type === "file_change");
+        assert.isTrue(fileChange.type === "file_change" && fileChange.status === "completed");
+        if (fileChange.type !== "file_change") return;
+        assert.deepEqual(
+          fileChange.changes?.map((change) => change.path),
+          ["src/a.py", "src/b.py"],
+        );
+        assert.include(fileChange.diffStr, "@@ -4,1 +4,1 @@\n-x = 1\n+x = 2");
+        assert.include(fileChange.diffStr, "+++ src/b.py");
+        assert.notEqual(fileChange.id, completed.id);
+
+        const cellUpdates = itemsFor("cell-1");
+        assert.deepEqual(
+          cellUpdates.map((item) => [
+            item.status,
+            item.type === "command_execution" ? item.output : null,
+          ]),
+          [
+            ["running", undefined],
+            ["running", "0\n"],
+            ["running", "0\n1\n"],
+            ["completed", "0\n1\n2\n"],
+          ],
+          "start-up and heartbeat updates emit nothing",
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-TOOL-003] a failed ipython cell ends as a failed command execution with the error text",
+    () =>
+      Effect.gen(function* () {
+        const { fake, nextItem } = yield* openToolTurn();
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "cell-err",
+          toolName: "ipython",
+          args: { code: "1 / 0" },
+        });
+        yield* fake.emit({
+          type: "tool_execution_end",
+          toolCallId: "cell-err",
+          toolName: "ipython",
+          isError: true,
+          result: {
+            content: [{ type: "text", text: "ZeroDivisionError: division by zero" }],
+            details: {
+              status: "error",
+              errorEname: "ZeroDivisionError",
+              error: {
+                ename: "ZeroDivisionError",
+                evalue: "division by zero",
+                traceback: ["ZeroDivisionError: division by zero"],
+              },
+            },
+          },
+        });
+        const failed = yield* nextItem(
+          (item) => item.nativeItemRef?.nativeId === "cell-err" && item.status !== "running",
+        );
+        assert.isTrue(
+          failed.type === "command_execution" &&
+            failed.status === "failed" &&
+            failed.input === "1 / 0" &&
+            failed.output === "ZeroDivisionError: division by zero",
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      ids: "[VAL-TOOL-004]",
+      toolName: "bash",
+      args: { command: "ls" },
+      result: { content: [{ type: "text", text: "README.md" }], details: { exitCode: 0 } },
+      expected: { type: "command_execution", input: "ls", output: "README.md", exitCode: 0 },
+    },
+    {
+      ids: "[VAL-TOOL-005]",
+      toolName: "edit",
+      args: { path: "a.ts" },
+      result: { details: { diff: "-1 old\n+1 new", firstChangedLine: 1 } },
+      expected: {
+        type: "file_change",
+        fileName: "a.ts",
+        diffStr: "--- a.ts\n+++ a.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+      },
+    },
+    {
+      ids: "[VAL-TOOL-005]",
+      toolName: "write",
+      args: { path: "b.ts", content: "export {};\n" },
+      result: { content: [{ type: "text", text: "Successfully wrote to b.ts" }] },
+      expected: { type: "file_change", fileName: "b.ts", newStr: "export {};\n" },
+    },
+    {
+      ids: "[VAL-TOOL-006]",
+      toolName: "rename",
+      args: { oldPath: "old.ts", newPath: "new.ts" },
+      result: { content: [{ type: "text", text: "Renamed" }] },
+      expected: {
+        type: "file_change",
+        fileName: "new.ts",
+        changes: [{ operation: "rename", path: "new.ts", oldPath: "old.ts" }],
+      },
+    },
+    {
+      ids: "[VAL-TOOL-006]",
+      toolName: "rename",
+      args: { name: "renamed session" },
+      result: { content: [{ type: "text", text: "Renamed" }] },
+      expected: {
+        type: "dynamic_tool",
+        toolName: "rename",
+        input: { name: "renamed session" },
+        output: "Renamed",
+      },
+    },
+    {
+      ids: "[VAL-TOOL-007]",
+      toolName: "stdout",
+      args: { text: "hello" },
+      result: { content: [{ type: "text", text: "hello" }] },
+      expected: {
+        type: "dynamic_tool",
+        toolName: "stdout",
+        input: { text: "hello" },
+        output: "hello",
+      },
+    },
+    {
+      ids: "[VAL-TOOL-007]",
+      toolName: "custom_lookup",
+      args: { query: "q" },
+      result: { content: [{ type: "text", text: "answer" }] },
+      expected: {
+        type: "dynamic_tool",
+        toolName: "custom_lookup",
+        input: { query: "q" },
+        output: "answer",
+      },
+    },
+  ])(
+    "$ids maps $toolName with args $args to $expected.type",
+    ({ toolName, args, result, expected }) =>
+      Effect.gen(function* () {
+        const { fake, nextItem } = yield* openToolTurn();
+        yield* fake.emit({ type: "tool_execution_start", toolCallId: "tool-1", toolName, args });
+        yield* fake.emit({
+          type: "tool_execution_end",
+          toolCallId: "tool-1",
+          toolName,
+          isError: false,
+          result,
+        });
+        const completed = yield* nextItem(
+          (item) => item.nativeItemRef?.nativeId === "tool-1" && item.status === "completed",
+        );
+        const projected = Object.fromEntries(
+          Object.keys(expected).map((key) => [key, Reflect.get(completed, key)]),
+        );
+        assert.deepEqual(projected, expected);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
 describe("PrimeRpc framing", () => {
   it.effect("reassembles records across chunk boundaries and strips CR", () =>
     Effect.gen(function* () {

@@ -199,6 +199,7 @@ import { assertTurnInterruptMidToolCodexOutput } from "./turn_interrupt_mid_tool
 import { assertTurnInterruptMidToolCursorOutput } from "./turn_interrupt_mid_tool/cursor_output.ts";
 import { turnInterruptMidToolInput } from "./turn_interrupt_mid_tool/input.ts";
 import { assertTurnInterruptMidToolPiOutput } from "./turn_interrupt_mid_tool/pi_output.ts";
+import { assertTurnInterruptMidToolPrimeOutput } from "./turn_interrupt_mid_tool/prime_output.ts";
 import { assertTurnInterruptRestartClaudeOutput } from "./turn_interrupt_restart/claude_output.ts";
 import { turnInterruptRestartInput } from "./turn_interrupt_restart/input.ts";
 import { assertClaudeWebSearchOutput } from "./web_search/claude_output.ts";
@@ -1663,6 +1664,15 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./turn_interrupt_mid_tool/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertTurnInterruptMidToolPiOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL(
+          "./turn_interrupt_mid_tool/prime_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertTurnInterruptMidToolPrimeOutput,
       },
     ],
   },
