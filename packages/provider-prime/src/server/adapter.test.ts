@@ -108,7 +108,41 @@ interface FakePrime {
   }>;
   /** Fails the next `count` switch_session requests with Prime's error text. */
   readonly failSwitches: (count: number, error: string) => void;
+  /**
+   * Sets the live session-action snapshot that `get_state` reports and, like
+   * Prime (core/agent-session.ts _emitQueueUpdate), pushes
+   * `session_action_update` only when the snapshot changed.
+   */
+  readonly setSessionActions: (actions: FakeSessionActions) => Effect.Effect<void>;
+  readonly setCompacting: (compacting: boolean) => void;
+  /** Prime's id-less error response (daemon post-acceptance failure, unknown command). */
+  readonly emitOrphanError: (command: string, error: string) => Effect.Effect<void>;
+  /** Types of every command T3 wrote to stdin, in order. */
+  readonly commandLog: () => ReadonlyArray<string>;
 }
+
+interface FakeSessionActions {
+  readonly queuedCount: number;
+  readonly steering: ReadonlyArray<string>;
+  readonly followUps: ReadonlyArray<string>;
+  readonly active?: {
+    readonly kind: "turn" | "session_command";
+    readonly phase: "preparing" | "committing" | "running";
+    readonly label?: string;
+  };
+}
+
+const IDLE_ACTIONS: FakeSessionActions = { queuedCount: 0, steering: [], followUps: [] };
+const RUNNING_TURN_ACTIONS: FakeSessionActions = {
+  ...IDLE_ACTIONS,
+  active: { kind: "turn", phase: "running", label: "Hello prime-agent" },
+};
+
+/** Prime's agent_end carries only the run's messages; an aborted run ends with an aborted assistant message. */
+const agentEnd = (aborted = false): PrimeRpcRecord => ({
+  type: "agent_end",
+  messages: aborted ? [{ role: "assistant", content: [], stopReason: "aborted" }] : [],
+});
 
 /**
  * Prime's idle `get_state` reply as observed live (research/dependency-readiness.md),
@@ -148,6 +182,8 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   let sessionGeneration = 0;
   let models: ReadonlyArray<unknown> = [];
   let isStreaming: boolean | null = null;
+  let isCompacting = false;
+  let sessionActions: FakeSessionActions = IDLE_ACTIONS;
   let stdinBuffer = "";
 
   const emit = (record: PrimeRpcRecord, chunkBytes?: number) =>
@@ -179,6 +215,8 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
           data: {
             ...recordedIdleState(sessionFile),
             isStreaming: isStreaming ?? false,
+            isCompacting,
+            sessionActions,
             ...stateQueue.shift(),
           },
         };
@@ -335,6 +373,17 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
       switchFailures = count;
       switchFailureError = error;
     },
+    setSessionActions: (actions) =>
+      Effect.suspend(() => {
+        if (encodeJsonLine(actions) === encodeJsonLine(sessionActions)) return Effect.void;
+        sessionActions = actions;
+        return emit({ type: "session_action_update", actions });
+      }),
+    setCompacting: (compacting) => {
+      isCompacting = compacting;
+    },
+    emitOrphanError: (command, error) => emit({ type: "response", command, success: false, error }),
+    commandLog: () => allRequests.map((request) => String(request["type"])),
   } satisfies FakePrime;
 });
 
@@ -494,7 +543,7 @@ const expectModelFailure = (errorMessage: string) =>
         errorMessage,
       },
     });
-    yield* fake.emit({ type: "agent_settled" });
+    yield* fake.emit({ type: "agent_end", messages: [] });
 
     const sessionError = yield* takeEvent(
       (event) =>
@@ -538,7 +587,7 @@ describe("PrimeAdapterV2", () => {
           },
         });
         fake.queueState({ isStreaming: false });
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -631,7 +680,7 @@ describe("PrimeAdapterV2", () => {
               content: "Discarded branch wake output",
             },
           });
-          yield* fake.emit({ type: "agent_settled" });
+          yield* fake.emit({ type: "agent_end", messages: [] });
           const retired = yield* takeEvent(
             (event) =>
               event.type === "provider_session.updated" &&
@@ -679,7 +728,7 @@ describe("PrimeAdapterV2", () => {
         assert.equal(prompt["message"], "Hello prime-agent");
         yield* fake.emit({ type: "response", command: "prompt", success: true });
         yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -710,7 +759,7 @@ describe("PrimeAdapterV2", () => {
         yield* fake.takeRequest("get_state");
         yield* fake.emit({ type: "agent_start" });
         yield* Queue.take(offers);
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         yield* fake.emit({ type: "compaction_start", reason: "manual" });
         yield* startTurn(runtime, providerThread);
         yield* fake.takeRequest("prompt");
@@ -760,7 +809,7 @@ describe("PrimeAdapterV2", () => {
         const message = yield* takeEvent((event) => event.type === "message.updated");
         assert.isTrue(message.type === "message.updated" && message.message.runId !== null);
         yield* fake.takeRequest("get_state");
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(
           terminal.type === "turn.terminal" &&
@@ -801,7 +850,7 @@ describe("PrimeAdapterV2", () => {
           content: "Current branch wake output",
         },
       });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* takeEvent(
         (event) =>
           event.type === "provider_session.updated" && event.providerSession.status === "ready",
@@ -899,7 +948,7 @@ describe("PrimeAdapterV2", () => {
         method: "confirm",
         title: "Use this model?",
       });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* takeEvent((event) => {
         if (event.type === "runtime_request.updated") requests.push(event);
         return (
@@ -989,7 +1038,7 @@ describe("PrimeAdapterV2", () => {
         },
       });
       yield* fake.emit({ type: "message_end", message: { role: "assistant" } });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* takeEvent(
         (event) =>
           event.type === "provider_session.updated" && event.providerSession.status === "ready",
@@ -1049,7 +1098,7 @@ describe("PrimeAdapterV2", () => {
         yield* fake.emit({ type: "agent_start" });
         const offer = yield* Queue.take(offers);
         if (settled) {
-          yield* fake.emit({ type: "agent_settled" });
+          yield* fake.emit({ type: "agent_end", messages: [] });
           yield* takeEvent(
             (event) =>
               event.type === "provider_session.updated" && event.providerSession.status === "ready",
@@ -1087,7 +1136,7 @@ describe("PrimeAdapterV2", () => {
             content: "User prompt completed",
           },
         });
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         const message = yield* takeEvent(
           (event) =>
             event.type === "message.updated" && event.message.text === "User prompt completed",
@@ -1130,7 +1179,7 @@ describe("PrimeAdapterV2", () => {
         yield* Queue.take(offers);
         yield* startTurn(runtime, providerThread);
         yield* fake.takeRequest("prompt");
-        yield* fake.emit({ type: "agent_settled", aborted });
+        yield* fake.emit(agentEnd(aborted));
         yield* fake.emit({
           type: "extension_ui_request",
           method: "notify",
@@ -1147,7 +1196,7 @@ describe("PrimeAdapterV2", () => {
         yield* fake.emit({ type: "response", command: "prompt", success: true });
         yield* fake.takeRequest("get_state");
         yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -1181,7 +1230,7 @@ describe("PrimeAdapterV2", () => {
         });
         yield* fake.emit({ type: "agent_start" });
         yield* Queue.take(offers);
-        yield* fake.emit({ type: "agent_settled", aborted });
+        yield* fake.emit(agentEnd(aborted));
         yield* takeEvent(
           (event) =>
             event.type === "provider_session.updated" && event.providerSession.status === "ready",
@@ -1190,7 +1239,7 @@ describe("PrimeAdapterV2", () => {
         yield* fake.takeRequest("prompt");
         if (resumes) yield* fake.emit({ type: "agent_start" });
         yield* fake.emit({ type: "response", command: "prompt", success: true });
-        if (resumes) yield* fake.emit({ type: "agent_settled", aborted: false });
+        if (resumes) yield* fake.emit(agentEnd(false));
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === expected);
         yield* startTurn(
@@ -1476,7 +1525,7 @@ describe("PrimeAdapterV2", () => {
               stopReason: "stop",
             },
           });
-          yield* first.emit({ type: "agent_settled" });
+          yield* first.emit({ type: "agent_end", messages: [] });
           const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
           assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
           return created;
@@ -1510,7 +1559,7 @@ describe("PrimeAdapterV2", () => {
             stopReason: "stop",
           },
         });
-        yield* second.emit({ type: "agent_settled" });
+        yield* second.emit({ type: "agent_end", messages: [] });
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -1628,7 +1677,7 @@ describe("PrimeAdapterV2", () => {
           stopReason: "stop",
         },
       });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -2002,8 +2051,7 @@ describe("PrimeAdapterV2", () => {
       const levelRequest = yield* fake.takeRequest("set_thinking_level");
       assert.equal(levelRequest["level"], "high");
       yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_end", messages: [], willRetry: false });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* takeEvent((event) => event.type === "turn.terminal");
 
       yield* startTurn(
@@ -2135,7 +2183,7 @@ describe("PrimeAdapterV2", () => {
       const adopted = { ...forked, id: ProviderThreadId.make("pending-fork-row") };
       yield* startTurn(runtime, adopted, "default", [], "Continue", undefined, 1, target);
       yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       const updated = yield* takeEvent(
         (event) =>
           event.type === "provider_thread.updated" && event.providerThread.appThreadId === target,
@@ -2688,7 +2736,7 @@ describe("PrimeAdapterV2", () => {
         yield* fake.emit({ type: "response", command: "prompt", success: true });
         if (!text.startsWith("/")) {
           yield* fake.emit({ type: "agent_start" });
-          yield* fake.emit({ type: "agent_settled" });
+          yield* fake.emit({ type: "agent_end", messages: [] });
         }
         const turn = yield* takeEvent(
           (event) =>
@@ -2792,7 +2840,7 @@ describe("PrimeAdapterV2", () => {
         }
         yield* fake.emit({ type: "response", command: "prompt", success: true });
         yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         yield* takeEvent(
           (event) =>
             event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
@@ -2841,7 +2889,7 @@ describe("PrimeAdapterV2", () => {
         });
         yield* fake.emit({ type: "response", command: "prompt", success: true });
         yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         yield* takeEvent(
           (event) =>
             event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
@@ -2875,7 +2923,7 @@ describe("PrimeAdapterV2", () => {
         yield* fake.takeRequest("prompt");
         yield* fake.emit({ type: "response", command: "prompt", success: true });
         yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
         const update = yield* takeEvent(
           (event) =>
             event.type === "provider_thread.updated" && event.providerThread.status === "idle",
@@ -3098,7 +3146,7 @@ describe("PrimeAdapterV2", () => {
           event.turnItem.status === "completed",
       );
       yield* fake.emit({ type: "response", command: "compact", success: true });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
@@ -3583,7 +3631,7 @@ describe("PrimeAdapterV2", () => {
       yield* startTurn(runtime, providerThread, "default", [], "/my-command");
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       const firstTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(firstTerminal.type === "turn.terminal" && firstTerminal.status === "completed");
 
@@ -3596,7 +3644,7 @@ describe("PrimeAdapterV2", () => {
         error: "late command rejection",
       });
       yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       const secondTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(
         secondTerminal.type === "turn.terminal" && secondTerminal.status === "completed",
@@ -3664,7 +3712,7 @@ describe("PrimeAdapterV2", () => {
           completedItem.turnItem.afterTokenCount === 3_400,
       );
 
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -3777,8 +3825,10 @@ describe("PrimeAdapterV2", () => {
       yield* startTurn(runtime, providerThread);
       yield* fake.takeRequest("prompt");
 
+      yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
       yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_end", messages: [], willRetry: true });
+      // Prime retries inside the same turn action, so agent_end does not settle.
+      yield* fake.emit(agentEnd());
       yield* fake.emit({
         type: "auto_retry_start",
         attempt: 1,
@@ -3843,7 +3893,7 @@ describe("PrimeAdapterV2", () => {
           failedRetry.turnItem.retry?.attempt === 3 &&
           failedRetry.turnItem.retry.maxAttempts === 3,
       );
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.setSessionActions(IDLE_ACTIONS);
 
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
@@ -3911,7 +3961,7 @@ describe("PrimeAdapterV2", () => {
           event.turnItem.type === "compaction" &&
           event.turnItem.status === "completed",
       );
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
 
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(
@@ -3969,7 +4019,7 @@ describe("PrimeAdapterV2", () => {
           recovered.turnItem.title === "Provider recovered",
       );
 
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -3989,10 +4039,7 @@ describe("PrimeAdapterV2", () => {
         yield* startTurn(runtime, providerThread);
         yield* fake.takeRequest("prompt");
         yield* fake.emit({ type: "agent_start" });
-        yield* fake.emit({
-          type: "agent_settled",
-          ...(aborted === undefined ? {} : { aborted }),
-        });
+        yield* fake.emit(agentEnd(aborted === true));
         const completed = yield* takeEvent(
           (event) =>
             event.type === "provider_turn.updated" && event.providerTurn.status !== "running",
@@ -4033,7 +4080,7 @@ describe("PrimeAdapterV2", () => {
       const retrying = yield* takeEvent(
         (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
       );
-      yield* fake.emit({ type: "agent_settled", aborted: true });
+      yield* fake.emit(agentEnd(true));
       const stopped = yield* takeEvent(
         (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
       );
@@ -4080,7 +4127,7 @@ describe("PrimeAdapterV2", () => {
       );
       yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
       yield* fake.takeRequest("abort");
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
 
       const stopped = yield* takeEvent(
         (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
@@ -4113,7 +4160,7 @@ describe("PrimeAdapterV2", () => {
       yield* fake.emit({ type: "agent_start" });
 
       fake.queueState({ isStreaming: false, isCompacting: true });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
       yield* fake.emit({ type: "compaction_start", reason: "manual" });
       yield* takeEvent(
@@ -4138,7 +4185,7 @@ describe("PrimeAdapterV2", () => {
       yield* fake.takeRequest("get_state");
 
       fake.queueState({ isStreaming: false, isCompacting: false });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
@@ -4159,7 +4206,7 @@ describe("PrimeAdapterV2", () => {
       yield* fake.emit({ type: "agent_start" });
 
       fake.failNextState();
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
       yield* fake.emit({ type: "compaction_start", reason: "manual" });
       yield* takeEvent(
@@ -4208,7 +4255,7 @@ describe("PrimeAdapterV2", () => {
       yield* fake.emit({ type: "agent_start" });
 
       fake.queueState({ isStreaming: false, isCompacting: true });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
       yield* fake.emit({ type: "compaction_start", reason: "manual" });
       yield* takeEvent(
@@ -4245,7 +4292,7 @@ describe("PrimeAdapterV2", () => {
       yield* fake.emit({ type: "agent_start" });
 
       fake.deferNextState();
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
       yield* runtime.steerTurn({
         threadId: THREAD_ID,
@@ -4290,11 +4337,368 @@ describe("PrimeAdapterV2", () => {
       );
 
       fake.queueState({ isStreaming: false, isCompacting: false });
-      yield* fake.emit({ type: "agent_settled" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
+
+describe("Prime settle engine", () => {
+  type AdapterEvent = ProviderAdapter.ProviderAdapterV2Event;
+
+  const openTurn = Effect.fnUntraced(function* () {
+    const fake = yield* makeFakePrime;
+    const { runtime, takeEvent } = yield* openRuntime(fake);
+    const providerThread = yield* runtime.ensureThread({
+      threadId: THREAD_ID,
+      modelSelection: modelSelection("default"),
+      runtimePolicy,
+    });
+    const seen: Array<AdapterEvent> = [];
+    const record = (predicate: (event: AdapterEvent) => boolean) =>
+      takeEvent((event) => {
+        seen.push(event);
+        return predicate(event);
+      });
+    const begin = Effect.fnUntraced(function* (text = "Hello prime-agent", runOrdinal = 1) {
+      yield* startTurn(runtime, providerThread, "default", [], text, undefined, runOrdinal);
+      yield* fake.takeRequest("prompt");
+      // Prime acknowledges a prompt on acceptance, before the run's events.
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
+      return fake.commandLog().length;
+    });
+    return { fake, runtime, providerThread, seen, record, begin };
+  });
+
+  const replyText = (fake: FakePrime, text: string) =>
+    Effect.gen(function* () {
+      yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text },
+      });
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_end", contentIndex: 0, content: text },
+      });
+      yield* fake.emit({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" },
+      });
+    });
+
+  const isAssistantText = (text: string) => (event: AdapterEvent) =>
+    event.type === "turn_item.updated" &&
+    event.turnItem.type === "assistant_message" &&
+    event.turnItem.streaming === false &&
+    event.turnItem.text === text;
+
+  /** A notify dialog becomes a turn item, so seeing it proves the pump got this far. */
+  const pumpBarrier = (
+    fake: FakePrime,
+    record: (predicate: (event: AdapterEvent) => boolean) => Effect.Effect<AdapterEvent>,
+    message: string,
+  ) =>
+    Effect.gen(function* () {
+      yield* fake.emit({ type: "extension_ui_request", method: "notify", message });
+      yield* record(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.toolName === "notify",
+      );
+    });
+
+  const commandsSince = (fake: FakePrime, index: number) => fake.commandLog().slice(index);
+  const probesSince = (fake: FakePrime, index: number) =>
+    commandsSince(fake, index).filter((type) => type === "get_state").length;
+  const terminals = (seen: ReadonlyArray<AdapterEvent>) =>
+    seen.filter((event) => event.type === "turn.terminal");
+
+  it.effect(
+    "[VAL-TURN-001] a plain turn settles once on agent_end plus an idle get_state, and get_state is sent only after the trigger",
+    () =>
+      Effect.gen(function* () {
+        const { fake, seen, record, begin } = yield* openTurn();
+        const afterPrompt = yield* begin();
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Plain reply");
+        yield* record(isAssistantText("Plain reply"));
+        assert.equal(probesSince(fake, afterPrompt), 0);
+        assert.lengthOf(terminals(seen), 0);
+
+        yield* fake.emit(agentEnd());
+        const terminal = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.equal(probesSince(fake, afterPrompt), 1);
+        assert.lengthOf(terminals(seen), 1);
+        assert.isTrue(seen.findIndex(isAssistantText("Plain reply")) < seen.indexOf(terminal));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each(["turn", "session_command"] as const)(
+    "[VAL-TURN-002] agent_end while a %s action is active does not settle until the action clears and the probe is idle",
+    (kind) =>
+      Effect.gen(function* () {
+        const { fake, seen, record, begin } = yield* openTurn();
+        const afterPrompt = yield* begin();
+        yield* fake.setSessionActions({
+          ...IDLE_ACTIONS,
+          active: { kind, phase: "running", label: "busy" },
+        });
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Still working");
+        yield* fake.emit(agentEnd());
+        yield* pumpBarrier(fake, record, "after agent_end");
+        assert.equal(probesSince(fake, afterPrompt), 0);
+        assert.lengthOf(terminals(seen), 0);
+
+        yield* fake.setSessionActions(IDLE_ACTIONS);
+        const terminal = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.equal(probesSince(fake, afterPrompt), 1);
+        assert.lengthOf(terminals(seen), 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-TURN-003] a probe reporting isStreaming true defers settle to the next idle transition",
+    () =>
+      Effect.gen(function* () {
+        const { fake, seen, record, begin } = yield* openTurn();
+        const afterPrompt = yield* begin();
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Streaming reply");
+        fake.queueState({ isStreaming: true });
+        yield* fake.emit(agentEnd());
+        yield* fake.takeRequest("get_state");
+        yield* pumpBarrier(fake, record, "after streaming probe");
+
+        yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
+        yield* fake.setSessionActions(IDLE_ACTIONS);
+        const terminal = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.equal(probesSince(fake, afterPrompt), 2);
+        assert.lengthOf(terminals(seen), 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-TURN-004] compaction during a run blocks settle until compaction_end and an idle probe, and emits a compaction item",
+    () =>
+      Effect.gen(function* () {
+        const { fake, seen, record, begin } = yield* openTurn();
+        const afterPrompt = yield* begin();
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Before compaction");
+        // Prime reports isCompacting before its compaction_start frame arrives.
+        fake.setCompacting(true);
+        yield* fake.emit(agentEnd());
+        yield* fake.takeRequest("get_state");
+        yield* fake.emit({ type: "compaction_start", reason: "threshold" });
+        const running = yield* record(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
+        );
+        assert.isTrue(
+          running.type === "turn_item.updated" &&
+            running.turnItem.type === "compaction" &&
+            running.turnItem.status === "running",
+        );
+        yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+        yield* pumpBarrier(fake, record, "during compaction");
+        assert.equal(probesSince(fake, afterPrompt), 1);
+        assert.lengthOf(terminals(seen), 0);
+
+        fake.setCompacting(false);
+        yield* fake.emit({
+          type: "compaction_end",
+          reason: "threshold",
+          result: { summary: "smaller", tokensBefore: 9_000, estimatedTokensAfter: 1_500 },
+          aborted: false,
+          willRetry: false,
+        });
+        const terminal = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        const completed = seen.find(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "compaction" &&
+            event.turnItem.status === "completed",
+        );
+        assert.isDefined(completed);
+        assert.isTrue(seen.indexOf(completed!) < seen.indexOf(terminal));
+        assert.equal(probesSince(fake, afterPrompt), 2);
+        assert.lengthOf(terminals(seen), 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("[VAL-TURN-005] queued work blocks settling until the queue drains", () =>
+    Effect.gen(function* () {
+      const { fake, seen, record, begin } = yield* openTurn();
+      const afterPrompt = yield* begin();
+      yield* fake.emit({ type: "agent_start" });
+      yield* replyText(fake, "First answer");
+      yield* fake.setSessionActions({
+        queuedCount: 2,
+        steering: [],
+        followUps: ["also check the tests", "and the docs"],
+      });
+      yield* fake.emit(agentEnd());
+      yield* pumpBarrier(fake, record, "queued after agent_end");
+      assert.equal(probesSince(fake, afterPrompt), 0);
+
+      yield* fake.setSessionActions({
+        queuedCount: 1,
+        steering: [],
+        followUps: ["and the docs"],
+        active: { kind: "turn", phase: "running", label: "also check the tests" },
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* replyText(fake, "Follow-up answer");
+      yield* fake.emit(agentEnd());
+      yield* fake.setSessionActions({
+        queuedCount: 1,
+        steering: [],
+        followUps: ["and the docs"],
+      });
+      yield* pumpBarrier(fake, record, "one follow-up left");
+      assert.equal(probesSince(fake, afterPrompt), 0);
+      assert.lengthOf(terminals(seen), 0);
+
+      yield* fake.setSessionActions(IDLE_ACTIONS);
+      const terminal = yield* record((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      assert.isTrue(seen.findIndex(isAssistantText("Follow-up answer")) < seen.indexOf(terminal));
+      assert.equal(probesSince(fake, afterPrompt), 1);
+      assert.lengthOf(terminals(seen), 1);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-TURN-006] agent_start after agent_end re-arms the same turn, a stale probe is ignored, and one terminal follows the second run",
+    () =>
+      Effect.gen(function* () {
+        const { fake, seen, record, begin } = yield* openTurn();
+        const afterPrompt = yield* begin();
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "First run");
+        fake.deferNextState();
+        yield* fake.emit(agentEnd());
+        yield* fake.takeRequest("get_state");
+
+        // A held goal or queued follow-up starts a new run before the probe answers.
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+        yield* pumpBarrier(fake, record, "second run started");
+        yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+        yield* replyText(fake, "Second run");
+        yield* record(isAssistantText("Second run"));
+        assert.lengthOf(terminals(seen), 0);
+
+        yield* fake.emit(agentEnd());
+        const terminal = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.equal(probesSince(fake, afterPrompt), 2);
+        assert.lengthOf(terminals(seen), 1);
+        const firstRun = seen.find(isAssistantText("First run"));
+        const secondRun = seen.find(isAssistantText("Second run"));
+        assert.isTrue(
+          terminal.type === "turn.terminal" &&
+            firstRun?.type === "turn_item.updated" &&
+            secondRun?.type === "turn_item.updated" &&
+            firstRun.turnItem.providerTurnId === secondRun.turnItem.providerTurnId &&
+            terminal.providerTurnId === secondRun.turnItem.providerTurnId,
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    { command: "prompt", error: "Provider rejected the request: quota exceeded" },
+    { command: "frobnicate", error: "Unknown command: frobnicate" },
+  ])(
+    "[VAL-TURN-011] an id-less $command error response fails the open turn with its text",
+    ({ command, error }) =>
+      Effect.gen(function* () {
+        const { fake, runtime, providerThread, seen, record, begin } = yield* openTurn();
+        yield* begin();
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Partial answer");
+        // The failed run's agent_end can arrive first; its idle probe must
+        // not complete a turn that the error has already failed.
+        fake.deferNextState();
+        yield* fake.emit(agentEnd());
+        yield* fake.takeRequest("get_state");
+        yield* fake.emitOrphanError(command, error);
+        const failed = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          failed.type === "turn.terminal" &&
+            failed.status === "failed" &&
+            failed.failure.message === error,
+        );
+        assert.equal(runtime.providerSession.lastError, error);
+        yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+
+        // A late agent_end from the failed run lands ahead of the next prompt's ack.
+        yield* fake.emit(agentEnd());
+        const afterSecondPrompt = yield* begin("Try again", 2);
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Recovered");
+        yield* fake.emit(agentEnd());
+        const completed = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(completed.type === "turn.terminal" && completed.status === "completed");
+        assert.isTrue(seen.findIndex(isAssistantText("Recovered")) < seen.indexOf(completed));
+        assert.lengthOf(terminals(seen), 2);
+        assert.equal(probesSince(fake, afterSecondPrompt), 1);
+        assert.isTrue(
+          failed.type === "turn.terminal" &&
+            completed.type === "turn.terminal" &&
+            failed.providerTurnId !== completed.providerTurnId,
+        );
+        assert.equal(providerThread.status, "idle");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-TURN-013] two sequential turns on one session each settle once with their own text",
+    () =>
+      Effect.gen(function* () {
+        const { fake, seen, record, begin } = yield* openTurn();
+        const afterFirstPrompt = yield* begin("First question", 1);
+        yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "First answer");
+        yield* fake.emit(agentEnd());
+        yield* fake.setSessionActions(IDLE_ACTIONS);
+        const first = yield* record((event) => event.type === "turn.terminal");
+
+        const afterSecondPrompt = yield* begin("Second question", 2);
+        assert.equal(probesSince(fake, afterFirstPrompt) - probesSince(fake, afterSecondPrompt), 1);
+        yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Second answer");
+        yield* fake.emit(agentEnd());
+        yield* fake.setSessionActions(IDLE_ACTIONS);
+        const second = yield* record((event) => event.type === "turn.terminal");
+
+        assert.lengthOf(terminals(seen), 2);
+        assert.equal(probesSince(fake, afterSecondPrompt), 1);
+        const firstText = seen.find(isAssistantText("First answer"));
+        const secondText = seen.find(isAssistantText("Second answer"));
+        assert.isTrue(
+          first.type === "turn.terminal" &&
+            second.type === "turn.terminal" &&
+            first.status === "completed" &&
+            second.status === "completed" &&
+            firstText?.type === "turn_item.updated" &&
+            secondText?.type === "turn_item.updated" &&
+            firstText.turnItem.providerTurnId === first.providerTurnId &&
+            secondText.turnItem.providerTurnId === second.providerTurnId &&
+            first.providerTurnId !== second.providerTurnId,
+        );
+        assert.isTrue(seen.indexOf(first) < seen.indexOf(secondText!));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
 
@@ -4329,7 +4733,7 @@ describe("PrimeRpc framing", () => {
       const push = (text: string) =>
         Queue.offer(stdout, new TextEncoder().encode(text)).pipe(Effect.asVoid);
       yield* push('{"type":"agent_');
-      yield* push('start"}\r\n{"type":"agent_settled"}\nnot json\n{"type":"queue_update"}\n');
+      yield* push('start"}\r\n{"type":"agent_end"}\nnot json\n{"type":"queue_update"}\n');
 
       yield* push('{"type":"must_not_emit","text":"');
       const chunk = new TextEncoder().encode("x".repeat(8 * 1024 * 1024));
@@ -4339,7 +4743,7 @@ describe("PrimeRpc framing", () => {
       const first = yield* Queue.take(connection.events);
       assert.equal(first["type"], "agent_start");
       const second = yield* Queue.take(connection.events);
-      assert.equal(second["type"], "agent_settled");
+      assert.equal(second["type"], "agent_end");
       const third = yield* Queue.take(connection.events);
       assert.equal(third["type"], "queue_update");
       assert.equal((yield* Queue.take(connection.events))["type"], "after_oversized");

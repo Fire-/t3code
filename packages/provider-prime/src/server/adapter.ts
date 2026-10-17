@@ -69,6 +69,7 @@ import {
   primeRecordString as recordString,
   type PrimeRpcConnection,
   type PrimeRpcRecord,
+  type PrimeSessionActionSnapshot,
 } from "./rpc.ts";
 import {
   buildPrimeRpcLaunch,
@@ -109,6 +110,18 @@ function primeSessionAlreadyActive(
   const match = error.detail?.match(PRIME_SESSION_ALREADY_ACTIVE);
   if (match === null || match === undefined) return undefined;
   return { activeSessionId: match[1] === "another process" ? undefined : match[1] };
+}
+
+/** Prime's agent_end has no `aborted` flag; an aborted run ends with an aborted assistant message. */
+function primeRunAborted(agentEnd: PrimeRpcRecord): boolean {
+  const messages = agentEnd["messages"];
+  if (!Array.isArray(messages)) return false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (recordString(messages[index], "role") === "assistant") {
+      return recordString(messages[index], "stopReason") === "aborted";
+    }
+  }
+  return false;
 }
 
 function primeSessionIdFromPath(sessionPath: string): string {
@@ -390,9 +403,16 @@ interface ActivePrimeTurn {
   readonly promptMayBeCommandOnly: boolean;
   latestCompactionAfterTokens: number | null;
   lastLiveUsedTokens: number | null;
+  /** Bumped by every transition that can make an in-flight `get_state` probe stale. */
   settleProbeGeneration: number;
-  /** An extension may start compaction immediately after Prime emits agent_settled. */
-  settleWhenIdle: boolean;
+  /** Cleared by a later `agent_start`: Prime runs goal and queued work as new runs. */
+  sawAgentEnd: boolean;
+  sessionCommandSeen: boolean;
+  /**
+   * A session command (`/goal status`, `/reload`) can finish without any
+   * agent run, so its active action clearing is a settle trigger of its own.
+   */
+  sessionCommandDone: boolean;
   sawCompaction: boolean;
   manualCompactInFlight: boolean;
   activeCompaction: PrimeCompactionState | null;
@@ -550,6 +570,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       let stopRequested = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PrimeWake | null = null;
+      // Prime emits session_action_update only on change, so the latest
+      // snapshot is session state that outlives any single turn.
+      let latestSessionActions: PrimeSessionActionSnapshot | null = null;
       let rollbackBarrier: Deferred.Deferred<
         void,
         ProviderAdapter.ProviderAdapterProtocolError
@@ -1677,6 +1700,32 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         );
       };
 
+      const sessionActionsBusy = (actions: PrimeSessionActionSnapshot | null): boolean =>
+        actions !== null && (actions.active !== undefined || actions.queuedCount > 0);
+
+      /**
+       * Prime has no `agent_settled`, and `agent_end` is not idle: a goal,
+       * queued follow-up, or session command can keep the session working.
+       * After a trigger (agent_end or a cleared session command) the turn
+       * waits while the pushed session actions are busy, then confirms with
+       * one `get_state`. Only transitions call this, never a timer.
+       */
+      const requestSettle = (turn: ActivePrimeTurn) =>
+        Effect.gen(function* () {
+          if (!turn.sawAgentEnd && !turn.sessionCommandDone) return;
+          if (sessionActionsBusy(latestSessionActions) || turn.activeCompaction !== null) return;
+          turn.settleProbeGeneration += 1;
+          yield* scheduleSettleProbe(turn, true);
+        });
+
+      /** Compaction can start after a trigger or as a command-only turn. */
+      const settleAfterCompaction = (turn: ActivePrimeTurn) =>
+        turn.sawAgentEnd || turn.sessionCommandDone
+          ? requestSettle(turn)
+          : turn.sawAgentActivity
+            ? Effect.void
+            : scheduleSettleProbe(turn);
+
       const stopPendingWake = Effect.fnUntraced(function* (wake: PrimeWake) {
         if (pendingWake !== wake || threadState !== wake.state || closed) return;
         pendingWake = null;
@@ -1697,11 +1746,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           pendingWake !== null &&
           !interactiveUiRequest &&
           !String(event["type"]).startsWith("t3.") &&
-          event["type"] !== "response"
+          event["type"] !== "response" &&
+          event["type"] !== "session_action_update"
         ) {
           pendingWake.events.push(event);
           if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
-          if (event["type"] === "agent_settled") yield* updateProviderSession("ready", null);
+          if (event["type"] === "agent_end") yield* updateProviderSession("ready", null);
           return;
         }
         const state = threadState;
@@ -1753,6 +1803,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             }
             turn.sawAgentActivity = true;
             turn.nativeAborted = false;
+            turn.sawAgentEnd = false;
+            turn.sessionCommandDone = false;
             turn.settleProbeGeneration += 1;
             return;
           }
@@ -1848,9 +1900,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (result === null || result === undefined) {
               if (event["aborted"] === true) {
                 yield* emitCompaction(turn, compaction, "cancelled");
-                if (turn.settleWhenIdle || !turn.sawAgentActivity) {
-                  yield* scheduleSettleProbe(turn, turn.settleWhenIdle);
-                }
+                yield* settleAfterCompaction(turn);
                 return;
               }
               const errorMessage =
@@ -1858,9 +1908,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               yield* emitCompaction(turn, compaction, "failed", {
                 summary: errorMessage.slice(0, 1_000),
               });
-              if (turn.settleWhenIdle || !turn.sawAgentActivity) {
-                yield* scheduleSettleProbe(turn, turn.settleWhenIdle);
-              }
+              yield* settleAfterCompaction(turn);
               return;
             }
             // An overflow can surface as a model error (`message_end` with
@@ -1879,9 +1927,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               ...(beforeTokenCount === undefined ? {} : { beforeTokenCount }),
               ...(afterTokenCount === undefined ? {} : { afterTokenCount }),
             });
-            if (turn.settleWhenIdle || !turn.sawAgentActivity) {
-              yield* scheduleSettleProbe(turn, turn.settleWhenIdle);
-            }
+            yield* settleAfterCompaction(turn);
             return;
           }
           case "auto_retry_start": {
@@ -1915,8 +1961,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (turn === null) return;
             const emittedAt = yield* DateTime.now;
             if (event["success"] === true) {
-              // before retrying, so leaving that failure in place would make
-              // `agent_settled` terminalize a successful turn as failed.
+              // Prime reports the failed attempt as a model error before
+              // retrying, so leaving that failure in place would make the
+              // settle terminalize a successful turn as failed.
               if (turn.activeProviderRetry !== null) {
                 const attempt = Math.max(
                   1,
@@ -1965,26 +2012,47 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             yield* emitExtensionError(event);
             return;
           }
-          case "agent_settled": {
-            if (turn?.interrupted === true) {
+          case "agent_end": {
+            if (turn === null) return;
+            if (turn.interrupted) {
               if (state !== null) yield* finalizeTurn(state);
               return;
             }
-            if (turn !== null) {
-              turn.nativeAborted = event["aborted"] === true;
-              turn.settleWhenIdle = true;
-              turn.settleProbeGeneration += 1;
-              if (
-                turn.adoptedWake &&
-                pendingPromptResponses.some(
-                  (pending) =>
-                    pending.providerTurnId === turn.providerTurn.id &&
-                    pending.kind === "turn_start",
-                )
-              )
-                return;
-              yield* scheduleSettleProbe(turn, true);
+            const awaitingPromptAck = pendingPromptResponses.some(
+              (pending) =>
+                pending.providerTurnId === turn.providerTurn.id && pending.kind === "turn_start",
+            );
+            // Prime acks a prompt before any of its run's events (rpc-mode.ts
+            // buffers them behind the response), so an agent_end ahead of the
+            // ack with no agent_start belongs to a run that ended earlier.
+            if (awaitingPromptAck && !turn.adoptedWake && !turn.sawAgentActivity) return;
+            turn.nativeAborted = primeRunAborted(event);
+            turn.sawAgentEnd = true;
+            if (turn.adoptedWake && awaitingPromptAck) return;
+            yield* requestSettle(turn);
+            return;
+          }
+          case "session_action_update": {
+            const frame = classifyPrimeEvent(event);
+            if (frame._tag !== "Prime" || frame.frame.type !== "session_action_update") {
+              yield* Effect.logDebug("Ignoring a malformed Prime session_action_update.");
+              return;
             }
+            const actions = frame.frame.actions;
+            latestSessionActions = actions;
+            if (turn === null) return;
+            if (actions.active?.kind === "session_command") {
+              turn.sessionCommandSeen = true;
+            } else if (turn.sessionCommandSeen) {
+              turn.sessionCommandSeen = false;
+              turn.sessionCommandDone = true;
+            }
+            if (sessionActionsBusy(actions)) {
+              // A probe answered before Prime picked up this work is stale.
+              turn.settleProbeGeneration += 1;
+              return;
+            }
+            yield* requestSettle(turn);
             return;
           }
           case "response": {
@@ -2033,7 +2101,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (event["success"] === true) {
               // Deferred success ack. Command-only prompts (pure extension
               // slash commands) never start an agent run and never emit
-              // `agent_settled`, so probe for idleness. The probe result is
+              // `agent_end`, so probe for idleness. The probe result is
               // re-queued behind any events Prime emitted before answering
               // get_state, which keeps the check stream-ordered.
               if (
@@ -2041,7 +2109,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 responseTurn !== null &&
                 ((responseTurn.promptMayBeCommandOnly && !responseTurn.sawAgentActivity) ||
                   (responseTurn.adoptedWake &&
-                    (responseTurn.settleWhenIdle || responseTurn.promptMayBeCommandOnly)))
+                    (responseTurn.sawAgentEnd || responseTurn.promptMayBeCommandOnly)))
               ) {
                 yield* scheduleSettleProbe(responseTurn, responseTurn.adoptedWake);
               }
@@ -2057,10 +2125,14 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               });
               return;
             }
+            // An id-less error that answers no pending prompt is Prime's
+            // post-acceptance prompt failure (modes/daemon/daemon-mode.ts
+            // broadcasts it without the request id), a parse error, or an
+            // unknown-command error. Each ends the open turn.
             const failedTurn =
               command === "prompt" && pendingPrompt?.kind === "turn_start"
                 ? responseTurn
-                : command === "parse"
+                : pendingPrompt === undefined && event["id"] === undefined
                   ? turn
                   : null;
             if (failedTurn !== null) {
@@ -2068,9 +2140,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 message: recordString(event, "error") ?? "Prime rejected the prompt.",
                 class: "provider_error",
               });
-              if (failedTurn.adoptedWake && command === "prompt") {
+              if (failedTurn.adoptedWake && pendingPrompt?.kind === "turn_start") {
                 failedTurn.rejectedPromptFailure = failure;
-                failedTurn.settleWhenIdle = true;
+                failedTurn.sawAgentEnd = true;
                 yield* scheduleSettleProbe(failedTurn, true);
               } else {
                 failedTurn.failure = failure;
@@ -2135,7 +2207,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               return;
             }
             if (isPrimeStateIdle(probedState.value)) {
-              turn.settleWhenIdle = false;
               if (state !== null) yield* finalizeTurn(state);
             }
             return;
@@ -2252,6 +2323,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           }
         }
         const stateData = yield* request({ type: "get_state" });
+        const registeredState = decodePrimeState(stateData);
+        if (Option.isSome(registeredState)) {
+          latestSessionActions = registeredState.value.sessionActions ?? null;
+        }
         if (!modelsDiscovered) {
           const modelsData = yield* request({ type: "get_available_models" }).pipe(
             Effect.orElseSucceed(() => undefined),
@@ -2555,7 +2630,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
-              settleWhenIdle: false,
+              sawAgentEnd: false,
+              sessionCommandSeen: false,
+              sessionCommandDone: false,
               sawCompaction: false,
               manualCompactInFlight: compactCommand !== null,
               activeCompaction: null,
@@ -2619,9 +2696,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               yield* updateProviderSession("running", null);
               if (wake !== null) {
                 for (const event of wake.events) {
-                  if (!continuation && event["type"] === "agent_settled") {
-                    activeTurn.nativeAborted = event["aborted"] === true;
-                    activeTurn.settleWhenIdle = true;
+                  // The adopting prompt's ack decides when to probe.
+                  if (!continuation && event["type"] === "agent_end") {
+                    activeTurn.nativeAborted = primeRunAborted(event);
+                    activeTurn.sawAgentEnd = true;
                     continue;
                   }
                   yield* handleSessionEvent(event);
@@ -2733,14 +2811,14 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             turn.interrupted = true;
             if (
               interruptInput.requestRuntimeRestart === true ||
-              turn.settleWhenIdle ||
+              turn.sawAgentEnd ||
               turn.activeCompaction !== null ||
               turn.manualCompactInFlight
             ) {
               // Prime's generic abort does not cancel manual compaction. Terminate
               // so Stop covers user /compact as well as detached recovery compact.
               stopRequested = true;
-              if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
+              if (interruptInput.requestRuntimeRestart === true && !turn.sawAgentEnd) {
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
               // Terminating fails every later request, so read the stopped
