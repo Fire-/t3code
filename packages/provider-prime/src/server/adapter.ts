@@ -10,6 +10,7 @@ import {
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
+  OrchestrationV2ProviderGoal,
   type OrchestrationV2ProviderRef,
   type OrchestrationV2ProviderRetry,
   type OrchestrationV2ProviderSession,
@@ -48,8 +49,10 @@ import {
   primeAgentEndFailed,
   primeContentText as contentText,
   primeErrorMessage,
+  primeHeartbeatNotification,
   primeIpythonFileChange,
   primeIpythonUpdate,
+  primeProviderGoal,
   primeSessionCommandFailure,
   primeToolItem,
 } from "./events.ts";
@@ -108,6 +111,18 @@ const PRIME_UNSOLICITED_ACTIVITY_ERROR =
 // a read that answers busy is never repeated on a timer.
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
+
+const providerGoalsEqual = Schema.toEquivalence(Schema.NullOr(OrchestrationV2ProviderGoal));
+
+/** A cron job (modes/agent-connection/types.ts AgentCronJob) that will fire again. */
+const hasActiveJob = (entries: unknown, jobField?: string): boolean =>
+  Array.isArray(entries) &&
+  entries.some(
+    (entry) =>
+      recordString(jobField === undefined ? entry : recordField(entry, jobField), "status") ===
+      "active",
+  );
+
 // Prime keeps a disconnected client's worker alive for a 30 s grace period, and
 // switch_session fails with SessionAlreadyActiveError (core/session-lease.ts)
 // until that worker releases the session lease.
@@ -600,6 +615,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       // Prime emits session_action_update only on change, so the latest
       // snapshot is session state that outlives any single turn.
       let latestSessionActions: PrimeSessionActionSnapshot | null = null;
+      // The orchestrator drops provider_thread.updated outside a run, so a goal
+      // Prime reports between runs is kept for the next registration or turn.
+      // `undefined` means Prime has not reported one for this session.
+      let latestGoal: OrchestrationV2ProviderGoal | null | undefined = undefined;
+      // Prime reports schedules and heartbeats only when asked, so this is
+      // refreshed at each settle and pins the idle release in between.
+      let activeBackgroundJobs = false;
       let rollbackBarrier: Deferred.Deferred<
         void,
         ProviderAdapter.ProviderAdapterProtocolError
@@ -668,6 +690,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             providerThread: state.providerThread,
           });
         });
+
+      const goalPatch = (state: PrimeThreadState): Partial<OrchestrationV2ProviderThread> =>
+        latestGoal === undefined ||
+        providerGoalsEqual(state.providerThread.goal ?? null, latestGoal)
+          ? {}
+          : { goal: latestGoal };
 
       const itemOrdinal = (turn: ActivePrimeTurn, nativeItemId: string): number => {
         const existing = turn.itemOrdinals.get(nativeItemId);
@@ -1567,7 +1595,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
           },
         });
-        yield* updateProviderThread(state, { status: "idle" });
+        yield* updateProviderThread(state, { status: "idle", ...goalPatch(state) });
         yield* updateProviderSession(
           failure !== null ? "error" : "ready",
           failure?.message ?? null,
@@ -1626,6 +1654,26 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         }
       });
 
+      /**
+       * Whether the session has schedules or heartbeats that will start runs on
+       * their own. Read only once a settle probe finds Prime idle; an
+       * unanswered read keeps the last known answer.
+       */
+      const readBackgroundJobs = Effect.all(
+        [request({ type: "list_schedules" }, 2_000), request({ type: "list_heartbeats" }, 2_000)],
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.map(
+          ([schedules, heartbeats]) =>
+            hasActiveJob(recordField(schedules, "jobs")) ||
+            hasActiveJob(recordField(heartbeats, "heartbeats"), "job"),
+        ),
+        Effect.tapError((error) =>
+          Effect.logDebug("Prime schedule probe failed.", { error: error.message }),
+        ),
+        Effect.orElseSucceed(() => undefined),
+      );
+
       const scheduleSettleProbe = (
         turn: ActivePrimeTurn,
         settleAfterAgentActivity = false,
@@ -1634,8 +1682,14 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         const providerTurnId = turn.providerTurn.id;
         const settleProbeGeneration = turn.settleProbeGeneration;
         return request({ type: "get_state" }, 2_000).pipe(
+          Effect.flatMap((data) => {
+            const probed = decodePrimeState(data);
+            return Option.isSome(probed) && isPrimeStateIdle(probed.value)
+              ? readBackgroundJobs.pipe(Effect.map((backgroundJobs) => ({ data, backgroundJobs })))
+              : Effect.succeed({ data, backgroundJobs: undefined });
+          }),
           Effect.matchEffect({
-            onSuccess: (data) =>
+            onSuccess: ({ data, backgroundJobs }) =>
               Queue.offer(connection.events, {
                 type: "t3.settle_probe",
                 providerTurnId,
@@ -1643,6 +1697,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 settleProbeGeneration,
                 attempt,
                 data,
+                backgroundJobs,
               }),
             // A failed probe still has to reach the pump. Dropping it would
             // leave a command-only turn active forever, because Prime never emits
@@ -1813,6 +1868,32 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (turn === null) return;
             const message = event["message"];
             if (recordString(message, "role") === "custom") {
+              const notification = primeHeartbeatNotification(message);
+              if (notification !== undefined) {
+                const emittedAt = yield* DateTime.now;
+                const nativeItemId = `heartbeat:${turn.nextItemOrdinal}`;
+                yield* emitItemNode(
+                  turn,
+                  nativeItemId,
+                  "system",
+                  "completed",
+                  emittedAt,
+                  emittedAt,
+                );
+                yield* emit({
+                  type: "turn_item.updated",
+                  driver: PRIME_PROVIDER,
+                  turnItem: {
+                    ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+                    status: "completed",
+                    title: "Heartbeat",
+                    completedAt: emittedAt,
+                    type: "notification",
+                    ...notification,
+                  },
+                });
+                return;
+              }
               const failure = primeSessionCommandFailure(message, turn.sessionCommands);
               if (failure !== undefined && turn.failure === null) {
                 turn.failure = makeProviderFailure({ message: failure, class: "provider_error" });
@@ -2028,6 +2109,19 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             yield* requestSettle(turn);
             return;
           }
+          case "goal_update": {
+            const frame = classifyPrimeEvent(event);
+            if (frame._tag !== "Prime" || frame.frame.type !== "goal_update") {
+              yield* Effect.logDebug("Ignoring a malformed Prime goal_update.");
+              return;
+            }
+            latestGoal = primeProviderGoal(frame.frame.goal);
+            if (state !== null && turn !== null) {
+              const patch = goalPatch(state);
+              if (patch.goal !== undefined) yield* updateProviderThread(state, patch);
+            }
+            return;
+          }
           case "session_action_update": {
             const frame = classifyPrimeEvent(event);
             if (frame._tag !== "Prime" || frame.frame.type !== "session_action_update") {
@@ -2168,6 +2262,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               (Option.isNone(probedState) ? "Prime get_state returned an unexpected shape." : null);
             if (probeError === null) {
               if (Option.isSome(probedState) && isPrimeStateIdle(probedState.value)) {
+                if (typeof event["backgroundJobs"] === "boolean") {
+                  activeBackgroundJobs = event["backgroundJobs"];
+                }
                 yield* finalizeTurn(state);
               }
               return;
@@ -2302,6 +2399,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           // Even a failed lifecycle operation can change Prime's native session.
           // Never leave the old app binding or model defaults usable afterward.
           threadState = null;
+          latestGoal = undefined;
           appliedModel = null;
           appliedThinking = null;
           requestedSessionName = null;
@@ -2319,6 +2417,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         const registeredState = decodePrimeState(stateData);
         if (Option.isSome(registeredState)) {
           latestSessionActions = registeredState.value.sessionActions ?? null;
+          const goal = registeredState.value.goal;
+          if (goal !== undefined) latestGoal = primeProviderGoal(goal);
         }
         if (!modelsDiscovered) {
           const modelsData = yield* request({ type: "get_available_models" }).pipe(
@@ -2362,6 +2462,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 providerSessionId: input.providerSessionId,
                 nativeThreadRef: providerRef(nativeId),
                 ...(needsNewSession ? { nativeConversationHeadRef: null, contextUsage: null } : {}),
+                ...(latestGoal === undefined ? {} : { goal: latestGoal }),
                 status: "idle",
                 updatedAt: createdAt,
               }
@@ -2383,6 +2484,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 handoffIds: [],
                 forkedFrom: null,
                 pendingBackgroundTasks: [],
+                goal: latestGoal ?? null,
                 createdAt,
                 updatedAt: createdAt,
               };
@@ -2484,7 +2586,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
-        hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null),
+        hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null || activeBackgroundJobs),
+        // Schedules can sit idle for hours, so they pin only the session's
+        // idle release, never a run's ingestion.
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(
             () => pendingWake !== null && pendingWake.state.providerThread.id === providerThread.id,
@@ -2675,6 +2779,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 status: "active",
                 firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
                 lastRunOrdinal: turnInput.runOrdinal,
+                ...goalPatch(state),
               });
               yield* updateProviderSession("running", null);
               if (wake !== null) {

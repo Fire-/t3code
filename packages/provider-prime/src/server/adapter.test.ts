@@ -136,6 +136,11 @@ interface FakePrime {
    * after the ack reports it; the `preparing` and `running` updates follow.
    */
   readonly acceptSessionCommand: (label: string) => Effect.Effect<void>;
+  /** What `list_schedules` and `list_heartbeats` report (modes/rpc/rpc-mode.ts:351-362). */
+  readonly setBackgroundJobs: (
+    jobs: ReadonlyArray<unknown>,
+    heartbeats: ReadonlyArray<unknown>,
+  ) => void;
 }
 interface FakeSessionActions {
   readonly queuedCount: number;
@@ -233,6 +238,8 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   let isStreaming: boolean | null = null;
   let isCompacting = false;
   let sessionActions: FakeSessionActions = IDLE_ACTIONS;
+  let scheduledJobs: ReadonlyArray<unknown> = [];
+  let heartbeatJobs: ReadonlyArray<unknown> = [];
   let stdinBuffer = "";
   // Prime 1.0.0 has no get_entries (modes/rpc/rpc-mode.ts default branch).
   const unknownCommands = new Set<string>(["get_entries"]);
@@ -315,6 +322,10 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
         return { ...base, data: statsQueue.shift() ?? {} };
       case "fork":
         return { ...base, data: { text: "Hello prime-agent", cancelled: false } };
+      case "list_schedules":
+        return { ...base, data: { jobs: scheduledJobs } };
+      case "list_heartbeats":
+        return { ...base, data: { heartbeats: heartbeatJobs } };
       default:
         return base;
     }
@@ -467,6 +478,10 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
         };
         yield* emit({ type: "session_action_update", actions: sessionActions });
       }),
+    setBackgroundJobs: (jobs, heartbeats) => {
+      scheduledJobs = jobs;
+      heartbeatJobs = heartbeats;
+    },
   } satisfies FakePrime;
 });
 
@@ -4320,6 +4335,7 @@ describe("Prime settle engine", () => {
   const openTurn = Effect.fnUntraced(function* (
     configure?: (fake: FakePrime) => void,
     runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"] = "full-access",
+    continuationRequests?: PrimeAdapterV2Options["continuationRequests"],
   ) {
     const fake = yield* makeFakePrime;
     configure?.(fake);
@@ -4329,7 +4345,7 @@ describe("Prime settle engine", () => {
       THREAD_ID,
       SESSION_ID,
       undefined,
-      undefined,
+      continuationRequests,
       ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({ ...runtimePolicy, runtimeMode }),
     );
     const providerThread = yield* runtime.ensureThread({
@@ -4397,6 +4413,26 @@ describe("Prime settle engine", () => {
     commandsSince(fake, index).filter((type) => type === "get_state").length;
   const terminals = (seen: ReadonlyArray<AdapterEvent>) =>
     seen.filter((event) => event.type === "turn.terminal");
+
+  const runningTurnId = (
+    record: (predicate: (event: AdapterEvent) => boolean) => Effect.Effect<AdapterEvent>,
+  ) =>
+    Effect.gen(function* () {
+      const running = yield* record(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      return (running as Extract<AdapterEvent, { type: "provider_turn.updated" }>).providerTurn.id;
+    });
+
+  const steerMessage = (text: string) => ({
+    messageId: `message:thread-prime-test:steer:${text}` as never,
+    text,
+    attachments: [],
+    createdBy: "user" as const,
+    creationSource: "web" as const,
+  });
 
   it.effect(
     "[VAL-TURN-001] a plain turn settles once on agent_end plus an idle get_state, and get_state is sent only after the trigger",
@@ -4855,27 +4891,6 @@ describe("Prime settle engine", () => {
       content: [],
       stopReason: "error",
       errorMessage,
-    });
-
-    const runningTurnId = (
-      record: (predicate: (event: AdapterEvent) => boolean) => Effect.Effect<AdapterEvent>,
-    ) =>
-      Effect.gen(function* () {
-        const running = yield* record(
-          (event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
-        );
-        assert.isTrue(running.type === "provider_turn.updated");
-        return (running as Extract<AdapterEvent, { type: "provider_turn.updated" }>).providerTurn
-          .id;
-      });
-
-    const steerMessage = (text: string) => ({
-      messageId: `message:thread-prime-test:steer:${text}` as never,
-      text,
-      attachments: [],
-      createdBy: "user" as const,
-      creationSource: "web" as const,
     });
 
     const promptsSince = (fake: FakePrime, index: number) =>
@@ -6263,6 +6278,592 @@ describe("Prime settle engine", () => {
         );
         assert.lengthOf(terminals(seen), 1);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("continuations, goals, and wakes", () => {
+    type Offer = ProviderContinuationRequests.ProviderContinuationRequest;
+    type Terminal = Extract<AdapterEvent, { type: "turn.terminal" }>;
+    type Open = Effect.Success<ReturnType<typeof openTurn>>;
+
+    const WAKE_FAILURE = "Mistral API error (400): mock wake failure";
+    const AUTONOMOUS_CONTINUATION_PROMPT =
+      "[autonomous-continuation]\n\nNo human input is available in autonomous mode. Continue working until the host evaluator, verifier, or configured autonomous limits stop the run.";
+    const GOAL_COMMAND = "/goal ship the release";
+    const primeGoal = (status: string) => ({
+      active: status === "active",
+      status,
+      objective: "ship the release",
+      tokensUsed: 1_200,
+      tokenBudget: 50_000,
+      timeUsedSeconds: 42,
+      continuationsUsed: 1,
+    });
+    const IDLE_GOAL = {
+      active: false,
+      status: "idle",
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      continuationsUsed: 0,
+    };
+    /** Prime's heartbeat injection (core/messages.ts createHeartbeatPromptMessage). */
+    const heartbeatPrompt = {
+      role: "custom",
+      customType: "heartbeat_prompt",
+      content: "[heartbeat: */5 * * * * run#3]\n\nCheck the build",
+      display: true,
+      details: { jobId: "job-heartbeat-1", schedule: "*/5 * * * *", status: "active" },
+    };
+    const cronJob = (status: string) => ({
+      id: `job-${status}`,
+      status,
+      prompt: "Check the build",
+      schedule: { kind: "cron", expression: "*/5 * * * *" },
+      runCount: 0,
+    });
+
+    const openWake = Effect.fnUntraced(function* (configure?: (fake: FakePrime) => void) {
+      const offers = yield* Queue.unbounded<Offer>();
+      const open = yield* openTurn(configure, "full-access", {
+        offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid),
+      });
+      /** The orchestrator's continuation turn carries a provider-created message. */
+      const adopt = (runOrdinal: number) =>
+        startTurn(
+          open.runtime,
+          open.providerThread,
+          "default",
+          [],
+          "Continue",
+          undefined,
+          runOrdinal,
+          THREAD_ID,
+          true,
+        );
+      const takeOffer = Effect.gen(function* () {
+        const offer = yield* Queue.take(offers);
+        assert.equal(offer.delivery, "adapter_buffered");
+        assert.isNull(offer.detail);
+        assert.equal(offer.threadId, THREAD_ID);
+        assert.equal(offer.providerThreadId, open.providerThread.id);
+        let dispatched = false;
+        yield* offer.dispatchIfCurrent!(
+          Effect.sync(() => {
+            dispatched = true;
+          }),
+        );
+        assert.isTrue(dispatched);
+        return offer;
+      });
+      return { ...open, offers, adopt, takeOffer };
+    });
+
+    const nextTerminal = (open: Pick<Open, "record">) =>
+      Effect.map(
+        open.record((event) => event.type === "turn.terminal"),
+        (event) => event as Terminal,
+      );
+
+    const plainTurn = (open: Open, reply: string) =>
+      Effect.gen(function* () {
+        yield* open.begin();
+        yield* open.fake.emit({ type: "agent_start" });
+        yield* replyText(open.fake, reply);
+        yield* open.fake.emit(agentEnd());
+        const terminal = yield* nextTerminal(open);
+        assert.equal(terminal.status, "completed");
+        return terminal;
+      });
+
+    /** Prime finishing a buffered run reports the session ready. */
+    const bufferedRunEnded = (open: Pick<Open, "record">) =>
+      open.record(
+        (event) =>
+          event.type === "provider_session.updated" && event.providerSession.status === "ready",
+      );
+
+    const assistantTexts = (seen: ReadonlyArray<AdapterEvent>, providerTurnId: unknown) => [
+      ...new Set(
+        seen.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.streaming === false &&
+          event.turnItem.providerTurnId === providerTurnId
+            ? [event.turnItem.text]
+            : [],
+        ),
+      ),
+    ];
+    const promptCount = (fake: FakePrime) =>
+      fake.commandLog().filter((type) => type === "prompt").length;
+    const goalOf = (event: AdapterEvent) =>
+      event.type === "provider_thread.updated" ? event.providerThread.goal : undefined;
+    const assertNeverPromoted = (fake: FakePrime) => {
+      assert.notInclude(fake.commandLog(), "add_schedule");
+      assert.notInclude(fake.commandLog(), "set_heartbeat");
+    };
+
+    /** A `/goal <objective>` turn whose goal action is running and whose first run is underway. */
+    const beginGoal = (open: Open) =>
+      Effect.gen(function* () {
+        yield* open.begin(GOAL_COMMAND);
+        const providerTurnId = yield* runningTurnId(open.record);
+        yield* open.fake.setSessionActions({
+          ...IDLE_ACTIONS,
+          active: { kind: "session_command", phase: "running", label: GOAL_COMMAND },
+        });
+        yield* emitCustomMessage(open.fake, sessionCommandEcho(GOAL_COMMAND));
+        yield* open.fake.emit({ type: "goal_update", goal: primeGoal("active") });
+        yield* open.fake.emit({ type: "agent_start" });
+        return providerTurnId;
+      });
+
+    it.effect(
+      "[VAL-CONT-001] WAKE_LATER: a self-started run after settle is buffered, offered adapter_buffered, and adopted without a prompt as one completed turn",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, seen } = open;
+          yield* plainTurn(open, "mock reply");
+          assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+
+          yield* fake.emit({ type: "agent_start" });
+          yield* open.takeOffer;
+          assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+          yield* replyText(fake, "wake reply");
+          yield* fake.emit(agentEnd());
+          yield* bufferedRunEnded(open);
+          assert.lengthOf(terminals(seen), 1);
+
+          const prompts = promptCount(fake);
+          yield* open.adopt(2);
+          const wake = yield* nextTerminal(open);
+          assert.equal(wake.status, "completed");
+          assert.deepEqual(assistantTexts(seen, wake.providerTurnId), ["wake reply"]);
+          assert.equal(promptCount(fake), prompts);
+          assert.lengthOf(terminals(seen), 2);
+          assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-002] WAKE_JOIN: a user message during the adopted wake is a steer into it, two turns in total",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, providerThread, seen, record } = open;
+          yield* plainTurn(open, "mock reply");
+          yield* fake.emit({ type: "agent_start" });
+          yield* open.takeOffer;
+          yield* replyText(fake, "wake reply");
+
+          yield* open.adopt(2);
+          const wakeTurnId = yield* runningTurnId(record);
+          yield* record(isAssistantText("wake reply"));
+          yield* runtime.steerTurn({
+            threadId: THREAD_ID,
+            runId: RunId.make("run:thread-prime-test:2"),
+            providerThread,
+            providerTurnId: wakeTurnId,
+            message: steerMessage("join this"),
+          });
+          const steer = yield* fake.takeRequest("prompt");
+          assert.equal(steer["message"], "join this");
+          assert.equal(steer["streamingBehavior"], "steer");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+          yield* replyText(fake, "steered: join this");
+          yield* fake.emit(agentEnd());
+
+          const wake = yield* nextTerminal(open);
+          assert.isTrue(wake.status === "completed" && wake.providerTurnId === wakeTurnId);
+          assert.deepEqual(assistantTexts(seen, wakeTurnId), ["wake reply", "steered: join this"]);
+          assert.lengthOf(terminals(seen), 2);
+          assert.equal(promptCount(fake), 2);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-003] WAKE_CONT: a wake started by an isAutonomousContinuation message is a provider-created turn with only the wake reply",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, seen } = open;
+          yield* plainTurn(open, "mock reply");
+          yield* fake.emit({ type: "agent_start" });
+          yield* open.takeOffer;
+          const continuation = {
+            role: "user",
+            content: [{ type: "text", text: AUTONOMOUS_CONTINUATION_PROMPT }],
+            isAutonomousContinuation: true,
+          };
+          yield* fake.emit({ type: "message_start", message: continuation });
+          yield* fake.emit({ type: "message_end", message: continuation });
+          yield* replyText(fake, "wake reply");
+          yield* fake.emit(agentEnd());
+          yield* bufferedRunEnded(open);
+
+          yield* open.adopt(2);
+          const wake = yield* nextTerminal(open);
+          assert.equal(wake.status, "completed");
+          assert.deepEqual(assistantTexts(seen, wake.providerTurnId), ["wake reply"]);
+          assert.equal(promptCount(fake), 1);
+          assert.isFalse(
+            seen.some(
+              (event) => event.type === "message.updated" && event.message.createdBy === "user",
+            ),
+            "the autonomous continuation became a user bubble",
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-004] WAKE_FAIL: a wake whose agent_end carries an errorMessage fails its continuation turn with that exact text",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, seen } = open;
+          yield* plainTurn(open, "mock reply");
+          yield* fake.emit({ type: "agent_start" });
+          yield* open.takeOffer;
+          yield* replyText(fake, "wake reply");
+          yield* fake.emit({
+            type: "agent_end",
+            messages: [
+              { role: "assistant", content: [], stopReason: "error", errorMessage: WAKE_FAILURE },
+            ],
+          });
+          yield* bufferedRunEnded(open);
+
+          yield* open.adopt(2);
+          const wake = yield* nextTerminal(open);
+          assert.isTrue(wake.status === "failed" && wake.failure.message === WAKE_FAILURE);
+          assert.lengthOf(terminals(seen), 2);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-005] goal_update inside a run sets providerThread.goal with the mapped status, and thread registration re-sends the latest goal",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, runtime, providerThread, seen, record } = open;
+          assert.isNull(providerThread.goal ?? null);
+          yield* open.begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "goal_update", goal: primeGoal("active") });
+          const active = yield* record((event) => goalOf(event)?.status === "active");
+          assert.deepEqual(goalOf(active), {
+            objective: "ship the release",
+            status: "active",
+            tokensUsed: 1_200,
+            tokenBudget: 50_000,
+            timeUsedSeconds: 42,
+          });
+          yield* fake.emit({ type: "goal_update", goal: primeGoal("error") });
+          yield* record((event) => goalOf(event)?.status === "blocked");
+          yield* replyText(fake, "Blocked on credentials");
+          yield* fake.emit(agentEnd());
+          yield* nextTerminal(open);
+          const threadUpdates = seen.filter((event) => event.type === "provider_thread.updated");
+          assert.equal(goalOf(threadUpdates.at(-1)!)?.status, "blocked");
+
+          // Outside a run the orchestrator drops thread updates; registration re-sends.
+          yield* fake.emit({ type: "goal_update", goal: primeGoal("complete") });
+          fake.queueState({ goal: primeGoal("complete") });
+          const resumed = yield* runtime.resumeThread({ providerThread });
+          assert.equal(resumed.goal?.status, "complete");
+          const published = yield* record(
+            (event) =>
+              event.type === "provider_thread.updated" &&
+              event.providerThread.goal?.status === "complete",
+          );
+          assert.equal(goalOf(published)?.objective, "ship the release");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-006] a held goal continuation that starts before the turn settles stays in the same turn, which settles once when the goal is idle",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, seen, record } = open;
+          const providerTurnId = yield* beginGoal(open);
+          yield* replyText(fake, "First goal step");
+          yield* fake.emit(agentEnd());
+          fake.deferNextState();
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          yield* fake.takeRequest("get_state");
+
+          // Prime held the goal's next step and starts it as a new run.
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+          yield* pumpBarrier(fake, record, "held goal run started");
+          yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+          yield* replyText(fake, "Goal reached");
+          yield* fake.emit({ type: "goal_update", goal: primeGoal("complete") });
+          yield* fake.emit(agentEnd());
+
+          const terminal = yield* nextTerminal(open);
+          assert.isTrue(
+            terminal.status === "completed" && terminal.providerTurnId === providerTurnId,
+          );
+          assert.deepEqual(assistantTexts(seen, providerTurnId), [
+            "First goal step",
+            "Goal reached",
+          ]);
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(yield* Queue.size(open.offers), 0);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-007] a user message while a goal runs is a steer into the goal turn, not a new turn",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, providerThread, seen } = open;
+          const providerTurnId = yield* beginGoal(open);
+          yield* replyText(fake, "Working on the goal");
+          yield* fake.emit(agentEnd());
+
+          yield* runtime.steerTurn({
+            threadId: THREAD_ID,
+            runId: RunId.make("run:thread-prime-test:1"),
+            providerThread,
+            providerTurnId,
+            message: steerMessage("also update the changelog"),
+          });
+          const steer = yield* fake.takeRequest("prompt");
+          assert.equal(steer["message"], "also update the changelog");
+          assert.equal(steer["streamingBehavior"], "steer");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Changelog updated");
+          yield* fake.emit(agentEnd());
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+
+          const terminal = yield* nextTerminal(open);
+          assert.isTrue(
+            terminal.status === "completed" && terminal.providerTurnId === providerTurnId,
+          );
+          assert.include(assistantTexts(seen, providerTurnId), "Changelog updated");
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(promptCount(fake), 2);
+          assert.equal(yield* Queue.size(open.offers), 0);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-008] abort during a goal sends abort, yields one interrupted terminal, starts no turn, and mirrors the goal Prime reports afterward",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, providerThread, seen } = open;
+          const providerTurnId = yield* beginGoal(open);
+          yield* replyText(fake, "Working on the goal");
+          yield* runtime.interruptTurn({ providerThread, providerTurnId });
+          yield* fake.takeRequest("abort");
+          yield* fake.emit(agentEnd(true));
+          const terminal = yield* nextTerminal(open);
+          assert.isTrue(
+            terminal.status === "interrupted" && terminal.providerTurnId === providerTurnId,
+          );
+
+          yield* fake.emit({ type: "goal_update", goal: primeGoal("paused") });
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const afterAbort = fake.commandLog().length;
+          assert.equal(yield* Queue.size(open.offers), 0);
+          yield* open.begin("Next question", 2);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Next answer");
+          yield* fake.emit(agentEnd());
+          const next = yield* nextTerminal(open);
+          assert.equal(next.status, "completed");
+          const threadUpdates = seen.filter((event) => event.type === "provider_thread.updated");
+          assert.equal(goalOf(threadUpdates.at(-1)!)?.status, "paused");
+          assert.lengthOf(terminals(seen), 2);
+          assert.equal(yield* Queue.size(open.offers), 0);
+          assert.deepEqual(
+            fake
+              .allRequests()
+              .slice(afterAbort)
+              .filter((request) => request["type"] === "prompt")
+              .map((request) => request["message"]),
+            ["Next question"],
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-009][VAL-CONT-011] a heartbeat_prompt inside an open run is a notification item in that turn, with no new turn",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, seen, record } = open;
+          yield* open.begin();
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Working");
+          yield* emitCustomMessage(fake, heartbeatPrompt);
+          const notification = yield* record(
+            (event) => event.type === "turn_item.updated" && event.turnItem.type === "notification",
+          );
+          assert.isTrue(
+            notification.type === "turn_item.updated" &&
+              notification.turnItem.type === "notification" &&
+              notification.turnItem.providerTurnId === providerTurnId &&
+              notification.turnItem.source.kind === "monitor" &&
+              notification.turnItem.summary === "Heartbeat */5 * * * *" &&
+              notification.turnItem.detail === "Check the build",
+          );
+          yield* replyText(fake, "Build is green");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* nextTerminal(open);
+          assert.isTrue(
+            terminal.status === "completed" && terminal.providerTurnId === providerTurnId,
+          );
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(yield* Queue.size(open.offers), 0);
+          assertNeverPromoted(fake);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each(["heartbeat", "cron"] as const)(
+      "[VAL-CONT-009][VAL-CONT-011] a %s firing while idle starts a run that goes through the continuation offer",
+      (trigger) =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, seen } = open;
+          yield* plainTurn(open, "mock reply");
+          yield* fake.emit({ type: "agent_start" });
+          yield* open.takeOffer;
+          if (trigger === "heartbeat") {
+            yield* emitCustomMessage(fake, heartbeatPrompt);
+          } else {
+            const cronPrompt = {
+              role: "user",
+              content: [{ type: "text", text: "Check the build" }],
+            };
+            yield* fake.emit({ type: "message_start", message: cronPrompt });
+            yield* fake.emit({ type: "message_end", message: cronPrompt });
+          }
+          yield* replyText(fake, "Scheduled reply");
+          yield* fake.emit(agentEnd());
+          yield* bufferedRunEnded(open);
+
+          yield* open.adopt(2);
+          const wake = yield* nextTerminal(open);
+          assert.equal(wake.status, "completed");
+          assert.deepEqual(assistantTexts(seen, wake.providerTurnId), ["Scheduled reply"]);
+          assert.equal(
+            seen.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "notification" &&
+                event.turnItem.providerTurnId === wake.providerTurnId,
+            ),
+            trigger === "heartbeat",
+          );
+          assert.equal(promptCount(fake), 1);
+          assertNeverPromoted(fake);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      { reported: "an active schedule", jobs: [cronJob("active")], heartbeats: [], pinned: true },
+      {
+        reported: "an active heartbeat",
+        jobs: [],
+        heartbeats: [{ job: cronJob("active") }],
+        pinned: true,
+      },
+      {
+        reported: "only a paused heartbeat",
+        jobs: [],
+        heartbeats: [{ job: cronJob("paused") }],
+        pinned: false,
+      },
+    ])(
+      "[VAL-CONT-010][VAL-CONT-011] a settle whose probe reports $reported sets hasPendingBackgroundWork=$pinned, probes only after the trigger, and adds no background tasks",
+      ({ jobs, heartbeats, pinned }) =>
+        Effect.gen(function* () {
+          const open = yield* openWake((fake) => fake.setBackgroundJobs(jobs, heartbeats));
+          const { fake, runtime, providerThread, seen, record } = open;
+          const isScheduleProbe = (type: string) =>
+            type === "list_schedules" || type === "list_heartbeats";
+          assert.isFalse(fake.commandLog().some(isScheduleProbe));
+
+          const afterPrompt = yield* open.begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Scheduled the check");
+          yield* pumpBarrier(fake, record, "before agent_end");
+          assert.isFalse(commandsSince(fake, afterPrompt).some(isScheduleProbe));
+          assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+          yield* fake.emit(agentEnd());
+          yield* nextTerminal(open);
+          const probes = commandsSince(fake, afterPrompt);
+          assert.deepEqual(probes.filter(isScheduleProbe).toSorted(), [
+            "list_heartbeats",
+            "list_schedules",
+          ]);
+          assert.isBelow(
+            probes.indexOf("get_state"),
+            Math.min(probes.indexOf("list_schedules"), probes.indexOf("list_heartbeats")),
+          );
+          assert.equal(yield* runtime.hasPendingBackgroundWork!, pinned);
+          assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
+
+          fake.setBackgroundJobs([], []);
+          const afterSecondPrompt = yield* open.begin("Cancel the check", 2);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Cancelled");
+          yield* fake.emit(agentEnd());
+          yield* nextTerminal(open);
+          assert.equal(commandsSince(fake, afterSecondPrompt).filter(isScheduleProbe).length, 2);
+          assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+          assert.isTrue(
+            seen.every(
+              (event) =>
+                event.type !== "provider_thread.updated" ||
+                (event.providerThread.pendingBackgroundTasks ?? []).length === 0,
+            ),
+          );
+          assertNeverPromoted(fake);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      { command: "/goal pause", before: "active", after: "paused", expected: "paused" },
+      { command: "/goal resume", before: "paused", after: "active", expected: "active" },
+      { command: "/goal clear", before: "active", after: null, expected: null },
+    ])(
+      "[VAL-CMD-009] $command settles once and mirrors goal state $expected",
+      ({ command, before, after, expected }) =>
+        Effect.gen(function* () {
+          const open = yield* openTurn((fake) => fake.queueState({ goal: primeGoal(before) }));
+          const { fake, providerThread, seen, record } = open;
+          assert.equal(providerThread.goal?.status, before);
+          yield* startTurn(open.runtime, providerThread, "default", [], command);
+          yield* fake.takeRequest("prompt");
+          yield* fake.acceptSessionCommand(command);
+          yield* emitCustomMessage(fake, sessionCommandEcho(command));
+          yield* fake.emit({
+            type: "goal_update",
+            goal: after === null ? IDLE_GOAL : primeGoal(after),
+          });
+          yield* emitCustomMessage(fake, sessionCommandResult(command, "Done."));
+          yield* pumpBarrier(fake, record, "before the action clears");
+          assert.lengthOf(terminals(seen), 0);
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* nextTerminal(open);
+          assert.equal(terminal.status, "completed");
+          assert.lengthOf(terminals(seen), 1);
+          const threadUpdates = seen.filter((event) => event.type === "provider_thread.updated");
+          assert.equal(goalOf(threadUpdates.at(-1)!)?.status ?? null, expected);
+          assert.isTrue(
+            threadUpdates.some((event) => (goalOf(event)?.status ?? null) === expected),
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 });

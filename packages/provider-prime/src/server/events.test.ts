@@ -2,7 +2,9 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   primeAgentEndErrorMessage,
+  primeHeartbeatNotification,
   primeIpythonFileChange,
+  primeProviderGoal,
   primeIpythonUpdate,
   primeToolItem,
 } from "./events.ts";
@@ -349,6 +351,82 @@ describe("primeIpythonUpdate", () => {
         details: { status: "ok" },
       }),
       { type: "output", text: "line 1\n" },
+    );
+  });
+});
+
+describe("primeProviderGoal", () => {
+  const goal = (status: string, active = status === "active") => ({
+    active,
+    status,
+    objective: "  ship the release  ",
+    tokensUsed: 1_200,
+    tokenBudget: 50_000,
+    timeUsedSeconds: 42,
+    continuationsUsed: 1,
+  });
+
+  it.each([
+    { status: "active", expected: "active" },
+    { status: "paused", expected: "paused" },
+    { status: "budget_limited", expected: "budget_limited" },
+    { status: "complete", expected: "complete" },
+    { status: "error", expected: "blocked" },
+  ] as const)("[VAL-CONT-005] maps Prime status $status to $expected", ({ status, expected }) => {
+    assert.deepEqual(primeProviderGoal(goal(status)), {
+      objective: "ship the release",
+      status: expected,
+      tokensUsed: 1_200,
+      tokenBudget: 50_000,
+      timeUsedSeconds: 42,
+    });
+  });
+
+  it.each([
+    { name: "an idle goal", state: goal("idle") },
+    {
+      name: "an inactive goal without an objective",
+      state: {
+        active: false,
+        status: "paused",
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        continuationsUsed: 0,
+      },
+    },
+    { name: "a blank objective", state: { ...goal("active"), objective: "   " } },
+  ])("[VAL-CONT-005] maps $name to no goal", ({ state }) => {
+    assert.isNull(primeProviderGoal(state));
+  });
+
+  it("[VAL-CONT-005] reports a missing token budget as null", () => {
+    const { tokenBudget: _tokenBudget, ...unbudgeted } = goal("active");
+    assert.isNull(primeProviderGoal(unbudgeted)?.tokenBudget);
+  });
+});
+
+describe("primeHeartbeatNotification", () => {
+  it("[VAL-CONT-009] reads the schedule and prompt of Prime's heartbeat injection", () => {
+    assert.deepEqual(
+      primeHeartbeatNotification({
+        role: "custom",
+        customType: "heartbeat_prompt",
+        content: "[heartbeat: */5 * * * * run#3]\n\nCheck the build",
+        display: true,
+        details: { jobId: "job-1", schedule: "*/5 * * * *", status: "active" },
+      }),
+      {
+        source: { kind: "monitor" },
+        outcome: "updated",
+        summary: "Heartbeat */5 * * * *",
+        detail: "Check the build",
+      },
+    );
+  });
+
+  it("[VAL-CONT-009] ignores other custom messages", () => {
+    assert.isUndefined(
+      primeHeartbeatNotification({ role: "custom", customType: "goal_context", content: "x" }),
     );
   });
 });

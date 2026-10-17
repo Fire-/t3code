@@ -1,7 +1,10 @@
+import type { OrchestrationV2Notification, OrchestrationV2ProviderGoal } from "@t3tools/contracts";
+
 import {
   primeRecordField as recordField,
   primeRecordNumber,
   primeRecordString as recordString,
+  type PrimeGoalState,
   type PrimeRpcRecord,
 } from "./rpc.ts";
 
@@ -70,6 +73,64 @@ export function primeSessionCommandFailure(
     `Prime /${sessionCommand} failed.`
   );
 }
+
+const PRIME_GOAL_STATUSES = {
+  active: "active",
+  paused: "paused",
+  budget_limited: "budget_limited",
+  complete: "complete",
+  error: "blocked",
+} as const satisfies Record<string, OrchestrationV2ProviderGoal["status"]>;
+
+const isMappedGoalStatus = (status: string): status is keyof typeof PRIME_GOAL_STATUSES =>
+  Object.hasOwn(PRIME_GOAL_STATUSES, status);
+
+const wholeCount = (value: number) => Math.max(0, Math.trunc(value));
+
+/**
+ * Prime's GoalState (core/goals.ts). `idle` is Prime's cleared goal, and a goal
+ * without an objective has nothing T3 can show.
+ */
+export function primeProviderGoal(goal: PrimeGoalState): OrchestrationV2ProviderGoal | null {
+  const objective = goal.objective?.trim() ?? "";
+  if (goal.status === "idle" || objective.length === 0) return null;
+  const status = isMappedGoalStatus(goal.status)
+    ? PRIME_GOAL_STATUSES[goal.status]
+    : goal.active
+      ? "active"
+      : null;
+  if (status === null) return null;
+  return {
+    objective,
+    status,
+    tokensUsed: wholeCount(goal.tokensUsed),
+    tokenBudget: goal.tokenBudget === undefined ? null : wholeCount(goal.tokenBudget),
+    timeUsedSeconds: wholeCount(goal.timeUsedSeconds),
+  };
+}
+
+/**
+ * A heartbeat Prime injects into a running session
+ * (core/messages.ts createHeartbeatPromptMessage): content is
+ * `[heartbeat: <schedule> run#N]\n\n<prompt>`.
+ */
+export function primeHeartbeatNotification(
+  message: unknown,
+): OrchestrationV2Notification | undefined {
+  if (recordString(message, "customType") !== "heartbeat_prompt") return undefined;
+  const content = primeContentText(recordField(message, "content"));
+  const header = /^\[heartbeat: (.*) run#\d+\]\n*/u.exec(content);
+  const schedule =
+    nonBlank(recordString(recordField(message, "details"), "schedule")) ?? nonBlank(header?.[1]);
+  const prompt = (header === null ? content : content.slice(header[0].length)).trim();
+  return {
+    source: { kind: "monitor" },
+    outcome: "updated",
+    summary: schedule === undefined ? "Heartbeat" : `Heartbeat ${schedule.trim()}`,
+    ...(prompt.length === 0 ? {} : { detail: prompt.slice(0, 2_000) }),
+  };
+}
+
 export type PrimeFileChangeDetail = {
   readonly operation: string;
   readonly path: string;
