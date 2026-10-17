@@ -45,6 +45,7 @@ const RUST = /^native\/(resource-monitor|kde-snap-shot|hyprland-snap-shot)\//;
 // third-party-licenses, brand-assets, build-desktop-artifact).
 const TEST_ONLY_DEPS = {
   "@t3tools/provider-pi": ["@t3tools/client-runtime"],
+  "@t3tools/provider-prime": ["@t3tools/client-runtime"],
   "@t3tools/scripts": [
     "@t3tools/desktop",
     "@t3tools/mobile",

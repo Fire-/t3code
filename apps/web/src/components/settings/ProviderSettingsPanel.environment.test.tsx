@@ -249,7 +249,14 @@ describe("EnvironmentProviderSettings routing", () => {
         ),
       ).not.toBeNull();
     }
-    for (const driver of ["cursor", "grok", "pi", "opencode", "antigravity"] as const) {
+    for (const driver of [
+      "cursor",
+      "grok",
+      "pi",
+      "prime-agent",
+      "opencode",
+      "antigravity",
+    ] as const) {
       expect(
         visitElements(
           panel,

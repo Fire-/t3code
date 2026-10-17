@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-09T23:31:10Z",
+  "updatedAt": "2026-10-16T12:00:00Z",
   "compatibility": [
     {
       "driver": "codex",
@@ -85,6 +85,15 @@
       "ranges": [
         { "range": ">=0.80.5", "status": "supported" },
         { "range": "<0.80.5", "status": "unsupported" }
+      ]
+    },
+    {
+      "driver": "prime-agent",
+      "t3CodeRange": ">=0.0.46",
+      "recommendedRange": ">=0.9.8",
+      "ranges": [
+        { "range": ">=0.9.8", "status": "supported" },
+        { "range": "<0.9.8", "status": "unsupported" }
       ]
     },
     {

@@ -3069,6 +3069,7 @@ it.layer(
               "muse",
               "opencode",
               "pi",
+              "prime-agent",
             ]);
             assert.strictEqual(cursorProvider?.enabled, false);
             assert.strictEqual(cursorProvider?.status, "disabled");
