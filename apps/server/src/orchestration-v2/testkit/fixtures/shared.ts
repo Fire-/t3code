@@ -381,6 +381,17 @@ export const PI_MODEL_SELECTION = {
   model: "openrouter/deepseek/deepseek-v4-flash",
 } satisfies ModelSelection;
 
+/**
+ * GLM rather than Ministral: Prime prepends the recording user's harness
+ * memories to every session, and Ministral answered from them instead of
+ * following the fixture prompt.
+ */
+export const PRIME_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("prime-agent"),
+  model: "mistral/zai-glm-5-3",
+  options: [{ id: "thinking", value: "low" }],
+} satisfies ModelSelection;
+
 export const ACP_REGISTRY_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("acpRegistry"),
   model: "default",

@@ -24,6 +24,7 @@ import {
   MuseOrchestratorReplayHarness,
 } from "../Adapters/MuseAdapterV2.testkit.ts";
 import { PiOrchestratorReplayHarness } from "../Adapters/PiAdapterV2.testkit.ts";
+import { PrimeOrchestratorReplayHarness } from "../Adapters/PrimeAdapterV2.testkit.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { provideDeterministicTestRuntime } from "./DeterministicRuntime.ts";
 import { ORCHESTRATOR_REPLAY_FIXTURES } from "./fixtures/index.ts";
@@ -218,6 +219,11 @@ function runFixtureProviderWithRegisteredHarness(input: {
       return runFixtureProvider({
         ...input,
         harness: PiOrchestratorReplayHarness,
+      }).pipe(Effect.mapError(normalizeTestError), Effect.scoped);
+    case "prime-agent":
+      return runFixtureProvider({
+        ...input,
+        harness: PrimeOrchestratorReplayHarness,
       }).pipe(Effect.mapError(normalizeTestError), Effect.scoped);
     case "muse":
       return runFixtureProvider({

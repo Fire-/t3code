@@ -74,6 +74,7 @@ import { assertPiProviderThreadResumeOutput } from "./provider_thread_resume/pi_
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { assertPiMultiTurnOutput } from "./multi_turn/pi_output.ts";
+import { assertPrimeMultiTurnOutput } from "./multi_turn/prime_output.ts";
 import { multiTurnInput } from "./multi_turn/input.ts";
 import { openCodeChildApprovalInput } from "./opencode_child_approval/input.ts";
 import { assertOpenCodeChildApprovalOutput } from "./opencode_child_approval/output.ts";
@@ -127,6 +128,7 @@ import { assertSkillInvocationCursorOutput } from "./skill_invocation/cursor_out
 import { skillInvocationInput } from "./skill_invocation/input.ts";
 import { assertSimpleOutput } from "./simple/codex_output.ts";
 import { assertPiSimpleOutput } from "./simple/pi_output.ts";
+import { assertPrimeSimpleOutput } from "./simple/prime_output.ts";
 import { simpleInput } from "./simple/input.ts";
 import { malformedSessionUpdateInput } from "./malformed_session_update/input.ts";
 import { assertMalformedSessionUpdateOutput } from "./malformed_session_update/output.ts";
@@ -210,6 +212,7 @@ import {
   OPENCODE_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
   PI_MODEL_SELECTION,
+  PRIME_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
   RESTRICTED_GRANULAR_POLICY,
@@ -658,6 +661,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./simple/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiSimpleOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./simple/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeSimpleOutput,
       },
       {
         driver: ProviderDriverKind.make("muse"),
@@ -1233,6 +1242,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./multi_turn/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiMultiTurnOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./multi_turn/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeMultiTurnOutput,
       },
       {
         driver: ProviderDriverKind.make("muse"),

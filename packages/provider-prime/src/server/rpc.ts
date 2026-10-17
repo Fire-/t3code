@@ -279,6 +279,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE = Duration.seconds(1);
 
 interface PendingPrimeRequest {
+  readonly command: string;
   readonly deferred: Deferred.Deferred<unknown, PrimeRpcError>;
 }
 
@@ -478,6 +479,27 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
           return;
         }
       }
+      // Prime answers a command it lacks (`get_entries` in 1.0.0) without the
+      // request id (modes/rpc/rpc-mode.ts default branch). Matching it by
+      // command fails that request now instead of at its timeout, and keeps it
+      // from reaching the event path, where an id-less error ends the open turn.
+      const command = record["command"];
+      if (
+        record["type"] === "response" &&
+        record["id"] === undefined &&
+        Predicate.isString(command) &&
+        record["error"] === `Unknown command: ${command}`
+      ) {
+        for (const [key, pending] of pendingRequests) {
+          if (pending.command !== command) continue;
+          pendingRequests.delete(key);
+          yield* Deferred.fail(
+            pending.deferred,
+            new PrimeRpcError({ operation: command, detail: record["error"] }),
+          );
+          return;
+        }
+      }
       yield* Queue.offer(events, record);
     });
 
@@ -598,7 +620,7 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
     Effect.gen(function* () {
       const id = `t3-${nextRequestId++}`;
       const deferred = yield* Deferred.make<unknown, PrimeRpcError>();
-      pendingRequests.set(id, { deferred });
+      pendingRequests.set(id, { command: String(record["type"]), deferred });
       yield* send({ ...record, id }).pipe(
         Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
       );

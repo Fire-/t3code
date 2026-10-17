@@ -117,6 +117,8 @@ interface FakePrime {
   readonly setCompacting: (compacting: boolean) => void;
   /** Prime's id-less error response (daemon post-acceptance failure, unknown command). */
   readonly emitOrphanError: (command: string, error: string) => Effect.Effect<void>;
+  /** Answers `type` the way Prime answers a command it lacks: an id-less unknown-command error. */
+  readonly answerAsUnknownCommand: (type: string) => void;
   /** Types of every command T3 wrote to stdin, in order. */
   readonly commandLog: () => ReadonlyArray<string>;
 }
@@ -185,6 +187,7 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   let isCompacting = false;
   let sessionActions: FakeSessionActions = IDLE_ACTIONS;
   let stdinBuffer = "";
+  const unknownCommands = new Set<string>();
 
   const emit = (record: PrimeRpcRecord, chunkBytes?: number) =>
     Effect.gen(function* () {
@@ -198,6 +201,14 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   const respondTo = (record: PrimeRpcRecord): PrimeRpcRecord | null => {
     if (typeof record["id"] !== "string" && !(record["type"] === "prompt" && isStreaming !== null))
       return null;
+    if (unknownCommands.has(String(record["type"]))) {
+      return {
+        type: "response",
+        command: String(record["type"]),
+        success: false,
+        error: `Unknown command: ${String(record["type"])}`,
+      };
+    }
     const base = {
       type: "response",
       id: record["id"],
@@ -383,6 +394,9 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
       isCompacting = compacting;
     },
     emitOrphanError: (command, error) => emit({ type: "response", command, success: false, error }),
+    answerAsUnknownCommand: (type) => {
+      unknownCommands.add(type);
+    },
     commandLog: () => allRequests.map((request) => String(request["type"])),
   } satisfies FakePrime;
 });
@@ -4348,8 +4362,9 @@ describe("PrimeAdapterV2", () => {
 describe("Prime settle engine", () => {
   type AdapterEvent = ProviderAdapter.ProviderAdapterV2Event;
 
-  const openTurn = Effect.fnUntraced(function* () {
+  const openTurn = Effect.fnUntraced(function* (configure?: (fake: FakePrime) => void) {
     const fake = yield* makeFakePrime;
+    configure?.(fake);
     const { runtime, takeEvent } = yield* openRuntime(fake);
     const providerThread = yield* runtime.ensureThread({
       threadId: THREAD_ID,
@@ -4435,6 +4450,26 @@ describe("Prime settle engine", () => {
         assert.equal(probesSince(fake, afterPrompt), 1);
         assert.lengthOf(terminals(seen), 1);
         assert.isTrue(seen.findIndex(isAssistantText("Plain reply")) < seen.indexOf(terminal));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-TURN-001] Prime's id-less unknown-command answer to get_entries fails that request at once, so registering and settling never wait out a request timeout",
+    () =>
+      Effect.gen(function* () {
+        // Prime 1.0.0 has no get_entries; the clock stays frozen, so only an
+        // immediate failure lets registration and the settled turn finish.
+        const { fake, seen, record, begin } = yield* openTurn((fake) =>
+          fake.answerAsUnknownCommand("get_entries"),
+        );
+        const afterPrompt = yield* begin();
+        yield* fake.emit({ type: "agent_start" });
+        yield* replyText(fake, "Plain reply");
+        yield* fake.emit(agentEnd());
+        const terminal = yield* record((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.include(commandsSince(fake, afterPrompt), "get_entries");
+        assert.lengthOf(terminals(seen), 1);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
