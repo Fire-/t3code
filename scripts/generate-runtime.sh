@@ -6,7 +6,7 @@
 # Architecture:
 #   ~/.t3/code/bin/t3              <- runner (on PATH via ~/.zshrc block)
 #   ~/.t3/code/dist/current/       <- active build (bin.mjs + chunks + client/)
-#     node_modules/                <- the 5 native deps (see runtime-natives.sh)
+#     node_modules/                <- runtime externals (see runtime-natives.mjs)
 #   ~/.t3/code/dist/bak/           <- previous build (shifted on swap)
 #   ~/.t3/code/dist/stable/        <- pinned known-good (setup-stable)
 #   ~/.t3/code/userdata/           <- server data (T3CODE_HOME points here)
@@ -96,7 +96,7 @@ deleted.
   dist/current/       <- Active build (bin.mjs + chunks + client/ + natives)
   dist/bak/           <- Previous build (auto-created on swap)
   dist/stable/        <- Pinned known-good (manual via 'mise run setup-stable')
-  userdata/           <- Server data (T3CODE_HOME; state.sqlite lives in userdata/state.sqlite)
+  userdata/           <- Server data (T3CODE_HOME; userdata/statev2.sqlite, plus the frozen v1 state.sqlite)
 \`\`\`
 
 The runner exports T3CODE_HOME=~/.t3/code, so every t3 subcommand
@@ -116,7 +116,8 @@ If a tier's bin.mjs is missing the runner falls through to the next.
 If a build breaks and the server won't start:
 
 \`\`\`bash
-# Option 1: rollback to previous build
+# Option 1: rollback to previous build (refuses a pre-v2 build once
+# statev2.sqlite exists; see ~/vendor/t3code/VENDOR.md "Orchestration v2 cutover")
 cd ~/vendor/t3code && mise run swap-back
 
 # Option 2: promote the pinned known-good tier
@@ -149,9 +150,9 @@ cd ~/vendor/t3code && mise run daemon
 \`\`\`
 
 It restarts the server on crash, picks up new builds promoted by
-\`mise run swap\` when no thread session is running (idle gate:
-3 consecutive checks ~90s apart), and falls back current -> bak -> stable
-if a build will not boot. It re-execs itself when its script changes.
+\`mise run swap\` only when no thread has live work (idle gate:
+3 consecutive checks, ~90s), and falls back current -> bak -> stable
+if a build will not boot, skipping pre-v2 builds after the v2 cutover. It re-execs itself when its script changes.
 Manage with: \`mise run daemon-status\`, \`daemon-stop\`, \`daemon-log\`,
 \`server-log\`, \`logs\`. Logs live in this directory: daemon.log (daemon,
 local time) and daemon.log.server (server, UTC).

@@ -7,14 +7,18 @@
 #     change bin.mjs mtime) and restarts onto it, but ONLY when no thread
 #     session is running
 #     (idle gate: 3 consecutive idle checks)
-#   - falls back current -> bak -> stable if a build won't boot
+#   - falls back current -> bak -> stable if a build won't boot, skipping
+#     pre-v2 builds once the data has moved to statev2.sqlite
 #   - re-execs itself when this script changes (adopting the live server)
 #
-# Idle probe reads projection_thread_sessions from the server's SQLite
-# database directly (read-only, WAL): status IN ('starting','running') means
-# a provider session is active. Background work that outlives its turn
-# (subagents, workflows, watch loops) exists only in server memory, so the
-# probe also asks the server's loopback-only /api/daemon/background-work.
+# Idle probe reads the live server's SQLite database directly (read-only,
+# WAL). Orchestration v2 servers use userdata/statev2.sqlite and persist
+# runs, pending requests, background tasks and subagents there, so
+# scripts/t3-busy-v2.sql covers everything. On its first boot v2 copies the
+# v1 state.sqlite and never writes it again, so the database is picked by
+# which file the running server has open: a v1 server (before the cutover,
+# or after a deliberate swap-back) still gets the v1 probe, which also asks
+# that build's loopback-only /api/daemon/background-work.
 #
 # Started via: mise run daemon  (nohup + disown, survives everything)
 
@@ -23,7 +27,8 @@ set -euo pipefail
 # ── Configuration ──────────────────────────────────────────────────────────
 RUNTIME_DIR="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
 DIST="$RUNTIME_DIR/dist"
-DB="$RUNTIME_DIR/userdata/state.sqlite"
+DB_V1="$RUNTIME_DIR/userdata/state.sqlite"
+DB_V2="$RUNTIME_DIR/userdata/statev2.sqlite"
 PID_FILE="$RUNTIME_DIR/daemon.pid"
 LOG_FILE="$RUNTIME_DIR/daemon.log"
 SERVER_LOG="$RUNTIME_DIR/daemon.log.server"
@@ -37,14 +42,16 @@ export T3CODE_SESSION_TTL="${T3CODE_SESSION_TTL:-180}"
 HEALTH_URL="http://127.0.0.1:$PORT/"
 BACKGROUND_WORK_URL="http://127.0.0.1:$PORT/api/daemon/background-work"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+BUSY_SQL_V2="$(dirname "$SELF")/t3-busy-v2.sql"
 
 # Tuning
 CRASH_BACKOFF=3
 MAX_CRASH_RETRIES=3
 BIN_CHECK_INTERVAL=30
 IDLE_THRESHOLD=3 # consecutive idle checks before restart (~90s)
-HEALTH_RETRIES=5
-HEALTH_DELAY=2
+# The first v2 boot copies state.sqlite and migrates it before the listener
+# comes up, so allow minutes while the process is alive; a crash fails fast.
+HEALTH_TIMEOUT="${T3_HEALTH_TIMEOUT:-300}"
 
 # ── State ──────────────────────────────────────────────────────────────────
 server_pid=""
@@ -80,8 +87,10 @@ stop_server() {
 	if [[ -n "${server_pid:-}" ]] && kill -0 "$server_pid" 2>/dev/null; then
 		log "Stopping server (PID $server_pid)..."
 		kill "$server_pid" 2>/dev/null || true
+		# v2 shutdown releases the managed tunnel (up to 10s) and closes
+		# provider sessions; a kill -9 skips its restart bookkeeping.
 		local i=0
-		while kill -0 "$server_pid" 2>/dev/null && [[ $i -lt 50 ]]; do
+		while kill -0 "$server_pid" 2>/dev/null && [[ $i -lt 150 ]]; do
 			sleep 0.2
 			i=$((i + 1))
 		done
@@ -119,25 +128,47 @@ process_start_epoch() {
 
 # ── Health & idle checks ───────────────────────────────────────────────────
 health_check() {
-	local i=0
-	while [[ $i -lt $HEALTH_RETRIES ]]; do
+	local started=$SECONDS
+	while ((SECONDS - started < HEALTH_TIMEOUT)); do
 		# --max-time: the server can bind the port before it serves; without
 		# a timeout curl blocks forever on the accepted-but-stalled socket.
 		if curl -sf --max-time 3 "$HEALTH_URL" -o /dev/null 2>/dev/null; then
 			return 0
 		fi
-		i=$((i + 1))
-		sleep "$HEALTH_DELAY"
+		kill -0 "$server_pid" 2>/dev/null || return 1
+		sleep 2
 	done
 	return 1
 }
 
+# v1 builds never open statev2.sqlite, and v2 stops writing state.sqlite
+# after its first boot, so the live server's open files name its database.
+server_db() {
+	if [[ -n "${server_pid:-}" ]] && lsof -p "$server_pid" -Fn 2>/dev/null | grep -q '/statev2\.sqlite$'; then
+		echo "$DB_V2"
+	else
+		echo "$DB_V1"
+	fi
+}
+
 is_idle() {
-	# Any thread session in starting/running state means a provider session
-	# is active. DB is WAL mode: read-only queries never block the server.
-	# A missing/unreadable DB counts as idle (server may be mid-migration).
 	local busy
-	busy=$(sqlite3 "$DB" \
+	if [[ "$(server_db)" == "$DB_V2" ]]; then
+		# Fail closed: a broken probe must not restart over live work.
+		if ! busy=$(sqlite3 -readonly -cmd '.timeout 2000' "$DB_V2" <"$BUSY_SQL_V2" 2>&1); then
+			busy_reason="busy probe failed: ${busy:0:160}"
+			return 1
+		fi
+		if [[ -n "$busy" ]]; then
+			busy_reason="threads busy ($busy)"
+			return 1
+		fi
+		return 0
+	fi
+	# v1: any thread session in starting/running state means a provider
+	# session is active. A missing/unreadable DB counts as idle (server may
+	# be mid-migration).
+	busy=$(sqlite3 "$DB_V1" \
 		"SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running');" \
 		2>/dev/null || echo 0)
 	if [[ "$busy" != "0" ]]; then
@@ -157,6 +188,9 @@ is_idle() {
 }
 
 current_binary_mtime() { stat -f %m "$DIST/current/bin.mjs" 2>/dev/null || echo 0; }
+
+# A pre-v2 build reads state.sqlite, which is frozen at the v2 cutover.
+tier_is_v1() { ! grep -qs 'statev2.sqlite' "$DIST/$1"/*.mjs; }
 
 # Any change counts, not just a newer mtime: swap-back moves the older bak
 # build into current. A missing bin.mjs (mid-swap) is not a build.
@@ -186,6 +220,11 @@ fallback() {
 	local tier
 	for tier in bak stable; do
 		if [[ -f "$DIST/$tier/bin.mjs" ]]; then
+			# Falling back to a v1 build would silently serve pre-upgrade data.
+			if [[ -f "$DB_V2" ]] && tier_is_v1 "$tier" && [[ "${T3_ALLOW_V1_FALLBACK:-0}" != 1 ]]; then
+				log "Skipping tier '$tier': pre-v2 build, data lives in statev2.sqlite (T3_ALLOW_V1_FALLBACK=1 overrides)"
+				continue
+			fi
 			if try_tier "$tier"; then
 				crash_count=0
 				if [[ "$tier" == "stable" ]]; then

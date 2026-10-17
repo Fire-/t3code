@@ -64,37 +64,53 @@ echo "smoke ok: $(node "$BIN" --version)"
 [tasks.swap]
 description = "Promote built bundle to ~/.t3/code/dist/current (shift current->bak)"
 run = """
+set -euo pipefail
 RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
 DIST="$RUNTIME/dist"
 VENDOR_DIST="{{config_root}}/apps/server/dist"
+STAGING="$DIST/.staging"
 
 if [[ ! -f "$VENDOR_DIST/bin.mjs" ]]; then
   echo "ERROR: no server bundle found. Run 'mise run build' first."
   exit 1
 fi
 
+# Build the new tier off to the side so the daemon never sees a half-copied
+# current, and a failed natives copy leaves the live tiers untouched.
 mkdir -p "$DIST"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+cp -R "$VENDOR_DIST/." "$STAGING/"
+node "{{config_root}}/scripts/runtime-natives.mjs" "$STAGING/node_modules"
+# Boot from the tier itself: the vendor tree's node_modules can hide a
+# missing external.
+version=$(node "$STAGING/bin.mjs" --version)
 
 # Shift tiers: bak -> (dropped), current -> bak
 if [[ -f "$DIST/current/bin.mjs" ]]; then
   rm -rf "$DIST/bak"
   mv "$DIST/current" "$DIST/bak"
 fi
+mv "$STAGING" "$DIST/current"
 
-mkdir -p "$DIST/current"
-cp -R "$VENDOR_DIST/." "$DIST/current/"
-node "{{config_root}}/scripts/runtime-natives.mjs" "$DIST/current/node_modules"
-
-echo "swapped: current <- $(node "$VENDOR_DIST/bin.mjs" --version 2>/dev/null || echo build)"
+echo "swapped: current <- $version"
 """
 
 [tasks.swap-back]
 description = "Restore previous build from bak to current"
 run = """
-DIST="${T3_RUNTIME_DIR:-$HOME/.t3/code}/dist"
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+DIST="$RUNTIME/dist"
 
 if [[ ! -f "$DIST/bak/bin.mjs" ]]; then
   echo "ERROR: no bak tier to restore from."
+  exit 1
+fi
+
+# A pre-v2 build reads state.sqlite, frozen at the v2 cutover.
+if [[ -f "$RUNTIME/userdata/statev2.sqlite" ]] && ! grep -qs 'statev2.sqlite' "$DIST/bak"/*.mjs && [[ "${T3_ALLOW_V1_FALLBACK:-0}" != 1 ]]; then
+  echo "ERROR: bak is a pre-v2 build; it would serve the frozen pre-upgrade state.sqlite and"
+  echo "everything since the cutover would be missing. Set T3_ALLOW_V1_FALLBACK=1 to do it anyway."
   exit 1
 fi
 
@@ -106,10 +122,17 @@ echo "swap-back: bak promoted to current"
 [tasks.setup-stable]
 description = "Copy current bak to stable fallback (run once with known-good build)"
 run = """
-DIST="${T3_RUNTIME_DIR:-$HOME/.t3/code}/dist"
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+DIST="$RUNTIME/dist"
 
 if [[ ! -f "$DIST/bak/bin.mjs" ]]; then
   echo "ERROR: no bak tier. Run 'mise run swap' first to create bak."
+  exit 1
+fi
+
+if [[ -f "$RUNTIME/userdata/statev2.sqlite" ]] && ! grep -qs 'statev2.sqlite' "$DIST/bak"/*.mjs; then
+  echo "ERROR: bak is a pre-v2 build; the daemon never falls back to one after the cutover."
+  echo "Pin stable once bak holds a v2 build (after the next swap)."
   exit 1
 fi
 
@@ -215,8 +238,12 @@ for tier in current bak stable; do
     echo "tier $tier: empty"
   fi
 done
-if [[ -f "$RUNTIME/userdata/state.sqlite" ]]; then
-  echo "busy sessions: $(sqlite3 "$RUNTIME/userdata/state.sqlite" "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running');" 2>/dev/null || echo '?')"
+pid=$(lsof -tiTCP:${T3_PORT:-3773} -sTCP:LISTEN 2>/dev/null | head -1 || true)
+if [[ -n "$pid" ]] && lsof -p "$pid" -Fn 2>/dev/null | grep -q '/statev2\\.sqlite$'; then
+  busy=$(sqlite3 -readonly -cmd '.timeout 2000' "$RUNTIME/userdata/statev2.sqlite" < "{{config_root}}/scripts/t3-busy-v2.sql" 2>&1 || echo '?')
+  echo "busy (v2): ${busy:-idle}"
+elif [[ -f "$RUNTIME/userdata/state.sqlite" ]]; then
+  echo "busy sessions (v1): $(sqlite3 "$RUNTIME/userdata/state.sqlite" "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running');" 2>/dev/null || echo '?')"
 fi
 """
 

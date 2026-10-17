@@ -90,18 +90,20 @@ what actually serves.
   dist/current/    <- active build: bin.mjs + chunks + client/ + node_modules/
   dist/bak/        <- previous build (auto-created by swap)
   dist/stable/     <- pinned known-good (setup-stable)
-  userdata/        <- server data (T3CODE_HOME; state.sqlite inside)
+  userdata/        <- server data (T3CODE_HOME; statev2.sqlite, plus the frozen v1 state.sqlite)
 ```
 
 - `bin/t3` is a generated script (by `scripts/generate-runtime.sh`) that
   exports `T3CODE_HOME=~/.t3/code` and execs the first tier containing a
   `bin.mjs`. It uses a baked absolute node 24 path (the server needs
   `node:sqlite`); re-run `mise run generate-runtime` after toolchain changes.
-- Each tier's `node_modules/` holds exactly the native deps the bundle
-  externalizes (node-pty, @ff-labs/fff-node + closure, bufferutil,
-  utf-8-validate, msgpackr-extract), copied BUILT and PATCHED from the pnpm
-  store by `scripts/runtime-natives.mjs`. Nothing is reinstalled from the
-  registry — a reinstall would drop upstream's fff-node patch.
+- Each tier's `node_modules/` holds the packages the bundle keeps external:
+  the same server dependencies upstream's release archive installs
+  (`scripts/lib/cli-external-packages.ts`: @cursor/sdk, @ff-labs/fff-node,
+  @napi-rs/keyring, node-pty, playwright-core, undici) plus their
+  dependency closure. `scripts/runtime-natives.mjs` copies them BUILT and
+  PATCHED from this vendor install, so a tier runs exactly what was tested
+  and needs no registry. `swap` boots the staged tier before promoting it.
 - Daily flow: `mise run upgrade` (updates the runtime via swap), phone pairs
   against the running server. Fallback to the stable tier: `rm -rf
 ~/.t3/code/dist/current && cp -R ~/.t3/code/dist/stable
@@ -126,11 +128,16 @@ target, never `sed -i` the link.
 - restarts the server on crash (3→6→12s backoff, then tier fallback)
 - watches `dist/current/bin.mjs` mtime — `swap` and `swap-back` both
   change it, and within 30s the daemon restarts onto that build, **but
-  only when idle**: no
-  `projection_thread_sessions` row with status `starting`/`running` for 3
-  consecutive checks (~90s). The idle probe queries the SQLite DB directly
-  (read-only, WAL) — no HTTP endpoint or upstream patch needed.
+  only when idle** for 3 consecutive checks (~90s). The idle probe,
+  `scripts/t3-busy-v2.sql`, reads `statev2.sqlite` read-only and counts
+  threads with an active or queued run, a pending approval or question, a
+  provider background task, a running provider subagent or tool call, or
+  a running effect. It fails closed: a probe error counts as busy. A v1
+  server (before the cutover, or after a forced swap-back) gets the old
+  v1 probe instead.
 - falls back `current → bak → stable` if a build fails its health check
+  (up to `T3_HEALTH_TIMEOUT`, default 300s, while the process stays
+  alive), skipping pre-v2 builds once `statev2.sqlite` exists
 - re-execs itself when `scripts/daemon.sh` changes (adopting the live
   server via a port-scoped `lsof` lookup — zero downtime)
 
@@ -139,7 +146,22 @@ express idle-gated restarts. Running both would fight — don't.
 
 Tune via env: `T3_PORT` (default 3773), `T3_HOST` (default `0.0.0.0` — all
 interfaces, matching opencode's `*:80` posture and surviving DHCP changes;
-set `127.0.0.1` for loopback-only), `T3_RUNTIME_DIR` (default `~/.t3/code`).
+set `127.0.0.1` for loopback-only), `T3_RUNTIME_DIR` (default `~/.t3/code`),
+`T3_HEALTH_TIMEOUT` (seconds, default 300), `T3_ALLOW_V1_FALLBACK=1`
+(permit pre-v2 tiers after the cutover; also unblocks `swap-back`).
+
+### Orchestration v2 cutover
+
+The first v2 server boot snapshots `userdata/state.sqlite` into
+`userdata/statev2.sqlite` and imports threads from it; it never writes
+`state.sqlite` again. On this machine's ~800 MB database the snapshot,
+migrations, and import took about 2 seconds. To roll back,
+`T3_ALLOW_V1_FALLBACK=1 mise run swap-back` onto the last v1 build: it
+serves `state.sqlite` as it was at the cutover, so anything done in v2 is
+missing there. Going forward again reuses the existing `statev2.sqlite`,
+so anything done in v1 meanwhile is not re-imported (move `statev2.sqlite`
+aside first to re-import from scratch). `swap-back` and `setup-stable`
+refuse pre-v2 builds once `statev2.sqlite` exists.
 
 Never `export T3CODE_HOME` ambiently. t3 treats it as an explicit base dir,
 which flips dev-mode state from `<base>/dev` to `<base>/userdata` — i.e. an
