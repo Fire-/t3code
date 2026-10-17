@@ -1728,8 +1728,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
 
       /**
        * Whether the session has schedules or heartbeats that will start runs on
-       * their own. Read only once a settle probe finds Prime idle; an
-       * unanswered read keeps the last known answer.
+       * their own. Read only at a turn's terminal transition, never on a
+       * timer; an unanswered read keeps the last known answer.
        */
       const readBackgroundJobs = Effect.all(
         [request({ type: "list_schedules" }, 2_000), request({ type: "list_heartbeats" }, 2_000)],
@@ -1745,6 +1745,19 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         ),
         Effect.orElseSucceed(() => undefined),
       );
+
+      /**
+       * For terminal paths that skip the idle probe while Prime stays alive:
+       * the run may have created a schedule or heartbeat, and the pin is the
+       * only thing that keeps T3's idle release from stopping the worker (and
+       * Prime from cancelling those jobs). A terminating process has nothing
+       * left to pin.
+       */
+      const refreshBackgroundJobs = Effect.gen(function* () {
+        if (stopRequested || closed) return;
+        const backgroundJobs = yield* readBackgroundJobs;
+        if (backgroundJobs !== undefined) activeBackgroundJobs = backgroundJobs;
+      });
 
       const scheduleSettleProbe = (
         turn: ActivePrimeTurn,
@@ -2162,7 +2175,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           case "agent_end": {
             if (turn === null) return;
             if (turn.interrupted) {
-              if (state !== null) yield* finalizeTurn(state);
+              if (state === null) return;
+              yield* refreshBackgroundJobs;
+              yield* finalizeTurn(state);
               return;
             }
             const awaitingPromptAck = pendingPromptResponses.some(
@@ -2296,9 +2311,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 failedTurn.rejectedPromptFailure = failure;
                 failedTurn.sawAgentEnd = true;
                 yield* scheduleSettleProbe(failedTurn, true);
-              } else {
+              } else if (state !== null) {
                 failedTurn.failure = failure;
-                if (state !== null) yield* finalizeTurn(state);
+                if (failedTurn.sawAgentActivity) yield* refreshBackgroundJobs;
+                yield* finalizeTurn(state);
               }
             }
             return;
@@ -2384,6 +2400,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               message: prior === null ? probeFailure : `${prior.message}\n\n${probeFailure}`,
               class: "provider_error",
             });
+            yield* refreshBackgroundJobs;
             yield* finalizeTurn(state, false);
             return;
           }

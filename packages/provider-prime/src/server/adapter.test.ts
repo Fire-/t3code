@@ -6842,6 +6842,188 @@ describe("Prime settle engine", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    const isScheduleProbe = (type: string) =>
+      type === "list_schedules" || type === "list_heartbeats";
+    /** Output is ordered, so a duplicate terminal would be seen before the next turn starts. */
+    const startNextTurn = (open: Open, runOrdinal: number) =>
+      Effect.gen(function* () {
+        yield* open.begin("Next question", runOrdinal);
+        yield* runningTurnId(open.record);
+      });
+
+    it.effect.each([
+      { created: "a schedule", jobs: [cronJob("active")], heartbeats: [] },
+      { created: "a heartbeat", jobs: [], heartbeats: [{ job: cronJob("active") }] },
+    ])(
+      "[VAL-CONT-010] an interrupted turn that created $created reads background jobs before its single interrupted terminal, so hasPendingBackgroundWork is true",
+      ({ jobs, heartbeats }) =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, providerThread, seen, record } = open;
+          yield* open.begin();
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Scheduled the check");
+          fake.setBackgroundJobs(jobs, heartbeats);
+          yield* pumpBarrier(fake, record, "before the interrupt");
+          assert.isFalse(fake.commandLog().some(isScheduleProbe));
+          assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+
+          yield* runtime.interruptTurn({ providerThread, providerTurnId });
+          yield* fake.takeRequest("abort");
+          const afterAbort = fake.commandLog().length;
+          yield* fake.emit(agentEnd(true));
+          const terminal = yield* nextTerminal(open);
+          assert.isTrue(
+            terminal.status === "interrupted" && terminal.providerTurnId === providerTurnId,
+          );
+          assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+          assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
+
+          const commands = commandsSince(fake, afterAbort);
+          assert.deepEqual(commands.filter(isScheduleProbe).toSorted(), [
+            "list_heartbeats",
+            "list_schedules",
+          ]);
+          assert.notInclude(commands, "get_state");
+          // get_session_stats is read while the terminal is built, so the job
+          // reads ahead of it happened before the turn ended.
+          assert.isBelow(
+            Math.max(commands.indexOf("list_schedules"), commands.indexOf("list_heartbeats")),
+            commands.indexOf("get_session_stats"),
+          );
+          yield* startNextTurn(open, 2);
+          assert.lengthOf(terminals(seen), 1);
+          assert.equal(commandsSince(fake, afterAbort).filter(isScheduleProbe).length, 2);
+          assertNeverPromoted(fake);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-010] a failed background-job read at an interrupt keeps the last known pin, and the turn still ends interrupted once",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake((fake) => fake.setBackgroundJobs([cronJob("active")], []));
+          const { fake, runtime, providerThread, seen, record } = open;
+          yield* plainTurn(open, "Scheduled the check");
+          assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+
+          // Had the read succeeded it would report no jobs and clear the pin.
+          fake.setBackgroundJobs([], []);
+          fake.failCommand("list_schedules", "schedule store unavailable");
+          yield* open.begin("Keep going", 2);
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Still working");
+          yield* runtime.interruptTurn({ providerThread, providerTurnId });
+          yield* fake.takeRequest("abort");
+          const afterAbort = fake.commandLog().length;
+          yield* fake.emit(agentEnd(true));
+          const terminal = yield* nextTerminal(open);
+          assert.isTrue(
+            terminal.status === "interrupted" && terminal.providerTurnId === providerTurnId,
+          );
+          assert.include(commandsSince(fake, afterAbort), "list_schedules");
+          assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+          yield* startNextTurn(open, 3);
+          assert.deepEqual(
+            terminals(seen).map((event) => event.type === "turn.terminal" && event.status),
+            ["completed", "interrupted"],
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      { when: "after the agent ran", ran: true },
+      { when: "before the agent ran", ran: false },
+    ])(
+      "[VAL-CONT-010] a turn Prime fails with an id-less error $when reads background jobs before its single failed terminal only if the agent ran",
+      ({ ran }) =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, seen } = open;
+          const afterPrompt = yield* open.begin();
+          if (ran) {
+            yield* fake.emit({ type: "agent_start" });
+            yield* replyText(fake, "Scheduled the check");
+          }
+          fake.setBackgroundJobs([cronJob("active")], []);
+          yield* fake.emitOrphanError("prompt", "Prime worker lost the session");
+          const terminal = yield* nextTerminal(open);
+          assert.equal(terminal.status, "failed");
+          assert.include(terminal.failure?.message, "Prime worker lost the session");
+          const commands = commandsSince(fake, afterPrompt);
+          assert.equal(commands.filter(isScheduleProbe).length, ran ? 2 : 0);
+          assert.notInclude(commands, "get_state");
+          assert.equal(yield* runtime.hasPendingBackgroundWork!, ran);
+          yield* startNextTurn(open, 2);
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CONT-010] a turn that ends failed after three failed settle get_state reads still reads background jobs first",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, seen } = open;
+          const afterPrompt = yield* open.begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Scheduled the check");
+          fake.setBackgroundJobs([], [{ job: cronJob("active") }]);
+          fake.failCommand("get_state", "session state store is locked");
+          yield* fake.emit(agentEnd());
+          yield* fake.takeRequest("get_state");
+          yield* advanceClockUntil(fake.takeRequest("get_state"));
+          yield* advanceClockUntil(fake.takeRequest("get_state"));
+          const terminal = yield* nextTerminal(open);
+          assert.equal(terminal.status, "failed");
+          assert.include(terminal.failure?.message, "session state store is locked");
+          const commands = commandsSince(fake, afterPrompt);
+          assert.equal(commands.filter((type) => type === "get_state").length, 3);
+          assert.deepEqual(commands.filter(isScheduleProbe).toSorted(), [
+            "list_heartbeats",
+            "list_schedules",
+          ]);
+          assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+          yield* startNextTurn(open, 2);
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each(["Stop with a runtime restart", "a process exit"] as const)(
+      "[VAL-CONT-010] a turn ended by %s reads no background jobs",
+      (ending) =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, runtime, providerThread, seen, record } = open;
+          const afterPrompt = yield* open.begin();
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Scheduled the check");
+          fake.setBackgroundJobs([cronJob("active")], []);
+          yield* pumpBarrier(fake, record, "before the turn ends");
+          if (ending === "a process exit") yield* fake.exit(1);
+          else {
+            yield* runtime.interruptTurn({
+              providerThread,
+              providerTurnId,
+              requestRuntimeRestart: true,
+            });
+          }
+          const terminal = yield* nextTerminal(open);
+          assert.equal(terminal.status, ending === "a process exit" ? "failed" : "interrupted");
+          yield* record(
+            (event) =>
+              event.type === "provider_session.updated" &&
+              event.providerSession.status === (ending === "a process exit" ? "error" : "stopped"),
+          );
+          assert.isFalse(commandsSince(fake, afterPrompt).some(isScheduleProbe));
+          assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect.each([
       { command: "/goal pause", before: "active", after: "paused", expected: "paused" },
       { command: "/goal resume", before: "paused", after: "active", expected: "active" },
