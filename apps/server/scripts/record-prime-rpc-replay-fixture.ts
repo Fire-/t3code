@@ -72,6 +72,7 @@ const PRIME_RECORDING_SCENARIOS: Readonly<Record<string, PrimeRecordingScenario>
   provider_thread_resume: { bridge: false, awaitPreviousExit: true },
   turn_interrupt_mid_tool: { bridge: false },
   prime_approval: { bridge: true, runtimeMode: "approval-required" },
+  prime_session_command: { bridge: false },
 };
 
 /** Model turns cost real credits, so only the two models agreed for fixtures may record. */

@@ -129,8 +129,14 @@ interface FakePrime {
   readonly failCommand: (type: string, error: string) => void;
   /** Types of every command T3 wrote to stdin, in order. */
   readonly commandLog: () => ReadonlyArray<string>;
+  /**
+   * Prime accepting a session-command prompt, in the order the free live
+   * probe recorded (live-runs.md, prime-session-commands): the action is
+   * already admitted when the id-less ack goes out, so a `get_state` answered
+   * after the ack reports it; the `preparing` and `running` updates follow.
+   */
+  readonly acceptSessionCommand: (label: string) => Effect.Effect<void>;
 }
-
 interface FakeSessionActions {
   readonly queuedCount: number;
   readonly steering: ReadonlyArray<string>;
@@ -148,6 +154,39 @@ const RUNNING_TURN_ACTIONS: FakeSessionActions = {
   active: { kind: "turn", phase: "running", label: "Hello prime-agent" },
 };
 
+const sessionCommandOf = (text: string) => {
+  const match = /^\/(\S+)(?:\s+([\s\S]*))?$/u.exec(text);
+  return { name: match?.[1] ?? "", args: (match?.[2] ?? "").trim(), text };
+};
+
+/** Prime's echo of the slash text (core/messages.ts createSessionSlashCommandMessage). */
+const sessionCommandEcho = (text: string) => ({
+  role: "custom",
+  customType: "session_slash_command",
+  content: text,
+  display: true,
+  details: { command: sessionCommandOf(text) },
+});
+
+/** Prime's result row (core/agent-session.ts _executeQueuedSessionCommand). */
+const sessionCommandResult = (text: string, content: string, success = true, display = true) => ({
+  role: "custom",
+  customType: "session_slash_command_result",
+  content,
+  display,
+  details: {
+    command: sessionCommandOf(text),
+    success,
+    severity: success ? "info" : "error",
+    ...(success ? {} : { error: content.replace(/^Command failed:\s*/u, "") }),
+  },
+});
+
+const emitCustomMessage = (fake: FakePrime, message: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    yield* fake.emit({ type: "message_start", message });
+    yield* fake.emit({ type: "message_end", message });
+  });
 /** Prime's agent_end carries only the run's messages; an aborted run ends with an aborted assistant message. */
 const agentEnd = (aborted = false): PrimeRpcRecord => ({
   type: "agent_end",
@@ -414,6 +453,20 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
       commandFailures.set(type, error);
     },
     commandLog: () => allRequests.map((request) => String(request["type"])),
+    acceptSessionCommand: (label) =>
+      Effect.gen(function* () {
+        sessionActions = {
+          ...IDLE_ACTIONS,
+          active: { kind: "session_command", phase: "preparing", label },
+        };
+        yield* emit({ type: "response", command: "prompt", success: true });
+        yield* emit({ type: "session_action_update", actions: sessionActions });
+        sessionActions = {
+          ...IDLE_ACTIONS,
+          active: { kind: "session_command", phase: "running", label },
+        };
+        yield* emit({ type: "session_action_update", actions: sessionActions });
+      }),
   } satisfies FakePrime;
 });
 
@@ -2944,7 +2997,7 @@ describe("PrimeAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("fails a compact that never started", () =>
+  it.effect("sends /compact to Prime as a session-command prompt, not the compact RPC", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePrime;
       const { runtime, takeEvent } = yield* openRuntime(fake);
@@ -2954,19 +3007,24 @@ describe("PrimeAdapterV2", () => {
         runtimePolicy,
       });
       yield* startTurn(runtime, providerThread, "default", [], "/compact");
-      yield* fake.takeRequest("compact");
+      const prompt = yield* fake.takeRequest("prompt");
+      assert.equal(prompt["message"], "/compact");
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "compact"));
+      // Prime skips a compaction on a short session with a warning-only
+      // compaction_end and no result row (live probe, live-runs.md).
+      yield* fake.acceptSessionCommand("/compact");
+      yield* fake.emit({ type: "compaction_start", reason: "manual" });
       yield* fake.emit({
-        type: "response",
-        command: "compact",
-        success: false,
-        error: "Nothing to compact (session too small)",
+        type: "compaction_end",
+        reason: "manual",
+        aborted: false,
+        willRetry: false,
+        errorMessage: "Session is too short to compact — try again once it grows",
+        errorSeverity: "warning",
       });
+      yield* fake.setSessionActions(IDLE_ACTIONS);
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
-      assert.isTrue(
-        terminal.type === "turn.terminal" &&
-          terminal.status === "failed" &&
-          terminal.failure.message === "Nothing to compact (session too small)",
-      );
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -2980,7 +3038,7 @@ describe("PrimeAdapterV2", () => {
         runtimePolicy,
       });
       yield* startTurn(runtime, providerThread, "default", [], "/compact");
-      yield* fake.takeRequest("compact");
+      yield* fake.takeRequest("prompt");
       const running = yield* takeEvent(
         (event) =>
           event.type === "provider_turn.updated" && event.providerTurn.status === "running",
@@ -2988,6 +3046,7 @@ describe("PrimeAdapterV2", () => {
       const providerTurnId =
         running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
       assert.isDefined(providerTurnId);
+      yield* fake.acceptSessionCommand("/compact");
       yield* fake.emit({ type: "compaction_start", reason: "manual" });
       yield* takeEvent(
         (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
@@ -3002,7 +3061,7 @@ describe("PrimeAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("steers /compact as RPC compact instead of a prompt", () =>
+  it.effect("steers /compact as a session-command prompt", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePrime;
       const { runtime, takeEvent } = yield* openRuntime(fake);
@@ -3019,6 +3078,7 @@ describe("PrimeAdapterV2", () => {
       );
       const providerTurnId =
         running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
       yield* fake.emit({ type: "agent_start" });
       yield* runtime.steerTurn({
         threadId: THREAD_ID,
@@ -3033,14 +3093,17 @@ describe("PrimeAdapterV2", () => {
           creationSource: "web",
         },
       });
-      const compact = yield* fake.takeRequest("compact");
-      assert.equal(compact["customInstructions"], "keep the tests");
-      assert.isUndefined(compact["streamingBehavior"]);
+      const steer = yield* fake.takeRequest("prompt");
+      assert.equal(steer["message"], "/compact keep the tests");
+      assert.equal(steer["streamingBehavior"], "steer");
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "compact"));
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
+      yield* fake.setSessionActions({
+        ...IDLE_ACTIONS,
+        active: { kind: "session_command", phase: "running", label: "/compact keep the tests" },
+      });
+      yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.emit({ type: "compaction_start", reason: "manual" });
-      yield* takeEvent(
-        (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
-      );
-      fake.queueState({ isStreaming: false, isCompacting: false });
       yield* fake.emit({
         type: "compaction_end",
         reason: "manual",
@@ -3054,14 +3117,11 @@ describe("PrimeAdapterV2", () => {
           event.turnItem.type === "compaction" &&
           event.turnItem.status === "completed",
       );
-      yield* fake.emit({ type: "response", command: "compact", success: true });
-      yield* fake.emit({ type: "agent_end", messages: [] });
-      yield* fake.takeRequest("get_state");
+      yield* fake.setSessionActions(IDLE_ACTIONS);
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
-
   it.effect("persists current xAI capacity text for the thread error banner", () =>
     expectModelFailure("The model is currently at capacity due to high demand."),
   );
@@ -5741,6 +5801,318 @@ describe("Prime settle engine", () => {
             );
           }
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+  describe("session commands", () => {
+    const beginCommand = Effect.fnUntraced(function* (
+      open: {
+        readonly fake: FakePrime;
+        readonly runtime: Parameters<typeof startTurn>[0];
+        readonly providerThread: Parameters<typeof startTurn>[1];
+      },
+      text: string,
+    ) {
+      yield* startTurn(open.runtime, open.providerThread, "default", [], text);
+      const prompt = yield* open.fake.takeRequest("prompt");
+      assert.equal(prompt["message"], text);
+      return prompt;
+    });
+
+    const isTerminal = (event: AdapterEvent) => event.type === "turn.terminal";
+    const itemsMentioning = (seen: ReadonlyArray<AdapterEvent>, text: string) =>
+      seen.filter(
+        (event) =>
+          event.type === "turn_item.updated" && JSON.stringify(event.turnItem).includes(text),
+      );
+    const idleGoal = {
+      active: false,
+      status: "idle",
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      continuationsUsed: 0,
+    };
+
+    it.effect(
+      "[VAL-CMD-005] /goal status settles once after its action clears, in the live-probed frame order, with no agent_end and no item for the echo",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, "/goal status");
+          // live-runs.md (prime-session-commands probe): ack, preparing, running,
+          // echo, goal_update, result row, then the clearing update.
+          yield* fake.acceptSessionCommand("/goal status");
+          yield* emitCustomMessage(fake, sessionCommandEcho("/goal status"));
+          yield* fake.emit({ type: "goal_update", goal: idleGoal });
+          yield* emitCustomMessage(fake, sessionCommandResult("/goal status", "No active goal."));
+          yield* pumpBarrier(fake, record, "before the action clears");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          assert.notInclude(fake.commandLog(), "abort");
+          assert.lengthOf(itemsMentioning(seen, "/goal status"), 0);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CMD-005] /goal status settles once when Prime finished it before any active action was observed",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, "/goal status");
+          yield* fake.emit({ type: "response", command: "prompt", success: true });
+          yield* emitCustomMessage(fake, sessionCommandEcho("/goal status"));
+          yield* fake.emit({ type: "goal_update", goal: idleGoal });
+          yield* emitCustomMessage(fake, sessionCommandResult("/goal status", "No active goal."));
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          assert.lengthOf(itemsMentioning(seen, "/goal status"), 0);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each(["/goal pause", "/goal clear", "/reload"])(
+      "[VAL-CMD-007] %s settles once on its action clearing and an idle probe",
+      (text) =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, text);
+          yield* fake.acceptSessionCommand(text);
+          yield* emitCustomMessage(fake, sessionCommandEcho(text));
+          yield* emitCustomMessage(fake, sessionCommandResult(text, "Done."));
+          yield* pumpBarrier(fake, record, "before the action clears");
+          assert.lengthOf(terminals(seen), 0);
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CMD-002] /compact goes to Prime as a prompt and settles once after compaction ends and its action clears",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, "/compact keep the tests");
+          assert.notInclude(fake.commandLog(), "compact");
+          yield* fake.acceptSessionCommand("/compact keep the tests");
+          yield* emitCustomMessage(fake, sessionCommandEcho("/compact keep the tests"));
+          fake.setCompacting(true);
+          yield* fake.emit({ type: "compaction_start", reason: "manual" });
+          yield* record(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "compaction" &&
+              event.turnItem.status === "running",
+          );
+          fake.setCompacting(false);
+          yield* fake.emit({
+            type: "compaction_end",
+            reason: "manual",
+            result: { summary: "smaller", tokensBefore: 10_000, estimatedTokensAfter: 2_000 },
+            aborted: false,
+            willRetry: false,
+          });
+          yield* record(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "compaction" &&
+              event.turnItem.status === "completed",
+          );
+          yield* pumpBarrier(fake, record, "after compaction_end");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      { outcome: "complete", status: "completed" },
+      { outcome: "failed", status: "failed" },
+    ] as const)(
+      "[VAL-CMD-003] /refine that ends with refine_$outcome settles once as $status",
+      ({ outcome, status }) =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, "/refine");
+          yield* fake.acceptSessionCommand("/refine");
+          yield* emitCustomMessage(fake, sessionCommandEcho("/refine"));
+          if (outcome === "complete") {
+            yield* fake.emit({
+              type: "refine_complete",
+              result: { appliedEdits: [{ applied: true }] },
+            });
+            yield* emitCustomMessage(
+              fake,
+              sessionCommandResult(
+                "/refine",
+                "Refined continual harness state: 1 edit applied.",
+                true,
+                false,
+              ),
+            );
+          } else {
+            yield* fake.emit({ type: "refine_failed", error: "No refinement model configured" });
+            yield* emitCustomMessage(
+              fake,
+              sessionCommandResult(
+                "/refine",
+                "Command failed: No refinement model configured",
+                false,
+              ),
+            );
+          }
+          yield* pumpBarrier(fake, record, "before the action clears");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === status);
+          if (terminal.type === "turn.terminal" && terminal.status === "failed") {
+            assert.equal(terminal.failure.message, "No refinement model configured");
+          }
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CMD-003] a refine_failed from a self-started refinement does not fail an ordinary turn",
+      () =>
+        Effect.gen(function* () {
+          const { fake, seen, record, begin } = yield* openTurn();
+          yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Plain reply");
+          yield* fake.emit({ type: "refine_failed", error: "Refinement skipped by extension" });
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CMD-004] /goal <objective> stays open across agent_end while the goal action is active and settles once after it clears",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, "/goal ship the release");
+          yield* fake.acceptSessionCommand("/goal ship the release");
+          yield* emitCustomMessage(fake, sessionCommandEcho("/goal ship the release"));
+          yield* fake.emit({
+            type: "goal_update",
+            goal: { ...idleGoal, active: true, status: "active", objective: "ship the release" },
+          });
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "First goal step");
+          yield* fake.emit(agentEnd());
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "Goal reached");
+          yield* fake.emit(agentEnd());
+          yield* record(isAssistantText("Goal reached"));
+          yield* pumpBarrier(fake, record, "after the goal's agent_end");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* emitCustomMessage(
+            fake,
+            sessionCommandResult("/goal ship the release", "Goal complete: ship the release"),
+          );
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+          assert.isTrue(
+            seen.findIndex(isAssistantText("First goal step")) < seen.indexOf(terminal),
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each(["/autonomous on --max-turns 3", "/autonomous off", "/autonomous status"])(
+      "[VAL-CMD-006] %s keeps the turn open while its action is active and settles once as completed",
+      (text) =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, text);
+          yield* fake.acceptSessionCommand(text);
+          yield* emitCustomMessage(fake, sessionCommandEcho(text));
+          // Live probe: /autonomous reports through its own custom message, no result row.
+          yield* emitCustomMessage(fake, {
+            role: "custom",
+            customType: "autonomous_status",
+            content: `[autonomous-status: ${text.includes("on") ? "on" : "off"}]`,
+            display: true,
+          });
+          yield* pumpBarrier(fake, record, "before the action clears");
+          assert.lengthOf(terminals(seen), 0);
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-CMD-007] a failed session command result fails its turn with Prime's error once the action clears",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* beginCommand(open, "/reload");
+          yield* fake.acceptSessionCommand("/reload");
+          yield* emitCustomMessage(fake, sessionCommandEcho("/reload"));
+          yield* emitCustomMessage(
+            fake,
+            sessionCommandResult(
+              "/reload",
+              "Command failed: Wait for compaction to finish before reloading.",
+              false,
+            ),
+          );
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* record(isTerminal);
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "failed" &&
+              terminal.failure.message === "Wait for compaction to finish before reloading.",
+          );
+          assert.lengthOf(terminals(seen), 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("[VAL-CMD-008] an unknown slash command fails the turn with Prime's message", () =>
+      Effect.gen(function* () {
+        const open = yield* openTurn();
+        const { fake, seen, record } = open;
+        const prompt = yield* beginCommand(open, "/goa");
+        const error = "Unknown command: /goa. Did you mean /goal?";
+        yield* fake.emit({
+          type: "response",
+          ...(prompt["id"] === undefined ? {} : { id: prompt["id"] }),
+          command: "prompt",
+          success: false,
+          error,
+        });
+        const terminal = yield* record(isTerminal);
+        assert.isTrue(
+          terminal.type === "turn.terminal" &&
+            terminal.status === "failed" &&
+            terminal.failure.message === error,
+        );
+        assert.lengthOf(terminals(seen), 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 });

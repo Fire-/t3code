@@ -1,9 +1,9 @@
 import { expect, it } from "@effect/vitest";
 
 import {
-  parsePrimeCompactCommand,
   parsePrimeDiscoveredCommands,
-  PRIME_COMPACT_SLASH_COMMAND,
+  PRIME_SESSION_SLASH_COMMANDS,
+  primeSessionCommandName,
   withPrimeBuiltinSlashCommands,
 } from "./commands.ts";
 
@@ -85,26 +85,48 @@ it("maps Prime global location and interface labels onto T3 skill fields", () =>
   });
 });
 
-it("parses a standalone /compact command and optional instructions", () => {
-  expect(parsePrimeCompactCommand("/compact")).toEqual({});
-  expect(parsePrimeCompactCommand("  /compact  ")).toEqual({});
-  expect(parsePrimeCompactCommand("/compact keep the auth rewrite")).toEqual({
-    customInstructions: "keep the auth rewrite",
+it("[VAL-CMD-001] lists Prime's built-in session commands with descriptions ahead of get_commands entries, without duplicates", () => {
+  const discovered = parsePrimeDiscoveredCommands({
+    commands: [
+      { name: "hello", description: "Say hello.", source: "extension" },
+      { name: "review", description: "Review template.", source: "prompt" },
+      { name: "skill:deploy", description: "Deploy.", source: "skill" },
+      { name: "goal", description: "Extension goal.", source: "extension" },
+      { name: "hello", description: "Second hello.", source: "extension" },
+    ],
   });
-  expect(parsePrimeCompactCommand("/compacted")).toBeNull();
-  expect(parsePrimeCompactCommand("/compact-now")).toBeNull();
-  expect(parsePrimeCompactCommand("please /compact")).toBeNull();
+  const commands = withPrimeBuiltinSlashCommands(discovered.slashCommands);
+  expect(commands.map((command) => command.name)).toEqual([
+    "compact",
+    "refine",
+    "goal",
+    "autonomous",
+    "reload",
+    "hello",
+    "review",
+  ]);
+  expect(commands.slice(0, 5)).toEqual(PRIME_SESSION_SLASH_COMMANDS);
+  for (const command of PRIME_SESSION_SLASH_COMMANDS) {
+    expect(command.description?.length ?? 0).toBeGreaterThan(0);
+  }
+  expect(commands.find((command) => command.name === "goal")?.input?.hint).toBe(
+    "<objective|status|pause|resume|clear>",
+  );
+  expect(commands.find((command) => command.name === "autonomous")?.input?.hint).toBe(
+    "on|off|status",
+  );
+  expect(commands.find((command) => command.name === "hello")?.description).toBe("Say hello.");
+  expect(discovered.skills.map((skill) => skill.name)).toEqual(["deploy"]);
+  expect(withPrimeBuiltinSlashCommands([])).toEqual(PRIME_SESSION_SLASH_COMMANDS);
 });
 
-it("prepends the builtin compact command without duplicating a discovered one", () => {
-  expect(withPrimeBuiltinSlashCommands([{ name: "hello", description: "Say hello." }])).toEqual([
-    PRIME_COMPACT_SLASH_COMMAND,
-    { name: "hello", description: "Say hello." },
-  ]);
-  expect(
-    withPrimeBuiltinSlashCommands([
-      { name: "compact", description: "Extension compact." },
-      { name: "hello" },
-    ]),
-  ).toEqual([PRIME_COMPACT_SLASH_COMMAND, { name: "hello" }]);
+it("recognizes Prime's session command names the way Prime parses slash text", () => {
+  expect(primeSessionCommandName("/compact")).toBe("compact");
+  expect(primeSessionCommandName("  /goal status ")).toBe("goal");
+  expect(primeSessionCommandName("/goal ship the release")).toBe("goal");
+  expect(primeSessionCommandName("/autonomous on --max-turns 3")).toBe("autonomous");
+  expect(primeSessionCommandName("/compacted")).toBeUndefined();
+  expect(primeSessionCommandName("/compact-now")).toBeUndefined();
+  expect(primeSessionCommandName("please /compact")).toBeUndefined();
+  expect(primeSessionCommandName("/goa")).toBeUndefined();
 });

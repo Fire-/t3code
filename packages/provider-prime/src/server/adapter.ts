@@ -41,7 +41,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import { parsePrimeCompactCommand, type PrimeCompactCommand } from "./commands.ts";
+import { primeSessionCommandName } from "./commands.ts";
 import {
   isPrimeBusyRejection,
   primeAgentEndErrorMessage,
@@ -50,6 +50,7 @@ import {
   primeErrorMessage,
   primeIpythonFileChange,
   primeIpythonUpdate,
+  primeSessionCommandFailure,
   primeToolItem,
 } from "./events.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -430,6 +431,8 @@ interface ActivePrimeTurn {
   sawAgentActivity: boolean;
   adoptedWake: boolean;
   readonly promptMayBeCommandOnly: boolean;
+  /** Prime's built-in session command this turn's prompt names (`compact`, `goal`, ...). */
+  readonly sessionCommand: string | undefined;
   latestCompactionAfterTokens: number | null;
   lastLiveUsedTokens: number | null;
   /** Bumped by every transition that can make an in-flight `get_state` probe stale. */
@@ -443,7 +446,6 @@ interface ActivePrimeTurn {
    */
   sessionCommandDone: boolean;
   sawCompaction: boolean;
-  manualCompactInFlight: boolean;
   activeCompaction: PrimeCompactionState | null;
   activeProviderRetry: PrimeProviderRetryState | null;
   failure: ReturnType<typeof makeProviderFailure> | null;
@@ -631,16 +633,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
         readonly kind: "turn_start" | "steer";
       }> = [];
-      const pendingCompactResponses: Array<{
-        readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
-        readonly kind: "turn_start" | "steer";
-      }> = [];
-
-      const compactRpcRecord = (command: PrimeCompactCommand): PrimeRpcRecord =>
-        command.customInstructions === undefined
-          ? { type: "compact" }
-          : { type: "compact", customInstructions: command.customInstructions };
-
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
 
@@ -1815,6 +1807,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           case "message_end": {
             if (turn === null) return;
             const message = event["message"];
+            if (recordString(message, "role") === "custom") {
+              const failure = primeSessionCommandFailure(message, turn.sessionCommand);
+              if (failure !== undefined && turn.failure === null) {
+                turn.failure = makeProviderFailure({ message: failure, class: "provider_error" });
+              }
+              return;
+            }
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
@@ -1977,6 +1976,15 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             yield* emitExtensionError(event);
             return;
           }
+          case "refine_failed": {
+            // Self-started refinement also reports here; only a /refine turn owns it.
+            if (turn === null || turn.sessionCommand !== "refine" || turn.failure !== null) return;
+            turn.failure = makeProviderFailure({
+              message: recordString(event, "error") ?? "Prime refinement failed.",
+              class: "provider_error",
+            });
+            return;
+          }
           case "agent_end": {
             if (turn === null) return;
             if (turn.interrupted) {
@@ -2039,44 +2047,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           }
           case "response": {
             const command = recordString(event, "command");
-            if (command === "compact") {
-              const pendingCompact = pendingCompactResponses.shift();
-              const compactTurn =
-                pendingCompact?.providerTurnId === turn?.providerTurn.id ? turn : null;
-              if (compactTurn !== null) compactTurn.manualCompactInFlight = false;
-              if (event["success"] === true) {
-                if (
-                  pendingCompact?.kind === "turn_start" &&
-                  compactTurn !== null &&
-                  compactTurn.promptMayBeCommandOnly &&
-                  !compactTurn.sawAgentActivity
-                ) {
-                  yield* scheduleSettleProbe(compactTurn);
-                }
-                return;
-              }
-              if (event["success"] !== false) return;
-              if (compactTurn === null) return;
-              if (compactTurn.activeCompaction !== null) return;
-              if (pendingCompact?.kind === "steer") {
-                yield* Effect.logWarning("Prime rejected a compact steer.", {
-                  errorLength: recordString(event, "error")?.length,
-                });
-                return;
-              }
-              if (!compactTurn.sawCompaction) {
-                compactTurn.failure = makeProviderFailure({
-                  message: recordString(event, "error") ?? "Prime compact failed.",
-                  class: "provider_error",
-                });
-                if (state !== null) yield* finalizeTurn(state);
-                return;
-              }
-              if (!compactTurn.sawAgentActivity) {
-                yield* scheduleSettleProbe(compactTurn);
-              }
-              return;
-            }
             const pendingPrompt = command === "prompt" ? pendingPromptResponses.shift() : undefined;
             const responseTurn =
               pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
@@ -2597,13 +2567,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             // extension's before_agent_start system-prompt hook, never by
             // wrapping the user text: a wrapped first message would no
             // longer start with "/" and slash commands would stop expanding.
-            const compactCommand = continuation
+            const payload = continuation
               ? null
-              : parsePrimeCompactCommand(turnInput.message.text);
-            const payload =
-              !continuation && compactCommand === null
-                ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
-                : null;
+              : yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments);
             const startedAt = yield* DateTime.now;
             const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;
             const providerTurn: OrchestrationV2ProviderTurn = {
@@ -2636,8 +2602,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               nativeAborted: false,
               sawAgentActivity: false,
               adoptedWake: false,
-              promptMayBeCommandOnly:
-                compactCommand !== null || (payload?.message.trimStart().startsWith("/") ?? false),
+              promptMayBeCommandOnly: payload?.message.trimStart().startsWith("/") ?? false,
+              sessionCommand:
+                payload === null ? undefined : primeSessionCommandName(payload.message),
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
@@ -2645,7 +2612,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               sessionCommandSeen: false,
               sessionCommandDone: false,
               sawCompaction: false,
-              manualCompactInFlight: compactCommand !== null,
               activeCompaction: null,
               activeProviderRetry: null,
               failure: null,
@@ -2675,13 +2641,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               state.providerThread = turnInput.providerThread;
               state.activeTurn = activeTurn;
               activeTurn.adoptedWake = wake !== null && !continuation;
-              if (compactCommand !== null) {
-                yield* connection.send(compactRpcRecord(compactCommand));
-                pendingCompactResponses.push({
-                  providerTurnId: providerTurn.id,
-                  kind: "turn_start",
-                });
-              } else if (payload !== null) {
+              if (payload !== null) {
                 yield* connection.send({
                   type: "prompt",
                   message: payload.message,
@@ -2751,21 +2711,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (turn === null || turn.providerTurn.id !== steerInput.providerTurnId) {
               return yield* protocolError(`Prime turn ${steerInput.providerTurnId} is not active`);
             }
-            const compactCommand = parsePrimeCompactCommand(steerInput.message.text);
-            const payload =
-              compactCommand === null
-                ? yield* resolvePromptPayload(
-                    steerInput.message.text,
-                    steerInput.message.attachments,
-                  )
-                : null;
+            const payload = yield* resolvePromptPayload(
+              steerInput.message.text,
+              steerInput.message.attachments,
+            );
             // Prompt with streamingBehavior steer is atomic on Prime's side: it
             // queues during an active run and starts a new run if settlement
             // won the race. A direct `steer` sent after Prime became idle would
             // remain queued forever. Send fire-and-forget under the session
             // permit so a slash-command dialog cannot block the turn, and so
             // settlement cannot overtake the active-turn check.
-            // /compact is not a prompt: Prime's compact RPC aborts the agent first.
             yield* sessionEventPermit.withPermits(1)(
               Effect.gen(function* () {
                 if (threadState?.activeTurn !== turn) {
@@ -2773,25 +2728,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                     `Prime turn ${steerInput.providerTurnId} is not active`,
                   );
                 }
-                if (compactCommand !== null) {
-                  turn.manualCompactInFlight = true;
-                  yield* connection.send(compactRpcRecord(compactCommand));
-                  pendingCompactResponses.push({
-                    providerTurnId: turn.providerTurn.id,
-                    kind: "steer",
-                  });
-                } else if (payload !== null) {
-                  yield* connection.send({
-                    type: "prompt",
-                    message: payload.message,
-                    streamingBehavior: "steer",
-                    ...(payload.images.length === 0 ? {} : { images: payload.images }),
-                  });
-                  pendingPromptResponses.push({
-                    providerTurnId: turn.providerTurn.id,
-                    kind: "steer",
-                  });
-                }
+                yield* connection.send({
+                  type: "prompt",
+                  message: payload.message,
+                  streamingBehavior: "steer",
+                  ...(payload.images.length === 0 ? {} : { images: payload.images }),
+                });
+                pendingPromptResponses.push({
+                  providerTurnId: turn.providerTurn.id,
+                  kind: "steer",
+                });
                 turn.settleProbeGeneration += 1;
               }),
             );
@@ -2823,8 +2769,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (
               interruptInput.requestRuntimeRestart === true ||
               turn.sawAgentEnd ||
-              turn.activeCompaction !== null ||
-              turn.manualCompactInFlight
+              turn.activeCompaction !== null
             ) {
               // Prime's generic abort does not cancel manual compaction. Terminate
               // so Stop covers user /compact as well as detached recovery compact.

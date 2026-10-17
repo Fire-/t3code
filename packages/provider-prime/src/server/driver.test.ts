@@ -154,7 +154,7 @@ it.layer(layerTest)("PrimeDriver workspace discovery", (it) => {
       );
       assert.deepEqual(
         first.slashCommands.map((command) => command.name),
-        ["compact", "prompt-first"],
+        ["compact", "refine", "goal", "autonomous", "reload", "prompt-first"],
       );
       const machine = yield* instance.snapshot.getSnapshot;
       assert.deepEqual(
@@ -163,7 +163,7 @@ it.layer(layerTest)("PrimeDriver workspace discovery", (it) => {
       );
       assert.deepEqual(
         machine.slashCommands.map((command) => command.name),
-        ["compact"],
+        ["compact", "refine", "goal", "autonomous", "reload"],
       );
       assert.equal(first.instanceId, instance.instanceId);
       assert.equal(first.displayName, "My Prime");

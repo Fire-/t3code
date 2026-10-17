@@ -75,6 +75,8 @@ import { assertPiProviderThreadResumeOutput } from "./provider_thread_resume/pi_
 import { assertPrimeProviderThreadResumeOutput } from "./provider_thread_resume/prime_output.ts";
 import { primeApprovalInput } from "./prime_approval/input.ts";
 import { assertPrimeApprovalOutput } from "./prime_approval/prime_output.ts";
+import { primeSessionCommandInput } from "./prime_session_command/input.ts";
+import { assertPrimeSessionCommandOutput } from "./prime_session_command/prime_output.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { assertPiMultiTurnOutput } from "./multi_turn/pi_output.ts";
@@ -1687,6 +1689,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./prime_approval/prime_transcript.ndjson", import.meta.url),
         modelSelection: PRIME_MODEL_SELECTION,
         assertOutput: assertPrimeApprovalOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_session_command",
+    buildInput: primeSessionCommandInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_session_command/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeSessionCommandOutput,
       },
     ],
   },

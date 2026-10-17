@@ -50,6 +50,26 @@ export function isPrimeBusyRejection(error: string | undefined): boolean {
   );
 }
 
+/**
+ * Prime reports a failed session command only as its result row
+ * (core/agent-session.ts _executeQueuedSessionCommand); the prompt was
+ * already acked. Rows for other commands belong to other turns.
+ */
+export function primeSessionCommandFailure(
+  message: unknown,
+  sessionCommand: string | undefined,
+): string | undefined {
+  if (sessionCommand === undefined) return undefined;
+  if (recordString(message, "customType") !== "session_slash_command_result") return undefined;
+  const details = recordField(message, "details");
+  if (recordField(details, "success") !== false) return undefined;
+  if (recordString(recordField(details, "command"), "name") !== sessionCommand) return undefined;
+  return (
+    nonBlank(recordString(details, "error")) ??
+    nonBlank(primeContentText(recordField(message, "content"))) ??
+    `Prime /${sessionCommand} failed.`
+  );
+}
 export type PrimeFileChangeDetail = {
   readonly operation: string;
   readonly path: string;

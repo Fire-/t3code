@@ -1,34 +1,56 @@
 import { type ServerProviderSkill, type ServerProviderSlashCommand } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 
-// Prime RPC get_commands omits TUI builtins. Advertise /compact so T3 can map it to RPC compact.
-export const PRIME_COMPACT_SLASH_COMMAND: ServerProviderSlashCommand = {
-  name: "compact",
-  description: "Summarize the conversation and reduce context usage",
-  input: { hint: "Optional instructions" },
-};
+// Prime's built-in session commands (core/slash-commands.ts SESSION_SLASH_COMMAND_NAMES).
+// get_commands omits them, and Prime parses them from prompt text into session actions.
+export const PRIME_SESSION_SLASH_COMMANDS: ReadonlyArray<ServerProviderSlashCommand> = [
+  {
+    name: "compact",
+    description: "Compact the session context; optional instructions focus the summary",
+    input: { hint: "[instructions]" },
+  },
+  {
+    name: "refine",
+    description: "Refine continual harness prompt notes, skills, subagents, and memory",
+  },
+  {
+    name: "goal",
+    description: "Set or view a persistent goal; supports pause, resume, and clear",
+    input: { hint: "<objective|status|pause|resume|clear>" },
+  },
+  {
+    name: "autonomous",
+    description: "Set or view autonomous mode with an optional budget",
+    input: { hint: "on|off|status" },
+  },
+  {
+    name: "reload",
+    description: "Reload settings, auth, MCP servers, skills, prompts, and the runtime",
+  },
+];
 
-export interface PrimeCompactCommand {
-  readonly customInstructions?: string;
-}
+const PRIME_SESSION_COMMAND_NAMES: ReadonlySet<string> = new Set(
+  PRIME_SESSION_SLASH_COMMANDS.map((command) => command.name),
+);
 
-export function parsePrimeCompactCommand(text: string): PrimeCompactCommand | null {
-  const trimmed = text.trim();
-  if (trimmed === "/compact") return {};
-  if (!trimmed.startsWith("/compact")) return null;
-  const rest = trimmed.slice("/compact".length);
-  if (rest.length === 0) return {};
-  if (!/^\s/.test(rest)) return null;
-  const customInstructions = rest.trim();
-  return customInstructions.length === 0 ? {} : { customInstructions };
+/** Mirrors Prime's parseSessionSlashCommand: a leading `/name`, then whitespace or the end. */
+export function primeSessionCommandName(text: string): string | undefined {
+  const name = /^\/(\S+)(?:\s|$)/u.exec(text.trim())?.[1];
+  return name !== undefined && PRIME_SESSION_COMMAND_NAMES.has(name) ? name : undefined;
 }
 
 export function withPrimeBuiltinSlashCommands(
   commands: ReadonlyArray<ServerProviderSlashCommand>,
 ): ReadonlyArray<ServerProviderSlashCommand> {
-  return [PRIME_COMPACT_SLASH_COMMAND, ...commands.filter((command) => command.name !== "compact")];
+  const seen = new Set(PRIME_SESSION_COMMAND_NAMES);
+  const merged = [...PRIME_SESSION_SLASH_COMMANDS];
+  for (const command of commands) {
+    if (seen.has(command.name)) continue;
+    seen.add(command.name);
+    merged.push(command);
+  }
+  return merged;
 }
-
 export interface PrimeDiscoveredCommands {
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
