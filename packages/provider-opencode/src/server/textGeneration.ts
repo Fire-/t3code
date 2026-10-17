@@ -204,49 +204,67 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
             cwd: input.cwd,
           });
         }
+        const sessionId = session.data.id;
         const selectedAgent = getModelSelectionStringOptionValue(input.modelSelection, "agent");
         const selectedVariant = getModelSelectionStringOptionValue(input.modelSelection, "variant");
         const promptContext = {
           operation: input.operation,
           cwd: input.cwd,
-          sessionId: session.data.id,
+          sessionId,
           providerId: parsedModel.providerID,
           modelId: parsedModel.modelID,
         };
 
-        const result = yield* Effect.tryPromise({
-          try: () =>
-            client.session.prompt({
-              sessionID: session.data.id,
-              model: parsedModel,
-              ...(selectedAgent ? { agent: selectedAgent } : {}),
-              ...(selectedVariant ? { variant: selectedVariant } : {}),
-              parts: [{ type: "text", text: input.prompt }, ...fileParts],
-            }),
-          catch: (cause) =>
-            new OpenCodeTextGenerationPromptRequestError({
+        // The helper session exists only to satisfy session.prompt; opencode
+        // persists it in the user's session store, so delete it on every exit
+        // path (prime's --no-session is the parity point).
+        return yield* Effect.gen(function* () {
+          const result = yield* Effect.tryPromise({
+            try: () =>
+              client.session.prompt({
+                sessionID: sessionId,
+                model: parsedModel,
+                ...(selectedAgent ? { agent: selectedAgent } : {}),
+                ...(selectedVariant ? { variant: selectedVariant } : {}),
+                parts: [{ type: "text", text: input.prompt }, ...fileParts],
+              }),
+            catch: (cause) =>
+              new OpenCodeTextGenerationPromptRequestError({
+                ...promptContext,
+                cause,
+              }),
+          });
+          const promptFailure = getOpenCodePromptFailure(result.data?.info?.error);
+          if (promptFailure) {
+            return yield* new OpenCodeTextGenerationPromptResponseError({
               ...promptContext,
-              cause,
-            }),
-        });
-        const promptFailure = getOpenCodePromptFailure(result.data?.info?.error);
-        if (promptFailure) {
-          return yield* new OpenCodeTextGenerationPromptResponseError({
-            ...promptContext,
-            ...(promptFailure.name ? { providerErrorName: promptFailure.name } : {}),
-            providerMessage: promptFailure.message,
-          });
-        }
-        const responseParts = result.data?.parts ?? [];
-        const rawText = getOpenCodeTextResponse(responseParts);
-        if (rawText.length === 0) {
-          return yield* new OpenCodeTextGenerationEmptyOutputError({
-            ...promptContext,
-            responsePartCount: responseParts.length,
-            textPartCount: responseParts.filter(isOpenCodeTextPart).length,
-          });
-        }
-        return rawText;
+              ...(promptFailure.name ? { providerErrorName: promptFailure.name } : {}),
+              providerMessage: promptFailure.message,
+            });
+          }
+          const responseParts = result.data?.parts ?? [];
+          const rawText = getOpenCodeTextResponse(responseParts);
+          if (rawText.length === 0) {
+            return yield* new OpenCodeTextGenerationEmptyOutputError({
+              ...promptContext,
+              responsePartCount: responseParts.length,
+              textPartCount: responseParts.filter(isOpenCodeTextPart).length,
+            });
+          }
+          return rawText;
+        }).pipe(
+          Effect.ensuring(
+            Effect.tryPromise({
+              try: () => client.session.delete({ sessionID: sessionId }),
+              catch: (cause) =>
+                new OpenCodeTextGenerationSessionRequestError({
+                  operation: input.operation,
+                  cwd: input.cwd,
+                  cause,
+                }),
+            }).pipe(Effect.ignore),
+          ),
+        );
       },
       Effect.catchTags({
         OpenCodeTextGenerationSessionRequestError: (cause) =>
