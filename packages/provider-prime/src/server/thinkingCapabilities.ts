@@ -70,7 +70,9 @@ function clampPrimeThinkingLevel(
   return availableLevels[0];
 }
 
-function supportedPrimeThinkingLevelsFromModel(model: unknown): ReadonlyArray<PrimeThinkingLevel> {
+export function supportedPrimeThinkingLevelsFromModel(
+  model: unknown,
+): ReadonlyArray<PrimeThinkingLevel> {
   if (recordField(model, "reasoning") !== true) return [];
   const thinkingLevelMap = thinkingLevelMapFromModel(model);
   return PRIME_THINKING_LEVELS.filter((level) => {
