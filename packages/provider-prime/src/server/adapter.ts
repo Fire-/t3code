@@ -47,6 +47,8 @@ import {
   isPrimeBusyRejection,
   primeAgentEndErrorMessage,
   primeAgentEndFailed,
+  primeAutonomousContinuation,
+  primeAutonomousNotice,
   primeContentText as contentText,
   primeErrorMessage,
   primeHeartbeatNotification,
@@ -55,6 +57,7 @@ import {
   primeProviderGoal,
   primeSessionCommandFailure,
   primeToolItem,
+  type PrimeAutonomousContinuation,
 } from "./events.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -894,6 +897,75 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           },
         });
 
+      const emitSystemNotice = Effect.fnUntraced(function* (
+        turn: ActivePrimeTurn,
+        nativeItemId: string,
+        message: string,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PRIME_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            title: null,
+            completedAt: emittedAt,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      /** The agent wrote this prompt to itself, so it must never render as the user's words. */
+      const emitAutonomousContinuation = Effect.fnUntraced(function* (
+        turn: ActivePrimeTurn,
+        continuation: PrimeAutonomousContinuation,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `autonomous-continuation:${turn.nextItemOrdinal}`;
+        const messageId = idAllocator.derive.messageFromProviderItem({
+          driver: PRIME_PROVIDER,
+          nativeItemId,
+        });
+        yield* emit({
+          type: "message.updated",
+          driver: PRIME_PROVIDER,
+          message: {
+            id: messageId,
+            threadId: turn.turnInput.threadId,
+            runId: turn.turnInput.runId,
+            nodeId: turn.turnInput.rootNodeId,
+            role: "user",
+            text: continuation.text,
+            attachments: [],
+            streaming: false,
+            createdBy: "agent",
+            creationSource: "provider",
+            createdAt: emittedAt,
+            updatedAt: emittedAt,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PRIME_PROVIDER,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            nodeId: turn.turnInput.rootNodeId,
+            createdBy: "agent",
+            creationSource: "provider",
+            status: "completed",
+            title: continuation.title,
+            completedAt: emittedAt,
+            type: "user_message",
+            messageId,
+            inputIntent: "steer",
+            text: continuation.text,
+            attachments: [],
+          },
+        });
+      });
       const emitProviderRetry = Effect.fnUntraced(function* (
         turn: ActivePrimeTurn,
         providerRetry: PrimeProviderRetryState,
@@ -1867,7 +1939,22 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           case "message_end": {
             if (turn === null) return;
             const message = event["message"];
-            if (recordString(message, "role") === "custom") {
+            const role = recordString(message, "role");
+            if (role === "user") {
+              // Prime echoes every prompt and steer as a user message; only its
+              // own autonomous continuations become items.
+              const continuation = primeAutonomousContinuation(message);
+              if (continuation !== undefined) yield* emitAutonomousContinuation(turn, continuation);
+              return;
+            }
+            if (role === "custom") {
+              // Gate rows can arrive as bare message pairs between runs while the
+              // autonomous action keeps the turn open.
+              const notice = primeAutonomousNotice(message);
+              if (notice !== undefined) {
+                yield* emitSystemNotice(turn, `autonomous:${turn.nextItemOrdinal}`, notice);
+                return;
+              }
               const notification = primeHeartbeatNotification(message);
               if (notification !== undefined) {
                 const emittedAt = yield* DateTime.now;
@@ -1900,7 +1987,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               }
               return;
             }
-            if (recordString(message, "role") !== "assistant") return;
+            if (role !== "assistant") return;
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({

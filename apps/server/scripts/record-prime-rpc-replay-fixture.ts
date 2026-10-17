@@ -73,6 +73,7 @@ const PRIME_RECORDING_SCENARIOS: Readonly<Record<string, PrimeRecordingScenario>
   turn_interrupt_mid_tool: { bridge: false },
   prime_approval: { bridge: true, runtimeMode: "approval-required" },
   prime_session_command: { bridge: false },
+  prime_goal_autonomous: { bridge: false },
 };
 
 /** Model turns cost real credits, so only the two models agreed for fixtures may record. */
@@ -366,6 +367,18 @@ const makeRecordingWorkspace = (workspace: string, files: Readonly<Record<string
     }
     yield* runGit(workspace, ["add", "README.md", ...Object.keys(files)]);
     yield* runGit(workspace, ["commit", "-m", "initial"]);
+    // Prime's auto-refinement (on by default) can write memories into the
+    // recording user's global harness. Project settings switch it off; the
+    // exclude keeps the settings file out of `git status` and the
+    // autonomous gate's worktree snapshot.
+    yield* fs.makeDirectory(path.join(workspace, ".prime"), { recursive: true });
+    yield* fs.writeFileString(
+      path.join(workspace, ".prime", "settings.json"),
+      '{"autoRefine":{"enabled":false}}\n',
+    );
+    yield* fs.writeFileString(path.join(workspace, ".git", "info", "exclude"), ".prime/\n", {
+      flag: "a",
+    });
   });
 
 function withoutExtensionArgs(args: ReadonlyArray<string>): ReadonlyArray<string> {

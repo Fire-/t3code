@@ -131,6 +131,51 @@ export function primeHeartbeatNotification(
   };
 }
 
+/**
+ * Prime's autonomous continuation prompt (core/autonomous.ts). Continuations
+ * built by the hook carry `isAutonomousContinuation`; held ones from
+ * createAutonomousContinuationMessage carry only the text marker.
+ */
+const AUTONOMOUS_CONTINUATION_MARKER = /^\[autonomous-continuation(?::\s*([^\]]*?))?\s*\]/u;
+
+export interface PrimeAutonomousContinuation {
+  readonly reason: string | null;
+  readonly title: string;
+  readonly text: string;
+}
+
+export function primeAutonomousContinuation(
+  message: unknown,
+): PrimeAutonomousContinuation | undefined {
+  if (recordString(message, "role") !== "user") return undefined;
+  const text = primeContentText(recordField(message, "content"));
+  const marker = AUTONOMOUS_CONTINUATION_MARKER.exec(text);
+  if (marker === null && recordField(message, "isAutonomousContinuation") !== true) {
+    return undefined;
+  }
+  const reason = nonBlank(marker?.[1])?.trim() ?? null;
+  return {
+    reason,
+    title: reason === "gate-failed" ? "Autonomous gate failed" : "Autonomous continuation",
+    text,
+  };
+}
+
+/** Autonomous lifecycle rows (core/agent-session.ts _emitAutonomousEvent, _emitAutonomousStatus). */
+const AUTONOMOUS_NOTICE_TYPES = new Set([
+  "autonomous_gate_started",
+  "autonomous_gate_failed",
+  "autonomous_gate_passed",
+  "autonomous_stopped",
+  "autonomous_status",
+]);
+
+export function primeAutonomousNotice(message: unknown): string | undefined {
+  const customType = recordString(message, "customType");
+  if (customType === undefined || !AUTONOMOUS_NOTICE_TYPES.has(customType)) return undefined;
+  return nonBlank(primeContentText(recordField(message, "content")));
+}
+
 export type PrimeFileChangeDetail = {
   readonly operation: string;
   readonly path: string;

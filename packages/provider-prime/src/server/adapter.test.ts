@@ -6513,6 +6513,16 @@ describe("Prime settle engine", () => {
             ),
             "the autonomous continuation became a user bubble",
           );
+          const continuationItem = seen.findLast(
+            (event) => event.type === "turn_item.updated" && event.turnItem.type === "user_message",
+          );
+          assert.isTrue(
+            continuationItem?.type === "turn_item.updated" &&
+              continuationItem.turnItem.type === "user_message" &&
+              continuationItem.turnItem.providerTurnId === wake.providerTurnId &&
+              continuationItem.turnItem.text === AUTONOMOUS_CONTINUATION_PROMPT,
+            "the replayed continuation is a provider-created item on the wake turn",
+          );
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
@@ -6863,6 +6873,232 @@ describe("Prime settle engine", () => {
           assert.isTrue(
             threadUpdates.some((event) => (goalOf(event)?.status ?? null) === expected),
           );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("autonomous mode", () => {
+    const PROMPT = "Hello prime-agent";
+    /** core/autonomous.ts buildAutonomousGateFailureContinuation, minus the timestamp. */
+    const GATE_FAILED_CONTINUATION =
+      "[autonomous-continuation: gate-failed]\n\nAutonomous quality gate failed (attempt 1/3): `npm test` exited 1.\n\nOutput:\nFAIL src/x.test.ts\n\nContinue working. Fix the failure, then produce terminal evidence.";
+    const PLAIN_CONTINUATION =
+      "[autonomous-continuation]\n\nNo human input is available in autonomous mode.";
+    const GATE_NOTICES = [
+      ["autonomous_gate_started", "Autonomous gate: running `npm test` (attempt 1/3)…"],
+      ["autonomous_gate_failed", "Autonomous gate failed (attempt 1/3): `npm test` exited 1."],
+      ["autonomous_gate_started", "Autonomous gate: running `npm test` (attempt 2/3)…"],
+      ["autonomous_gate_passed", "Autonomous gate passed: `npm test`."],
+      ["autonomous_stopped", "Autonomous run complete: quality gates passed."],
+    ] as const;
+
+    /** Prime's autonomous lifecycle row (core/agent-session.ts _emitAutonomousEvent). */
+    const emitNotice = (fake: FakePrime, [customType, content]: readonly [string, string]) =>
+      emitCustomMessage(fake, { role: "custom", customType, content, display: true, details: {} });
+    const emitUserMessage = (fake: FakePrime, text: string, flagged: boolean) =>
+      Effect.gen(function* () {
+        const message = {
+          role: "user",
+          content: [{ type: "text", text }],
+          ...(flagged ? { isAutonomousContinuation: true } : {}),
+        };
+        yield* fake.emit({ type: "message_start", message });
+        yield* fake.emit({ type: "message_end", message });
+      });
+    const nextTerminal = (
+      record: (predicate: (event: AdapterEvent) => boolean) => Effect.Effect<AdapterEvent>,
+    ) =>
+      Effect.map(
+        record((event) => event.type === "turn.terminal"),
+        (event) => event as Extract<AdapterEvent, { type: "turn.terminal" }>,
+      );
+    const latestItems = (seen: ReadonlyArray<AdapterEvent>) => {
+      const items = new Map<
+        string,
+        Extract<AdapterEvent, { type: "turn_item.updated" }>["turnItem"]
+      >();
+      for (const event of seen) {
+        if (event.type === "turn_item.updated") items.set(event.turnItem.id, event.turnItem);
+      }
+      return [...items.values()];
+    };
+    const noticeTexts = (seen: ReadonlyArray<AdapterEvent>) =>
+      latestItems(seen).flatMap((item) => (item.type === "system_notice" ? [item.message] : []));
+    const assistantLegs = (seen: ReadonlyArray<AdapterEvent>) =>
+      latestItems(seen).flatMap((item) => (item.type === "assistant_message" ? [item.text] : []));
+    const continuationItems = (seen: ReadonlyArray<AdapterEvent>) =>
+      latestItems(seen).flatMap((item) => (item.type === "user_message" ? [item] : []));
+    const userRoleMessages = (seen: ReadonlyArray<AdapterEvent>) =>
+      seen.flatMap((event) =>
+        event.type === "message.updated" && event.message.role === "user" ? [event.message] : [],
+      );
+
+    it.effect(
+      "[VAL-AUTO-001] AUTONOMOUS: legs are assistant messages, gates are system notices, the continuation is provider-created, the echo is hidden, and the turn settles once after autonomous_stopped",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* open.begin(PROMPT);
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
+          yield* fake.emit({ type: "agent_start" });
+          yield* emitUserMessage(fake, PROMPT, false);
+          yield* replyText(fake, "first leg");
+          yield* emitNotice(fake, GATE_NOTICES[0]);
+          yield* emitNotice(fake, GATE_NOTICES[1]);
+          yield* emitUserMessage(fake, GATE_FAILED_CONTINUATION, true);
+          yield* replyText(fake, "second leg");
+          yield* emitNotice(fake, GATE_NOTICES[2]);
+          yield* emitNotice(fake, GATE_NOTICES[3]);
+          yield* emitNotice(fake, GATE_NOTICES[4]);
+          yield* fake.emit(agentEnd());
+          yield* pumpBarrier(fake, record, "after agent_end while the action is active");
+          assert.lengthOf(terminals(seen), 0, "the active autonomous action keeps the turn open");
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* nextTerminal(record);
+          assert.equal(terminal.status, "completed");
+          assert.lengthOf(terminals(seen), 1);
+
+          assert.deepEqual(assistantLegs(seen), ["first leg", "second leg"]);
+          assert.deepEqual(
+            noticeTexts(seen),
+            GATE_NOTICES.map(([, content]) => content),
+          );
+          const continuations = continuationItems(seen);
+          assert.lengthOf(continuations, 1);
+          const continuation = continuations[0]!;
+          assert.equal(continuation.text, GATE_FAILED_CONTINUATION);
+          assert.equal(continuation.title, "Autonomous gate failed");
+          assert.equal(continuation.status, "completed");
+          assert.equal(continuation.providerTurnId, providerTurnId);
+          const messages = userRoleMessages(seen);
+          assert.isNotEmpty(messages);
+          for (const message of messages) {
+            assert.equal(message.createdBy, "agent", "never a user bubble");
+            assert.equal(message.creationSource, "provider");
+            assert.equal(message.id, continuation.messageId);
+            assert.equal(message.text, GATE_FAILED_CONTINUATION);
+          }
+          assert.isFalse(
+            latestItems(seen).some((item) => JSON.stringify(item).includes(PROMPT)),
+            "the prompt echo produced an item",
+          );
+          const itemIndex = (predicate: (event: AdapterEvent) => boolean) =>
+            seen.findIndex(predicate);
+          const continuationIndex = itemIndex(
+            (event) => event.type === "turn_item.updated" && event.turnItem.type === "user_message",
+          );
+          assert.isTrue(itemIndex(isAssistantText("first leg")) < continuationIndex);
+          assert.isTrue(continuationIndex < itemIndex(isAssistantText("second leg")));
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      {
+        name: "a flagged gate-failed marker",
+        text: GATE_FAILED_CONTINUATION,
+        flagged: true,
+        title: "Autonomous gate failed",
+      },
+      {
+        name: "a plain flagged marker",
+        text: PLAIN_CONTINUATION,
+        flagged: true,
+        title: "Autonomous continuation",
+      },
+      {
+        name: "a held continuation with the text marker and no flag",
+        text: PLAIN_CONTINUATION,
+        flagged: false,
+        title: "Autonomous continuation",
+      },
+    ])(
+      "[VAL-AUTO-002] $name becomes one provider-created continuation item",
+      ({ text, flagged, title }) =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* open.begin(PROMPT);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "first leg");
+          yield* emitUserMessage(fake, text, flagged);
+          yield* replyText(fake, "second leg");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* nextTerminal(record);
+          assert.equal(terminal.status, "completed");
+          const continuations = continuationItems(seen);
+          assert.lengthOf(continuations, 1);
+          assert.equal(continuations[0]!.text, text);
+          assert.equal(continuations[0]!.title, title);
+          assert.isTrue(
+            userRoleMessages(seen).every(
+              (message) => message.createdBy === "agent" && message.creationSource === "provider",
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("[VAL-AUTO-002] an ordinary user message inside a run produces no item", () =>
+      Effect.gen(function* () {
+        const open = yield* openTurn();
+        const { fake, seen, record } = open;
+        yield* open.begin(PROMPT);
+        yield* fake.emit({ type: "agent_start" });
+        yield* emitUserMessage(fake, PROMPT, false);
+        yield* replyText(fake, "reply");
+        yield* fake.emit(agentEnd());
+        yield* nextTerminal(record);
+        assert.lengthOf(continuationItems(seen), 0);
+        assert.lengthOf(userRoleMessages(seen), 0);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-AUTO-003] gate notices arriving as bare message pairs between runs map onto the open turn, which settles once after autonomous_stopped",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openTurn();
+          const { fake, seen, record } = open;
+          yield* open.begin(PROMPT);
+          const providerTurnId = yield* runningTurnId(record);
+          yield* fake.setSessionActions(RUNNING_TURN_ACTIONS);
+          yield* fake.emit({ type: "agent_start" });
+          yield* replyText(fake, "first leg");
+          yield* fake.emit(agentEnd());
+          yield* emitNotice(fake, GATE_NOTICES[0]);
+          yield* emitNotice(fake, GATE_NOTICES[1]);
+          yield* pumpBarrier(fake, record, "after the bare gate failure");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.emit({ type: "agent_start" });
+          yield* emitUserMessage(fake, PLAIN_CONTINUATION, false);
+          yield* replyText(fake, "second leg");
+          yield* fake.emit(agentEnd());
+          yield* emitNotice(fake, GATE_NOTICES[2]);
+          yield* emitNotice(fake, GATE_NOTICES[3]);
+          yield* emitNotice(fake, GATE_NOTICES[4]);
+          yield* pumpBarrier(fake, record, "after autonomous_stopped");
+          assert.lengthOf(terminals(seen), 0);
+
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          const terminal = yield* nextTerminal(record);
+          assert.equal(terminal.status, "completed");
+          assert.lengthOf(terminals(seen), 1);
+          const notices = latestItems(seen).flatMap((item) =>
+            item.type === "system_notice" ? [item] : [],
+          );
+          assert.deepEqual(
+            notices.map((item) => item.message),
+            GATE_NOTICES.map(([, content]) => content),
+          );
+          for (const notice of notices) {
+            assert.equal(notice.providerTurnId, providerTurnId);
+            assert.equal(notice.status, "completed");
+          }
+          assert.deepEqual(assistantLegs(seen), ["first leg", "second leg"]);
+          assert.lengthOf(continuationItems(seen), 1);
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });

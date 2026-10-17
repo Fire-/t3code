@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   primeAgentEndErrorMessage,
+  primeAutonomousContinuation,
+  primeAutonomousNotice,
   primeHeartbeatNotification,
   primeIpythonFileChange,
   primeProviderGoal,
@@ -427,6 +429,93 @@ describe("primeHeartbeatNotification", () => {
   it("[VAL-CONT-009] ignores other custom messages", () => {
     assert.isUndefined(
       primeHeartbeatNotification({ role: "custom", customType: "goal_context", content: "x" }),
+    );
+  });
+});
+
+describe("primeAutonomousContinuation", () => {
+  const userText = (text: string, flagged: boolean) => ({
+    role: "user",
+    content: [{ type: "text", text }],
+    ...(flagged ? { isAutonomousContinuation: true } : {}),
+  });
+  const gateFailed =
+    "[autonomous-continuation: gate-failed]\n\nAutonomous quality gate failed (attempt 1/3): `npm test` exited 1.\n\nOutput:\nFAIL src/x.test.ts\n\nContinue working. Fix the failure, then produce terminal evidence.";
+
+  it("[VAL-AUTO-002] reads the gate-failed reason from a flagged continuation", () => {
+    assert.deepEqual(primeAutonomousContinuation(userText(gateFailed, true)), {
+      reason: "gate-failed",
+      title: "Autonomous gate failed",
+      text: gateFailed,
+    });
+  });
+
+  it("[VAL-AUTO-002] a plain marker is a generic continuation", () => {
+    const text = "[autonomous-continuation]\n\nNo human input is available in autonomous mode.";
+    assert.deepEqual(primeAutonomousContinuation(userText(text, true)), {
+      reason: null,
+      title: "Autonomous continuation",
+      text,
+    });
+  });
+
+  it("[VAL-AUTO-002] the text marker without the flag is still a continuation", () => {
+    assert.equal(primeAutonomousContinuation(userText(gateFailed, false))?.reason, "gate-failed");
+    assert.deepEqual(
+      primeAutonomousContinuation({
+        role: "user",
+        content: "[autonomous-continuation: subagent-keep-alive]\n\nCheck on the subagents.",
+      }),
+      {
+        reason: "subagent-keep-alive",
+        title: "Autonomous continuation",
+        text: "[autonomous-continuation: subagent-keep-alive]\n\nCheck on the subagents.",
+      },
+    );
+  });
+
+  it("[VAL-AUTO-002] the flag alone marks a continuation without a text marker", () => {
+    assert.deepEqual(primeAutonomousContinuation(userText("Keep going.", true)), {
+      reason: null,
+      title: "Autonomous continuation",
+      text: "Keep going.",
+    });
+  });
+
+  it("[VAL-AUTO-002] ignores ordinary user messages and other roles", () => {
+    assert.isUndefined(primeAutonomousContinuation(userText("Hello prime-agent", false)));
+    assert.isUndefined(
+      primeAutonomousContinuation(userText("see [autonomous-continuation] above", false)),
+    );
+    assert.isUndefined(
+      primeAutonomousContinuation({
+        role: "assistant",
+        content: [{ type: "text", text: "[autonomous-continuation]" }],
+      }),
+    );
+  });
+});
+
+describe("primeAutonomousNotice", () => {
+  it.each([
+    ["autonomous_gate_started", "Autonomous gate: running `npm test` (attempt 1/3)…"],
+    ["autonomous_gate_failed", "Autonomous gate failed (attempt 1/3): `npm test` exited 1."],
+    ["autonomous_gate_passed", "Autonomous gate passed: `npm test`."],
+    ["autonomous_stopped", "Autonomous run complete: quality gates passed."],
+    ["autonomous_status", "[autonomous-status: on]\n\nContinuations: 0/3."],
+  ])("[VAL-AUTO-003] %s becomes a notice with its text", (customType, content) => {
+    assert.equal(
+      primeAutonomousNotice({ role: "custom", customType, content, display: true, details: {} }),
+      content,
+    );
+  });
+
+  it("[VAL-AUTO-003] ignores other custom messages and blank content", () => {
+    assert.isUndefined(
+      primeAutonomousNotice({ role: "custom", customType: "session_slash_command", content: "/x" }),
+    );
+    assert.isUndefined(
+      primeAutonomousNotice({ role: "custom", customType: "autonomous_stopped", content: " " }),
     );
   });
 });
