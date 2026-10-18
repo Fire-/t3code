@@ -16,7 +16,7 @@ export const DROID_NOTIFICATION_METHOD = "droid.session_notification";
 export const JSON_RPC_METHOD_NOT_FOUND = -32601;
 export const JSON_RPC_INTERNAL_ERROR = -32603;
 
-export const DROID_INBOUND_REQUEST_METHODS = [
+const DROID_INBOUND_REQUEST_METHODS = [
   "droid.request_permission",
   "droid.ask_user",
   "droid.pick_options",
@@ -119,14 +119,6 @@ const NotificationParams = Schema.StructWithRest(
 );
 
 export const decodeDroidNotificationParams = Schema.decodeUnknownOption(NotificationParams);
-
-const ResponseError = Schema.Struct({
-  code: Schema.optional(Schema.Number),
-  message: Schema.optional(Schema.String),
-  data: Schema.optional(Schema.Unknown),
-});
-
-export const decodeDroidResponseError = Schema.decodeUnknownOption(ResponseError);
 
 const encodeJsonExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeJsonExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));

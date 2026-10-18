@@ -1,3 +1,4 @@
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   ProviderDriverKind,
@@ -279,6 +280,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
   options: DroidAdapterV2Options,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const agentScope = yield* AgentScope;
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -307,6 +309,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         binaryPath: options.settings.binaryPath || "droid",
         cwd,
         env: processEnvironment,
+        wrapLaunch: (launch) =>
+          agentScope.wrap({
+            ...launch,
+            name: "droid",
+            threadId: input.threadId,
+            env: processEnvironment,
+          }),
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),

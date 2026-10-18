@@ -29,12 +29,14 @@ import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import { AgentScope, type AgentScopeShape } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { DROID_PROVIDER, DroidAdapterV2Driver, makeDroidAdapterV2 } from "./adapter.ts";
@@ -446,6 +448,71 @@ describe("DroidAdapterV2", () => {
         assert.strictEqual(adapter.instanceId, DROID_INSTANCE_ID);
         assert.strictEqual(adapter.driver, DROID_PROVIDER);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("agent scope", () => {
+    it.effect(
+      "spawns the command and args AgentScope.wrap returns, named droid for the thread",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const launches: Array<ChildProcess.StandardCommand> = [];
+          const spawner = ChildProcessSpawner.make((command) => {
+            if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+            launches.push(command);
+            return fake.spawner.spawn(command);
+          });
+          const wrapped: Array<Parameters<AgentScopeShape["wrap"]>[0]> = [];
+          const agentScope: AgentScopeShape = {
+            ...AgentScope.defaultValue(),
+            wrap: (input) =>
+              Effect.sync(() => {
+                wrapped.push(input);
+                return {
+                  command: "scope-launcher",
+                  args: ["--unit", "droid-test.scope", "--", input.command, ...input.args],
+                };
+              }),
+          };
+          const adapter = yield* makeDroidAdapterV2({
+            instanceId: DROID_INSTANCE_ID,
+            settings: { enabled: true, binaryPath: "/opt/droid/bin/droid", customModels: [] },
+            environment: { PATH: "/opt/droid/bin" },
+          }).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(AgentScope, agentScope),
+          );
+          yield* adapter.openSession({
+            threadId: THREAD_ID,
+            providerSessionId: SESSION_ID,
+            modelSelection: selection(),
+            runtimePolicy: policy(),
+          });
+
+          assert.strictEqual(wrapped.length, 1);
+          const [request] = wrapped;
+          assert.strictEqual(request?.command, "/opt/droid/bin/droid");
+          assert.strictEqual(request?.name, "droid");
+          assert.strictEqual(request?.threadId, THREAD_ID);
+          assert.deepStrictEqual(request?.env, { PATH: "/opt/droid/bin" });
+          assert.deepStrictEqual(request?.args.slice(0, 5), [
+            "exec",
+            "--input-format",
+            "stream-jsonrpc",
+            "--output-format",
+            "stream-jsonrpc",
+          ]);
+          assert.strictEqual(launches.length, 1);
+          assert.strictEqual(launches[0]?.command, "scope-launcher");
+          assert.deepStrictEqual(launches[0]?.args, [
+            "--unit",
+            "droid-test.scope",
+            "--",
+            "/opt/droid/bin/droid",
+            ...(request?.args ?? []),
+          ]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 

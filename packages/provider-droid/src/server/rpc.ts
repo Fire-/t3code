@@ -25,6 +25,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
+import type { AgentScopeCommand } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
@@ -99,6 +100,11 @@ export interface DroidRpcRuntimeOptions {
   readonly cwd: string;
   /** Layered over the inherited environment, so `FACTORY_API_KEY` reaches Droid when it is set. */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * Rewrites the command line just before the spawn. The arguments name a settings file this
+   * runtime creates per spawn, so the caller cannot build the final command line in advance.
+   */
+  readonly wrapLaunch?: (launch: AgentScopeCommand) => Effect.Effect<AgentScopeCommand>;
   readonly grace?: Partial<DroidRpcGrace>;
 }
 
@@ -297,9 +303,9 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     .writeFileString(settingsPath, DROID_HOOKS_OFF_SETTINGS)
     .pipe(Effect.mapError(spawnError));
 
-  const spawnCommand = yield* resolveSpawnCommand(
-    options.binaryPath,
-    [
+  const launch: AgentScopeCommand = {
+    command: options.binaryPath,
+    args: [
       "exec",
       "--input-format",
       "stream-jsonrpc",
@@ -310,8 +316,12 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
       "--settings",
       settingsPath,
     ],
-    { ...(options.env ? { env: options.env } : {}), extendEnv: true },
-  );
+  };
+  const wrapped = options.wrapLaunch === undefined ? launch : yield* options.wrapLaunch(launch);
+  const spawnCommand = yield* resolveSpawnCommand(wrapped.command, wrapped.args, {
+    ...(options.env ? { env: options.env } : {}),
+    extendEnv: true,
+  });
   const child = yield* spawner
     .spawn(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
