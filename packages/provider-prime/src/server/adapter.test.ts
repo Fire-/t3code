@@ -55,7 +55,13 @@ import {
   primeRecordString,
   type PrimeRpcRecord,
 } from "./rpc.ts";
-import { primeContentText, primeUserEntriesFingerprint, primeUserEntryHash } from "./events.ts";
+import {
+  primeContentText,
+  primeTurnEntries,
+  primeTurnFingerprint,
+  primeUserEntryHash,
+  type PrimeTurnLead,
+} from "./events.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 import { turnItemOutputText } from "../../../client-runtime/src/work-log/itemDetail.ts";
 
@@ -200,6 +206,16 @@ const sessionCommandResult = (text: string, content: string, success = true, dis
   },
 });
 
+/** A refused rollback or fork carries Prime's typed refusal as its cause. */
+const boundaryRefusal = (
+  error: { readonly _tag: string; readonly cause?: unknown },
+  tag: string,
+) => {
+  assert.equal(error._tag, tag);
+  assert.equal(primeRecordString(error.cause, "_tag"), "PrimeRollbackBoundaryError");
+  return primeRecordString(error.cause, "message") ?? "";
+};
+
 const emitCustomMessage = (fake: FakePrime, message: Record<string, unknown>) =>
   Effect.gen(function* () {
     yield* fake.emit({ type: "message_start", message });
@@ -234,6 +250,7 @@ const recordedTurn = (
   providerThreadId: ProviderThreadId,
   ordinal: number,
   texts: ReadonlyArray<string>,
+  lead: PrimeTurnLead = texts.length > 0 ? "user" : "none",
 ): OrchestrationV2ProviderTurn => ({
   id: ProviderTurnId.make(`turn-${ordinal}`),
   providerThreadId,
@@ -243,7 +260,7 @@ const recordedTurn = (
     driver: PRIME_PROVIDER,
     nativeId: `${providerThreadId}:attempt:${ordinal}`,
     strength: "weak",
-    fingerprint: primeUserEntriesFingerprint(texts.map(primeUserEntryHash)),
+    fingerprint: primeTurnFingerprint({ lead, hashes: texts.map(primeUserEntryHash) }),
   },
   ordinal,
   status: "completed",
@@ -3054,12 +3071,16 @@ describe("PrimeAdapterV2", () => {
         assert.deepEqual(
           settled.map((turn) => [turn.nativeTurnRef?.strength, turn.nativeTurnRef?.fingerprint]),
           [
-            ["weak", primeUserEntriesFingerprint([primeUserEntryHash("first prompt")])],
             [
               "weak",
-              primeUserEntriesFingerprint(
-                ["second prompt", "second steer"].map(primeUserEntryHash),
-              ),
+              primeTurnFingerprint({ lead: "user", hashes: [primeUserEntryHash("first prompt")] }),
+            ],
+            [
+              "weak",
+              primeTurnFingerprint({
+                lead: "user",
+                hashes: ["second prompt", "second steer"].map(primeUserEntryHash),
+              }),
             ],
           ],
         );
@@ -3138,6 +3159,95 @@ describe("PrimeAdapterV2", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "[VAL-FORK-002] rolls back to the first discarded prompt even when a heartbeat continuation follows it",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.setForkMessages([
+          { entryId: "u1", text: "one" },
+          { entryId: "u2", text: "two" },
+        ]);
+        const turns = [
+          recordedTurn(providerThread.id, 1, ["one"]),
+          recordedTurn(providerThread.id, 2, ["two"]),
+          recordedTurn(providerThread.id, 3, [], "heartbeat"),
+          recordedTurn(providerThread.id, 4, []),
+        ];
+        const rolledBack = yield* runtime.rollbackThread({
+          providerThread,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint-1"),
+            appRunOrdinal: 1,
+            providerTurn: turns[0]!,
+          },
+          providerThreadTurns: turns,
+        });
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .filter((request) => request.type === "fork")
+            .map((request) => request.entryId),
+          ["u2"],
+        );
+        assert.equal(rolledBack.providerThread.nativeThreadRef?.nativeId, "/fake/fork-1.jsonl");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      label: "an idle heartbeat continuation",
+      lead: "heartbeat",
+      kind: "a heartbeat continuation",
+    },
+    { label: "a /goal objective run", lead: "goal", kind: "a goal run" },
+  ] as const)(
+    "[VAL-FORK-002] refuses a historical fork across $label without copying or forking the session",
+    ({ lead, kind }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePrime;
+        const forkFake = yield* makeFakePrime;
+        const { runtime } = yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, forkFake);
+        const source = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const sourceTurns = [
+          recordedTurn(source.id, 1, ["one"]),
+          recordedTurn(source.id, 2, [], lead),
+          recordedTurn(source.id, 3, ["three"]),
+        ];
+        forkFake.setForkMessages([
+          { entryId: "entry-1", text: "one" },
+          { entryId: "entry-2", text: "three" },
+        ]);
+        const error = yield* runtime
+          .forkThread({
+            sourceProviderThread: source,
+            sourceProviderTurns: sourceTurns,
+            providerTurnId: sourceTurns[0]!.id,
+            targetThreadId: ThreadId.make("fork-target"),
+          })
+          .pipe(Effect.flip);
+        const message = boundaryRefusal(error, "ProviderAdapterForkThreadError");
+        assert.include(message, `turn 2 (${kind})`);
+        assert.include(message, "The source thread is unchanged.");
+        assert.deepEqual(forkFake.lastSpawn().args, [], "no --fork copy of the source was made");
+        assert.isFalse(
+          fake.allRequests().some((request) => request.type === "fork" || request.type === "clone"),
+        );
+        yield* startTurn(runtime, source);
+        yield* fake.takeRequest("prompt");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
   it.effect("settles a command-only prompt from its deferred ack and idle probe", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePrime;
@@ -7332,6 +7442,151 @@ describe("Prime settle engine", () => {
           assert.isTrue(
             threadUpdates.some((event) => (goalOf(event)?.status ?? null) === expected),
           );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+    /** A prompt turn as Prime runs it: the prompt echoed as a user entry, then the reply. */
+    const promptTurn = (open: Open, prompt: string, runOrdinal: number) =>
+      Effect.gen(function* () {
+        yield* open.begin(prompt, runOrdinal);
+        yield* open.fake.emit({ type: "agent_start" });
+        yield* open.fake.emit({
+          type: "message_end",
+          message: { role: "user", content: [{ type: "text", text: prompt }] },
+        });
+        yield* replyText(open.fake, `reply to ${prompt}`);
+        yield* open.fake.emit(agentEnd());
+        assert.equal((yield* nextTerminal(open)).status, "completed");
+      });
+    const settledTurns = (seen: ReadonlyArray<AdapterEvent>) => {
+      const turns = new Map<string, OrchestrationV2ProviderTurn>();
+      for (const event of seen) {
+        if (event.type === "provider_turn.updated" && event.providerTurn.status === "completed") {
+          turns.set(event.providerTurn.id, event.providerTurn);
+        }
+      }
+      return [...turns.values()];
+    };
+    const leadOf = (turn: OrchestrationV2ProviderTurn) =>
+      primeTurnEntries(turn.nativeTurnRef?.fingerprint)?.lead;
+    const rollBackToFirst = (open: Open, turns: ReadonlyArray<OrchestrationV2ProviderTurn>) =>
+      open.runtime.rollbackThread({
+        providerThread: open.providerThread,
+        target: {
+          type: "provider_turn",
+          checkpointId: CheckpointId.make("checkpoint-1"),
+          appRunOrdinal: 1,
+          providerTurn: turns[0]!,
+        },
+        providerThreadTurns: turns,
+      });
+    const assertNoNativeRollback = (fake: FakePrime) => {
+      assert.notInclude(fake.commandLog(), "get_fork_messages");
+      assert.notInclude(fake.commandLog(), "fork");
+      assert.notInclude(fake.commandLog(), "clone");
+    };
+
+    it.effect(
+      "[VAL-FORK-002] refuses to roll back past a completed idle heartbeat continuation, sends no fork, and keeps the session usable",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake } = open;
+          yield* promptTurn(open, "Watch the build", 1);
+          yield* fake.emit({ type: "agent_start" });
+          yield* open.takeOffer;
+          yield* emitCustomMessage(fake, heartbeatPrompt);
+          yield* replyText(fake, "Build is green");
+          yield* fake.emit(agentEnd());
+          yield* bufferedRunEnded(open);
+          yield* open.adopt(2);
+          assert.equal((yield* nextTerminal(open)).status, "completed");
+
+          const turns = settledTurns(open.seen);
+          assert.deepEqual(turns.map(leadOf), ["user", "heartbeat"]);
+          const error = yield* rollBackToFirst(open, turns).pipe(Effect.flip);
+          const message = boundaryRefusal(error, "ProviderAdapterRollbackThreadError");
+          assert.include(message, "Prime cannot roll back past turn 2 (a heartbeat continuation)");
+          assert.include(message, "The thread is unchanged.");
+          assertNoNativeRollback(fake);
+
+          yield* open.begin("Still there?", 3);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-FORK-002] refuses to roll back past a /goal objective run, whose goal context reaches the model before any user entry",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake } = open;
+          yield* promptTurn(open, "Prepare the release", 1);
+          yield* open.begin(GOAL_COMMAND, 2);
+          yield* fake.setSessionActions({
+            ...IDLE_ACTIONS,
+            active: { kind: "session_command", phase: "running", label: GOAL_COMMAND },
+          });
+          yield* emitCustomMessage(fake, sessionCommandEcho(GOAL_COMMAND));
+          yield* fake.emit({ type: "goal_update", goal: primeGoal("active") });
+          // Live order (prime_goal_autonomous): the harness digest, then the goal context.
+          yield* fake.emit({ type: "agent_start" });
+          yield* emitCustomMessage(fake, {
+            role: "custom",
+            customType: "harness_digest",
+            content: "<harness-digest>",
+            display: false,
+          });
+          yield* emitCustomMessage(fake, {
+            role: "custom",
+            customType: "goal_context",
+            content: "[goal: continuation]\n\nship the release",
+            display: true,
+          });
+          yield* replyText(fake, "Working on the goal");
+          yield* fake.emit(agentEnd());
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          assert.equal((yield* nextTerminal(open)).status, "completed");
+
+          const turns = settledTurns(open.seen);
+          assert.deepEqual(turns.map(leadOf), ["user", "goal"]);
+          const error = yield* rollBackToFirst(open, turns).pipe(Effect.flip);
+          const message = boundaryRefusal(error, "ProviderAdapterRollbackThreadError");
+          assert.include(message, "turn 2 (a goal run)");
+          assertNoNativeRollback(fake);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-FORK-002] rolls back past a /goal status turn without a fork, because its command rows never reach the model",
+      () =>
+        Effect.gen(function* () {
+          const open = yield* openWake();
+          const { fake, providerThread } = open;
+          yield* promptTurn(open, "Prepare the release", 1);
+          yield* startTurn(
+            open.runtime,
+            providerThread,
+            "default",
+            [],
+            "/goal status",
+            undefined,
+            2,
+          );
+          yield* fake.takeRequest("prompt");
+          yield* fake.acceptSessionCommand("/goal status");
+          yield* emitCustomMessage(fake, sessionCommandEcho("/goal status"));
+          yield* fake.emit({ type: "goal_update", goal: IDLE_GOAL });
+          yield* emitCustomMessage(fake, sessionCommandResult("/goal status", "No active goal."));
+          yield* fake.setSessionActions(IDLE_ACTIONS);
+          assert.equal((yield* nextTerminal(open)).status, "completed");
+
+          const turns = settledTurns(open.seen);
+          assert.deepEqual(turns.map(leadOf), ["user", "none"]);
+          const rolledBack = yield* rollBackToFirst(open, turns);
+          assert.equal(
+            rolledBack.providerThread.nativeThreadRef?.nativeId,
+            providerThread.nativeThreadRef?.nativeId,
+          );
+          assertNoNativeRollback(fake);
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });

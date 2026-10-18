@@ -6,19 +6,21 @@ import {
   primeAutonomousNotice,
   primeCustomMessageHidden,
   primeCustomMessageNotice,
-  primeDiscardedUserEntries,
+  primeDiscardedHistory,
   primeForkBoundary,
   primeForkMessages,
   primeHeartbeatNotification,
   primeIpythonFileChange,
+  primeMessageLead,
   primeProviderGoal,
   primeIpythonUpdate,
   primeRlmChildSignature,
   primeRlmChildView,
   primeToolItem,
-  primeUserEntriesFingerprint,
+  primeTurnEntries,
+  primeTurnFingerprint,
   primeUserEntryHash,
-  primeUserEntryHashes,
+  type PrimeTurnLead,
 } from "./events.ts";
 import type { PrimeRlmChild } from "./rpc.ts";
 
@@ -717,23 +719,193 @@ describe("primeRlmChildSignature", () => {
 });
 
 describe("primeForkBoundary", () => {
-  const turn = (ordinal: number, texts: ReadonlyArray<string> | undefined) => ({
+  const turn = (
+    ordinal: number,
+    texts: ReadonlyArray<string> | undefined,
+    lead: PrimeTurnLead = texts !== undefined && texts.length > 0 ? "user" : "none",
+  ) => ({
     ordinal,
     nativeTurnRef:
       texts === undefined
         ? { fingerprint: undefined }
-        : { fingerprint: primeUserEntriesFingerprint(texts.map(primeUserEntryHash)) },
+        : { fingerprint: primeTurnFingerprint({ lead, hashes: texts.map(primeUserEntryHash) }) },
   });
   const messages = (...texts: ReadonlyArray<string>) =>
     texts.map((text, index) => ({ entryId: `entry-${index}`, text }));
 
-  it("round-trips the user entries fingerprint and ignores foreign refs", () => {
+  it("round-trips the turn entries fingerprint and ignores foreign refs", () => {
     const hashes = ["alpha", "bravo"].map(primeUserEntryHash);
-    assert.deepEqual(primeUserEntryHashes(primeUserEntriesFingerprint(hashes)), hashes);
-    assert.deepEqual(primeUserEntryHashes(primeUserEntriesFingerprint([])), []);
-    assert.isUndefined(primeUserEntryHashes("u1"));
-    assert.isUndefined(primeUserEntryHashes(undefined));
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "user", hashes })), {
+      lead: "user",
+      hashes,
+    });
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "none", hashes: [] })), {
+      lead: "none",
+      hashes: [],
+    });
+    assert.isUndefined(primeTurnEntries("u1"));
+    assert.isUndefined(primeTurnEntries(undefined));
     assert.notEqual(primeUserEntryHash("alpha"), primeUserEntryHash("alphb"));
+  });
+
+  it("[VAL-FORK-002] records the turn's leading history kind and rejects refs without it", () => {
+    const hash = primeUserEntryHash("steer");
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "heartbeat", hashes: [] })), {
+      lead: "heartbeat",
+      hashes: [],
+    });
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "goal", hashes: [hash] })), {
+      lead: "goal",
+      hashes: [hash],
+    });
+    // The first format carried no leading-history marker.
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v1:${hash}`));
+    assert.isUndefined(primeTurnEntries("prime-user-entries:v1:none"));
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v2:${hash}`));
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v2:sideways:${hash}`));
+    // A user lead needs a user entry; a turn with none added no user entry.
+    assert.isUndefined(primeTurnEntries("prime-user-entries:v2:user:none"));
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v2:none:${hash}`));
+  });
+
+  it.each<{ name: string; message: Record<string, unknown>; lead: PrimeTurnLead | undefined }>([
+    { name: "a user prompt", message: { role: "user", content: "hi" }, lead: "user" },
+    {
+      name: "an image-only user message",
+      message: { role: "user", content: [{ type: "image", data: "", mimeType: "image/png" }] },
+      lead: "output",
+    },
+    { name: "an assistant reply", message: { role: "assistant", content: [] }, lead: "output" },
+    { name: "a tool result", message: { role: "toolResult", content: [] }, lead: "output" },
+    {
+      name: "a heartbeat prompt",
+      message: { role: "custom", customType: "heartbeat_prompt", display: true },
+      lead: "heartbeat",
+    },
+    {
+      name: "a goal context",
+      message: { role: "custom", customType: "goal_context", display: true },
+      lead: "goal",
+    },
+    {
+      name: "an autonomous status row",
+      message: { role: "custom", customType: "autonomous_status", display: true },
+      lead: "autonomous",
+    },
+    {
+      name: "a hidden ipython state notice",
+      message: { role: "custom", customType: "ipython_state", display: false },
+      lead: "notice",
+    },
+    {
+      name: "a refinement notice",
+      message: { role: "custom", customType: "refinement_notice", display: false },
+      lead: "notice",
+    },
+    {
+      name: "a session command echo",
+      message: { role: "custom", customType: "session_slash_command", display: true },
+      lead: undefined,
+    },
+    {
+      name: "a session command result",
+      message: { role: "custom", customType: "session_slash_command_result", display: true },
+      lead: undefined,
+    },
+    {
+      name: "a compaction outcome",
+      message: { role: "custom", customType: "compaction_outcome", display: true },
+      lead: undefined,
+    },
+    {
+      name: "an MCP connection outcome",
+      message: { role: "custom", customType: "mcp_connection_outcome", display: true },
+      lead: undefined,
+    },
+    {
+      name: "a refinement outcome",
+      message: { role: "custom", customType: "refinement_outcome", display: true },
+      lead: undefined,
+    },
+    {
+      name: "the harness digest",
+      message: { role: "custom", customType: "harness_digest", display: false },
+      lead: undefined,
+    },
+    {
+      name: "a bash execution kept out of context",
+      message: { role: "bashExecution", excludeFromContext: true },
+      lead: undefined,
+    },
+    { name: "a bash execution", message: { role: "bashExecution" }, lead: "output" },
+  ])("[VAL-FORK-002] classifies $name by whether it reaches the model", ({ message, lead }) => {
+    assert.equal(primeMessageLead(message), lead);
+  });
+
+  it("[VAL-FORK-002] plans rollback from the first discarded turn that added model-visible history", () => {
+    const turns = [turn(1, ["a"]), turn(2, ["b", "steer"]), turn(3, [])];
+    assert.deepEqual(primeDiscardedHistory(turns, 1), { type: "fork" });
+    assert.deepEqual(primeDiscardedHistory(turns, 2), { type: "none" });
+    assert.deepEqual(primeDiscardedHistory([...turns, turn(4, undefined)], 1), {
+      type: "unknown",
+      ordinal: 4,
+    });
+    const heartbeat = turn(3, [], "heartbeat");
+    assert.deepEqual(primeDiscardedHistory([turn(1, ["a"]), turn(2, ["b"]), heartbeat], 1), {
+      type: "fork",
+    });
+    assert.deepEqual(primeDiscardedHistory([turn(1, ["a"]), turn(2, []), heartbeat], 1), {
+      type: "stranded",
+      ordinal: 3,
+      lead: "heartbeat",
+    });
+    assert.deepEqual(
+      primeDiscardedHistory([turn(1, ["a"]), turn(2, ["goal steer"], "goal"), turn(3, ["c"])], 1),
+      { type: "stranded", ordinal: 2, lead: "goal" },
+    );
+  });
+
+  it("[VAL-FORK-002] refuses a cut that would keep a discarded turn's history before its first user entry", () => {
+    // Trailing heartbeat: no user entry to cut at, so keep_all would retain it.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a"),
+        turns: [turn(1, ["a"]), turn(2, [], "heartbeat")],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "stranded", ordinal: 2, lead: "heartbeat" },
+    );
+    // A cut before turn 3's prompt would keep turn 2's heartbeat history.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a", "c"),
+        turns: [turn(1, ["a"]), turn(2, [], "heartbeat"), turn(3, ["c"])],
+        boundaryOrdinal: 1,
+        skipUnmatched: true,
+      }),
+      { type: "stranded", ordinal: 2, lead: "heartbeat" },
+    );
+    // A user entry after the turn's leading history is no clean cut either.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a", "steer"),
+        turns: [turn(1, ["a"]), turn(2, ["steer"], "goal")],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "stranded", ordinal: 2, lead: "goal" },
+    );
+    // A heartbeat after the first discarded prompt goes with the cut.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a", "b"),
+        turns: [turn(1, ["a"]), turn(2, ["b"]), turn(3, [], "heartbeat")],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "fork", entryId: "entry-1" },
+    );
   });
 
   it("reads get_fork_messages and rejects a malformed reply", () => {
@@ -742,13 +914,6 @@ describe("primeForkBoundary", () => {
     ]);
     assert.isUndefined(primeForkMessages({ messages: [{ entryId: "4c2b59bf" }] }));
     assert.isUndefined(primeForkMessages(undefined));
-  });
-
-  it("counts discarded user entries and flags a turn without a fingerprint", () => {
-    const turns = [turn(1, ["a"]), turn(2, ["b", "steer"]), turn(3, [])];
-    assert.equal(primeDiscardedUserEntries(turns, 1), 2);
-    assert.equal(primeDiscardedUserEntries(turns, 2), 0);
-    assert.isUndefined(primeDiscardedUserEntries([...turns, turn(4, undefined)], 1));
   });
 
   it("forks before the first discarded turn's prompt, counting steers and command-only turns", () => {

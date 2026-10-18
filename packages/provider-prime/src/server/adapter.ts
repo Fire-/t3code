@@ -52,21 +52,25 @@ import {
   primeCustomMessageHidden,
   primeCustomMessageNotice,
   primeContentText as contentText,
-  primeDiscardedUserEntries,
+  primeDiscardedHistory,
   primeForkBoundary,
   primeForkMessages,
   primeErrorMessage,
   primeHeartbeatNotification,
   primeIpythonFileChange,
   primeIpythonUpdate,
+  primeMessageLead,
   primeProviderGoal,
   primeRlmChildSignature,
   primeRlmChildView,
   primeSessionCommandFailure,
   primeToolItem,
-  primeUserEntriesFingerprint,
+  primeTurnFingerprint,
   primeUserEntryHash,
+  PRIME_STRANDED_LEADS,
   type PrimeAutonomousContinuation,
+  type PrimeStrandedLead,
+  type PrimeTurnLead,
 } from "./events.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -153,6 +157,37 @@ class PrimeSessionLeaseConflictError extends Schema.TaggedError<PrimeSessionLeas
 ) {
   override get message(): string {
     return `Prime session ${this.sessionId} is still open in another prime-agent process. Stop it with \`prime-agent stop ${this.sessionId}\` and try again.`;
+  }
+}
+
+const PRIME_STRANDED_HISTORY: Record<PrimeStrandedLead, string> = {
+  heartbeat: "a heartbeat continuation",
+  goal: "a goal run",
+  autonomous: "an autonomous-mode update",
+  notice: "a Prime notice",
+  output: "agent output",
+};
+
+/**
+ * Prime's RPC `fork` cuts only before a user entry (modes/rpc/rpc-mode.ts
+ * "fork", core/agent-session-runtime.ts fork), and RPC mode has no command
+ * that cuts after any other entry. Travels as the cause of
+ * ProviderAdapterRollbackThreadError or ProviderAdapterForkThreadError.
+ */
+class PrimeRollbackBoundaryError extends Schema.TaggedError<PrimeRollbackBoundaryError>()(
+  "PrimeRollbackBoundaryError",
+  {
+    operation: Schema.Literals(["rollback", "fork"]),
+    turnOrdinal: Schema.Number,
+    lead: Schema.Literals(PRIME_STRANDED_LEADS),
+  },
+) {
+  override get message(): string {
+    const turn = `turn ${this.turnOrdinal} (${PRIME_STRANDED_HISTORY[this.lead]})`;
+    const reason = `that turn added to the conversation before any user message, and Prime can only cut its session before a user message`;
+    return this.operation === "rollback"
+      ? `Prime cannot roll back past ${turn}: ${reason}. The thread is unchanged.`
+      : `Prime cannot fork from before ${turn}: ${reason}. The source thread is unchanged.`;
   }
 }
 
@@ -466,6 +501,8 @@ interface ActivePrimeTurn {
   readonly sessionCommands: Set<string>;
   /** Hashes of the user entries this turn added to the session, in order. */
   readonly userEntryHashes: Array<string>;
+  /** The first model-visible message this turn added; rollback can cut cleanly only before a user entry. */
+  historyLead: Exclude<PrimeTurnLead, "none"> | null;
   latestCompactionAfterTokens: number | null;
   lastLiveUsedTokens: number | null;
   /** Bumped by every transition that can make an in-flight `get_state` probe stale. */
@@ -1685,7 +1722,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             ? null
             : {
                 ...turn.providerTurn.nativeTurnRef,
-                fingerprint: primeUserEntriesFingerprint(turn.userEntryHashes),
+                fingerprint: primeTurnFingerprint({
+                  lead: turn.historyLead ?? "none",
+                  hashes: turn.userEntryHashes,
+                }),
               };
         const tokenUsage = readUsage
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
@@ -2102,6 +2142,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (turn === null) return;
             const message = event["message"];
             const role = recordString(message, "role");
+            const lead = primeMessageLead(message);
+            if (turn.historyLead === null && lead !== undefined) turn.historyLead = lead;
             if (role === "user") {
               const text = contentText(recordField(message, "content"));
               if (text.length > 0) turn.userEntryHashes.push(primeUserEntryHash(text));
@@ -3000,6 +3042,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 initialSessionCommand === undefined ? [] : [initialSessionCommand],
               ),
               userEntryHashes: [],
+              historyLead: null,
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
@@ -3344,17 +3387,24 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (pendingWake !== null) {
               return yield* protocolError("Cannot roll back while native Prime work awaits a turn");
             }
-            const discardedEntries = primeDiscardedUserEntries(
+            const discarded = primeDiscardedHistory(
               rollbackInput.providerThreadTurns,
               rollbackBoundaryOrdinal(rollbackInput.target),
             );
-            if (discardedEntries === 0) {
-              return primeThreadSnapshot(state.providerThread);
-            }
-            if (discardedEntries === undefined) {
+            if (discarded.type === "unknown") {
               return yield* protocolError(
                 "Prime rollback crosses a turn with no recorded session entries",
               );
+            }
+            if (discarded.type === "stranded") {
+              return yield* new PrimeRollbackBoundaryError({
+                operation: "rollback",
+                turnOrdinal: discarded.ordinal,
+                lead: discarded.lead,
+              });
+            }
+            if (discarded.type === "none") {
+              return primeThreadSnapshot(state.providerThread);
             }
             return yield* Effect.acquireUseRelease(
               sessionEventPermit.withPermits(1)(
@@ -3392,6 +3442,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                     skipUnmatched: false,
                   });
                   if (boundary.type === "error") return yield* protocolError(boundary.message);
+                  if (boundary.type === "stranded")
+                    return yield* new PrimeRollbackBoundaryError({
+                      operation: "rollback",
+                      turnOrdinal: boundary.ordinal,
+                      lead: boundary.lead,
+                    });
                   if (boundary.type === "keep_all")
                     return yield* protocolError(
                       "Prime session has none of the rolled-back turns' entries",
@@ -3487,13 +3543,19 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             if (forkInput.providerTurnId !== undefined && target === undefined) {
               return yield* protocolError("Prime fork target turn is missing");
             }
-            if (
-              target !== undefined &&
-              primeDiscardedUserEntries(sourceTurns, target.ordinal) === undefined
-            ) {
+            const discarded =
+              target === undefined ? undefined : primeDiscardedHistory(sourceTurns, target.ordinal);
+            if (discarded?.type === "unknown") {
               return yield* protocolError(
                 "Prime fork source has a turn with no recorded session entries",
               );
+            }
+            if (discarded?.type === "stranded") {
+              return yield* new PrimeRollbackBoundaryError({
+                operation: "fork",
+                turnOrdinal: discarded.ordinal,
+                lead: discarded.lead,
+              });
             }
             // CLI --fork uses Prime's own session format and sets the destination cwd. RPC
             // switch_session/clone alone would retain the source cwd.
@@ -3532,6 +3594,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                     skipUnmatched: true,
                   });
                   if (boundary.type === "error") return yield* protocolError(boundary.message);
+                  if (boundary.type === "stranded") {
+                    return yield* new PrimeRollbackBoundaryError({
+                      operation: "fork",
+                      turnOrdinal: boundary.ordinal,
+                      lead: boundary.lead,
+                    });
+                  }
                   if (boundary.type === "fork") {
                     const result = yield* forkConnection.request({
                       type: "fork",

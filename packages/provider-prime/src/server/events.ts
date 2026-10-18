@@ -578,7 +578,74 @@ export function primeRlmChildSignature(child: PrimeRlmChild): string {
   ]);
 }
 
-const USER_ENTRIES_FINGERPRINT_PREFIX = "prime-user-entries:v1:";
+const TURN_ENTRIES_FINGERPRINT_PREFIX = "prime-user-entries:v2:";
+
+/**
+ * What a turn's model-visible native history began with: a user entry, nothing
+ * at all, or another kind of message. Prime's `fork` cuts only before a user
+ * entry, so history of any other kind ahead of a turn's first user entry
+ * cannot be removed natively.
+ */
+export const PRIME_STRANDED_LEADS = [
+  "heartbeat",
+  "goal",
+  "autonomous",
+  "notice",
+  "output",
+] as const;
+export type PrimeStrandedLead = (typeof PRIME_STRANDED_LEADS)[number];
+export type PrimeTurnLead = "user" | "none" | PrimeStrandedLead;
+const TURN_LEADS: ReadonlySet<string> = new Set(["user", "none", ...PRIME_STRANDED_LEADS]);
+const isTurnLead = (value: string): value is PrimeTurnLead => TURN_LEADS.has(value);
+const isStrandedLead = (lead: PrimeTurnLead | undefined): lead is PrimeStrandedLead =>
+  lead !== undefined && lead !== "user" && lead !== "none";
+
+export interface PrimeTurnEntries {
+  readonly lead: PrimeTurnLead;
+  readonly hashes: ReadonlyArray<string>;
+}
+
+/**
+ * Custom rows Prime keeps out of the model's context (core/messages.ts
+ * convertToLlm). The harness digest does reach the model, but it describes
+ * the user's Prime harness rather than the conversation, and Prime replaces
+ * it whenever it goes stale (core/agent-session.ts _appendHarnessDigestIfStale)
+ * and builds context from the newest copy only (core/session-manager.ts
+ * buildSessionContext), so a copy kept across a cut holds nothing T3 discarded.
+ */
+const CONTEXT_EXCLUDED_CUSTOM_TYPES = new Set([
+  "session_slash_command",
+  "session_slash_command_result",
+  "compaction_outcome",
+  "mcp_connection_outcome",
+  "refinement_outcome",
+  "harness_digest",
+]);
+
+/**
+ * Classifies a persisted message by whether it reaches the model, following
+ * core/messages.ts convertToLlm: custom messages count whatever their
+ * `display` flag. `user` marks a user entry `get_fork_messages` lists.
+ */
+export function primeMessageLead(message: unknown): Exclude<PrimeTurnLead, "none"> | undefined {
+  switch (recordString(message, "role")) {
+    case "user":
+      return primeContentText(recordField(message, "content")).length > 0 ? "user" : "output";
+    case "custom": {
+      const customType = recordString(message, "customType");
+      if (customType === undefined) return "notice";
+      if (CONTEXT_EXCLUDED_CUSTOM_TYPES.has(customType)) return undefined;
+      if (customType === "heartbeat_prompt") return "heartbeat";
+      if (customType === "goal_context") return "goal";
+      if (AUTONOMOUS_NOTICE_TYPES.has(customType)) return "autonomous";
+      return "notice";
+    }
+    case "bashExecution":
+      return recordField(message, "excludeFromContext") === true ? undefined : "output";
+    default:
+      return "output";
+  }
+}
 
 /** FNV-1a: a short stable digest, so a turn's ref carries no prompt text. */
 export function primeUserEntryHash(text: string): string {
@@ -591,23 +658,31 @@ export function primeUserEntryHash(text: string): string {
 }
 
 /**
- * Records which user entries a turn added to the Prime session, in order:
- * Prime's `get_fork_messages` lists exactly the persisted user messages that
- * have text (core/agent-session.ts getUserMessagesForForking), and a T3 turn
- * adds zero (a session command) or more (prompt, steers, continuations).
+ * Records which user entries a turn added to the Prime session, in order, and
+ * what its model-visible history began with. Prime's `get_fork_messages` lists
+ * exactly the persisted user messages that have text (core/agent-session.ts
+ * getUserMessagesForForking), and a T3 turn adds zero (a session command, a
+ * heartbeat) or more (prompt, steers, continuations).
  */
-export function primeUserEntriesFingerprint(hashes: ReadonlyArray<string>): string {
-  return `${USER_ENTRIES_FINGERPRINT_PREFIX}${hashes.length === 0 ? "none" : hashes.join(".")}`;
+export function primeTurnFingerprint(entries: PrimeTurnEntries): string {
+  const hashes = entries.hashes.length === 0 ? "none" : entries.hashes.join(".");
+  return `${TURN_ENTRIES_FINGERPRINT_PREFIX}${entries.lead}:${hashes}`;
 }
 
-export function primeUserEntryHashes(
-  fingerprint: string | undefined,
-): ReadonlyArray<string> | undefined {
-  if (fingerprint === undefined || !fingerprint.startsWith(USER_ENTRIES_FINGERPRINT_PREFIX)) {
+export function primeTurnEntries(fingerprint: string | undefined): PrimeTurnEntries | undefined {
+  if (fingerprint === undefined || !fingerprint.startsWith(TURN_ENTRIES_FINGERPRINT_PREFIX)) {
     return undefined;
   }
-  const body = fingerprint.slice(USER_ENTRIES_FINGERPRINT_PREFIX.length);
-  return body === "none" ? [] : body.split(".");
+  const body = fingerprint.slice(TURN_ENTRIES_FINGERPRINT_PREFIX.length);
+  const separator = body.indexOf(":");
+  const lead = body.slice(0, separator);
+  if (separator < 0 || !isTurnLead(lead)) return undefined;
+  const list = body.slice(separator + 1);
+  const hashes = list === "none" ? [] : list.split(".");
+  if ((lead === "user" && hashes.length === 0) || (lead === "none" && hashes.length > 0)) {
+    return undefined;
+  }
+  return { lead, hashes };
 }
 
 export interface PrimeForkMessage {
@@ -633,25 +708,51 @@ interface PrimeBoundaryTurn {
   readonly nativeTurnRef: { readonly fingerprint?: string | undefined } | null;
 }
 
-/** How many user entries the turns after `boundaryOrdinal` added; undefined when one is unknown. */
-export function primeDiscardedUserEntries(
+/** A discarded turn whose history ahead of its first user entry a native cut would keep. */
+interface PrimeStrandedTurn {
+  readonly type: "stranded";
+  readonly ordinal: number;
+  readonly lead: PrimeStrandedLead;
+}
+
+export type PrimeDiscardedHistory =
+  | { readonly type: "none" }
+  | { readonly type: "fork" }
+  | { readonly type: "unknown"; readonly ordinal: number }
+  | PrimeStrandedTurn;
+
+/**
+ * What discarding the turns after `boundaryOrdinal` asks of the session,
+ * from their fingerprints alone: nothing (no model-visible history), a cut
+ * before the first discarded turn's prompt, or nothing Prime can do because
+ * that turn's history starts with something other than a user entry.
+ */
+export function primeDiscardedHistory(
   turns: ReadonlyArray<PrimeBoundaryTurn>,
   boundaryOrdinal: number,
-): number | undefined {
-  let count = 0;
-  for (const turn of turns) {
-    if (turn.ordinal <= boundaryOrdinal) continue;
-    const hashes = primeUserEntryHashes(turn.nativeTurnRef?.fingerprint);
-    if (hashes === undefined) return undefined;
-    count += hashes.length;
+): PrimeDiscardedHistory {
+  const discarded = turns
+    .filter((turn) => turn.ordinal > boundaryOrdinal)
+    .toSorted((left, right) => left.ordinal - right.ordinal);
+  let first: { readonly ordinal: number; readonly lead: PrimeTurnLead } | undefined;
+  for (const turn of discarded) {
+    const entries = primeTurnEntries(turn.nativeTurnRef?.fingerprint);
+    if (entries === undefined) return { type: "unknown", ordinal: turn.ordinal };
+    if (first === undefined && entries.lead !== "none") {
+      first = { ordinal: turn.ordinal, lead: entries.lead };
+    }
   }
-  return count;
+  if (first === undefined) return { type: "none" };
+  return isStrandedLead(first.lead)
+    ? { type: "stranded", ordinal: first.ordinal, lead: first.lead }
+    : { type: "fork" };
 }
 
 export type PrimeForkBoundary =
   | { readonly type: "keep_all" }
   | { readonly type: "fork"; readonly entryId: string }
-  | { readonly type: "error"; readonly message: string };
+  | { readonly type: "error"; readonly message: string }
+  | PrimeStrandedTurn;
 
 const entriesMatch = (
   messages: ReadonlyArray<PrimeForkMessage>,
@@ -681,17 +782,22 @@ export function primeForkBoundary(input: {
     .filter((turn) => turn.ordinal > input.boundaryOrdinal)
     .toSorted((left, right) => right.ordinal - left.ordinal);
   let cursor = input.messages.length;
+  let cutOrdinal: number | undefined;
+  const leads = new Map<number, PrimeTurnLead>();
   for (const turn of discarded) {
-    const hashes = primeUserEntryHashes(turn.nativeTurnRef?.fingerprint);
-    if (hashes === undefined) {
+    const entries = primeTurnEntries(turn.nativeTurnRef?.fingerprint);
+    if (entries === undefined) {
       return {
         type: "error",
         message: `Prime turn ${turn.ordinal} has no recorded session entries`,
       };
     }
+    leads.set(turn.ordinal, entries.lead);
+    const { hashes } = entries;
     if (hashes.length === 0) continue;
     if (entriesMatch(input.messages, cursor, hashes)) {
       cursor -= hashes.length;
+      cutOrdinal = turn.ordinal;
     } else if (!input.skipUnmatched) {
       return {
         type: "error",
@@ -700,12 +806,21 @@ export function primeForkBoundary(input: {
     }
   }
   const target = input.turns.find((turn) => turn.ordinal === input.boundaryOrdinal);
-  const targetHashes = primeUserEntryHashes(target?.nativeTurnRef?.fingerprint);
+  const targetHashes = primeTurnEntries(target?.nativeTurnRef?.fingerprint)?.hashes;
   if (targetHashes !== undefined && !entriesMatch(input.messages, cursor, targetHashes)) {
     return {
       type: "error",
       message: `Prime session history no longer matches turn ${input.boundaryOrdinal}`,
     };
+  }
+  // The cut lands before the earliest matched turn's first user entry, so a
+  // turn at or before it whose history starts otherwise would survive. A fork
+  // source's rolled-back turn of that kind cannot be told apart from a live
+  // one (it has no user entry to match), so it is refused too.
+  for (const turn of discarded.toReversed()) {
+    if (cutOrdinal !== undefined && turn.ordinal > cutOrdinal) break;
+    const lead = leads.get(turn.ordinal);
+    if (isStrandedLead(lead)) return { type: "stranded", ordinal: turn.ordinal, lead };
   }
   const boundary = input.messages[cursor];
   return boundary === undefined
