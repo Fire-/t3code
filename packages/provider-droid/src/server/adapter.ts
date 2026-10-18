@@ -230,13 +230,6 @@ function terminalFailure(
         code: reason,
         retryable: true,
       });
-    case "process_exit":
-      return makeProviderFailure({
-        message: errorMessage ?? "Droid exited before the turn finished.",
-        class: "transport_error",
-        code: reason,
-        retryable: false,
-      });
     default:
       return makeProviderFailure({
         message: errorMessage ?? `Droid ended the turn with reason ${reason}.`,
@@ -247,7 +240,31 @@ function terminalFailure(
   }
 }
 
-function classifyCompletion(reason: unknown, errorMessage: string | undefined): TurnOutcome {
+/**
+ * Droid reports `process_exit` when it is shutting down (stdin closed, SIGTERM) and exits right
+ * after, so the session is gone whether this arrives as a completion or as the EOF behind it.
+ * During a close the turn was stopped on purpose.
+ */
+function processExitOutcome(closing: boolean, message: string): TurnOutcome {
+  return closing
+    ? { kind: "interrupted", disposition: "broken" }
+    : {
+        kind: "failed",
+        failure: makeProviderFailure({
+          message,
+          class: "transport_error",
+          code: "process_exit",
+          retryable: false,
+        }),
+        disposition: "broken",
+      };
+}
+
+function classifyCompletion(
+  reason: unknown,
+  errorMessage: string | undefined,
+  closing: boolean,
+): TurnOutcome {
   switch (reason) {
     case undefined:
     case "completed":
@@ -256,6 +273,8 @@ function classifyCompletion(reason: unknown, errorMessage: string | undefined): 
     case "cancelled":
     case "permission_rejected":
       return { kind: "interrupted", disposition: "reusable" };
+    case "process_exit":
+      return processExitOutcome(closing, errorMessage ?? "Droid exited before the turn finished.");
     default:
       return {
         kind: "failed",
@@ -544,7 +563,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         turn.mapper = mapped.state;
         yield* emitMapped(state, mapped.events);
 
-        const outcome = classifyCompletion(notification["reason"], turn.errorMessage);
+        const outcome = classifyCompletion(notification["reason"], turn.errorMessage, closing);
         // Signalled before the terminal goes out, so whoever sees the terminal sees the status flip.
         if (outcome.kind === "failed") {
           if (outcome.failure.code === "model_authentication_failed") {
@@ -554,10 +573,15 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           yield* authSignal.authenticated;
         }
         yield* finishTurn(state, turn, outcome);
-        yield* updateProviderSession(
-          "ready",
-          outcome.kind === "failed" ? outcome.failure.message : null,
-        );
+        const lastError = outcome.kind === "failed" ? outcome.failure.message : null;
+        if (outcome.disposition === "broken") {
+          // Droid exits right after this, but the EOF is a separate event: the session must not
+          // look ready or take a turn in between.
+          ended = true;
+          yield* updateProviderSession(closing ? "stopped" : "error", lastError);
+        } else {
+          yield* updateProviderSession("ready", lastError);
+        }
       });
 
       const handleNotification = Effect.fnUntraced(function* (notification: DroidNotification) {
@@ -622,18 +646,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               yield* finishTurn(
                 state,
                 turn,
-                closing
-                  ? { kind: "interrupted", disposition: "broken" }
-                  : {
-                      kind: "failed",
-                      failure: makeProviderFailure({
-                        message: "Droid process exited unexpectedly.",
-                        class: "transport_error",
-                        code: "process_exit",
-                        retryable: false,
-                      }),
-                      disposition: "broken",
-                    },
+                processExitOutcome(closing, "Droid process exited unexpectedly."),
               );
             }
             if (cause !== undefined && !closing) {

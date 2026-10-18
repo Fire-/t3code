@@ -27,6 +27,7 @@ import * as Predicate from "effect/Predicate";
 import * as Queue from "effect/Queue";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -130,6 +131,8 @@ interface OpenOptions {
   readonly authSignal?: DroidAuthSignalService;
   readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly binaryPath?: string;
+  /** Closing it closes the session while the test keeps collecting the events it publishes. */
+  readonly sessionScope?: Scope.Closeable;
 }
 
 const openRuntime = Effect.fnUntraced(function* (
@@ -139,12 +142,15 @@ const openRuntime = Effect.fnUntraced(function* (
   const spawner = options.spawner ?? fake?.spawner;
   assert.isDefined(spawner);
   const adapter = yield* makeAdapter(spawner!, options.authSignal, options.binaryPath);
-  const runtime = yield* adapter.openSession({
+  const open = adapter.openSession({
     threadId: THREAD_ID,
     providerSessionId: SESSION_ID,
     modelSelection: selection(effortOf(options)),
     runtimePolicy: policy(options.runtimeMode, options.interactionMode),
   });
+  const runtime = yield* options.sessionScope === undefined
+    ? open
+    : open.pipe(Scope.provide(options.sessionScope));
   const queue = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
   const all: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
   const streamEnded =
@@ -299,6 +305,24 @@ const ensure = Effect.fnUntraced(function* (
     existingProviderThread: existing,
   });
 });
+
+/** The items whose latest published state is still in flight. */
+const openItems = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) => {
+  const latest = new Map<string, string>();
+  for (const event of events) {
+    if (event.type === "turn_item.updated") {
+      latest.set(String(event.turnItem.id), event.turnItem.status);
+    }
+  }
+  return [...latest].filter(([, status]) =>
+    ["idle", "pending", "running", "waiting"].includes(status),
+  );
+};
+
+const sessionStatuses = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+  events.flatMap((event) =>
+    event.type === "provider_session.updated" ? [event.providerSession.status] : [],
+  );
 
 const methodsOf = (fake: FakeDroid) => fake.current().methods();
 
@@ -1163,7 +1187,7 @@ describe("DroidAdapterV2", () => {
         failed: true,
       },
       { reason: "model_rate_limited", status: "failed", disposition: "reusable", failed: true },
-      { reason: "process_exit", status: "failed", disposition: "reusable", failed: true },
+      { reason: "process_exit", status: "failed", disposition: "broken", failed: true },
     ] as const;
 
     it.effect.each(cases)(
@@ -1494,6 +1518,125 @@ describe("DroidAdapterV2", () => {
     );
 
     it.effect(
+      "[VAL-TURN-014] a process_exit completion fails the turn broken and reports the session before the EOF follows",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const opened = yield* openRuntime(fake);
+          const thread = yield* ensure(opened);
+          yield* startTurn(opened.runtime, thread);
+          const process = fake.current();
+          yield* process.emit({
+            type: "tool_call",
+            toolUse: { type: "tool_use", id: "tool-1", name: "Execute", input: { command: "ls" } },
+          });
+          yield* process.emit({
+            type: "assistant_text_delta",
+            messageId: "assistant-1",
+            blockIndex: 0,
+            textDelta: "Working",
+          });
+          yield* process.emit(completed(1, "process_exit"));
+
+          const terminal = yield* opened.takeEvent(isTerminal);
+          assert.isTrue(terminal.type === "turn.terminal");
+          if (terminal.type !== "turn.terminal") return;
+          assert.strictEqual(terminal.status, "failed");
+          assert.strictEqual(terminal.threadDisposition, "broken");
+          assert.strictEqual(terminal.failure?.class, "transport_error");
+          assert.strictEqual(terminal.failure?.code, "process_exit");
+          yield* opened.takeEvent((event) => event.type === "provider_session.updated");
+
+          // Nothing has ended the process yet: the notification alone settled everything.
+          assert.isFalse(yield* Deferred.isDone(opened.streamEnded));
+          assert.deepStrictEqual(openItems(opened.all), []);
+          const tool = opened.all.findLast(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+          );
+          assert.isTrue(tool?.type === "turn_item.updated" && tool.turnItem.status === "failed");
+          const threadUpdate = opened.all.findLast(
+            (event) => event.type === "provider_thread.updated",
+          );
+          assert.isTrue(
+            threadUpdate?.type === "provider_thread.updated" &&
+              threadUpdate.providerThread.status === "error",
+          );
+          const session = opened.all.findLast((event) => event.type === "provider_session.updated");
+          assert.isTrue(
+            session?.type === "provider_session.updated" &&
+              session.providerSession.status === "error" &&
+              session.providerSession.lastError !== null,
+          );
+          assert.notInclude(sessionStatuses(opened.all), "ready");
+
+          const next = yield* startTurn(opened.runtime, thread, { runOrdinal: 2 }).pipe(
+            Effect.exit,
+          );
+          assert.isTrue(Exit.isFailure(next), "a session whose process is exiting takes no turn");
+
+          yield* process.exit(0);
+          const ended = yield* Deferred.await(opened.streamEnded);
+          assert.isTrue(Exit.isFailure(ended));
+          assert.strictEqual(terminals(opened.all).length, 1);
+          assert.deepStrictEqual(openItems(opened.all), []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-014] a process_exit completion while the session closes ends the turn interrupted, broken, and stopped",
+      () =>
+        Effect.gen(function* () {
+          const interruptSeen = yield* Deferred.make<void>();
+          const fake = yield* makeFakeDroid({
+            overrides: {
+              // Held so the close stays in flight while Droid reports the exit.
+              "droid.interrupt_session": () => {
+                Deferred.doneUnsafe(interruptSeen, Exit.void);
+                return "silent";
+              },
+            },
+          });
+          const sessionScope = yield* Scope.make();
+          const opened = yield* openRuntime(fake, { sessionScope });
+          const thread = yield* ensure(opened);
+          yield* startTurn(opened.runtime, thread);
+          const process = fake.current();
+          yield* process.emit({
+            type: "tool_call",
+            toolUse: { type: "tool_use", id: "tool-1", name: "Execute", input: { command: "ls" } },
+          });
+          yield* process.settle;
+          yield* Scope.close(sessionScope, Exit.void).pipe(Effect.forkScoped);
+          yield* Deferred.await(interruptSeen);
+          yield* process.emit(completed(1, "process_exit"));
+
+          const terminal = yield* opened.takeEvent(isTerminal);
+          assert.isTrue(
+            terminal.type === "turn.terminal" &&
+              terminal.status === "interrupted" &&
+              terminal.threadDisposition === "broken" &&
+              terminal.failure === null,
+          );
+          yield* opened.takeEvent((event) => event.type === "provider_session.updated");
+          assert.strictEqual(sessionStatuses(opened.all).at(-1), "stopped");
+
+          yield* TestClock.adjust("10 seconds");
+          const ended = yield* Deferred.await(opened.streamEnded);
+          assert.isTrue(Exit.isSuccess(ended));
+          assert.strictEqual(terminals(opened.all).length, 1);
+          assert.deepStrictEqual(openItems(opened.all), []);
+          const tool = opened.all.findLast(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+          );
+          assert.isTrue(
+            tool?.type === "turn_item.updated" && tool.turnItem.status === "interrupted",
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
       "[VAL-TURN-014] the process exiting while idle ends the session without a terminal",
       () =>
         Effect.gen(function* () {
@@ -1791,17 +1934,45 @@ describe("DroidAdapterV2", () => {
       ),
     );
 
-    it.effect("[VAL-TURN-014] EXIT_MID_TURN completes with process_exit and fails the turn", () =>
-      live(
-        Effect.gen(function* () {
-          const { opened } = yield* openMock();
-          const thread = yield* ensure(opened);
-          yield* startTurn(opened.runtime, thread, { text: "EXIT_MID_TURN please" });
-          const terminal = yield* opened.takeEvent(isTerminal);
-          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
-          assert.strictEqual(terminals(opened.all).length, 1);
-        }).pipe(Effect.scoped, Effect.provide(mockLayer)),
-      ),
+    it.effect(
+      "[VAL-TURN-014] EXIT_MID_TURN completes with process_exit and fails the turn broken",
+      () =>
+        live(
+          Effect.gen(function* () {
+            const { opened } = yield* openMock();
+            const thread = yield* ensure(opened);
+            yield* startTurn(opened.runtime, thread, { text: "EXIT_MID_TURN please" });
+            const terminal = yield* opened.takeEvent(isTerminal);
+            assert.isTrue(
+              terminal.type === "turn.terminal" &&
+                terminal.status === "failed" &&
+                terminal.threadDisposition === "broken" &&
+                terminal.failure?.code === "process_exit",
+            );
+            // The mock exits right after the completion, so the EOF follows it.
+            const ended = yield* Deferred.await(opened.streamEnded);
+            assert.isTrue(Exit.isFailure(ended));
+            assert.strictEqual(terminals(opened.all).length, 1);
+            assert.deepStrictEqual(openItems(opened.all), []);
+            assert.notInclude(sessionStatuses(opened.all), "ready");
+            const finalStatus = sessionStatuses(opened.all).at(-1);
+            assert.isTrue(finalStatus === "stopped" || finalStatus === "error");
+            const items = opened.all.filter(
+              (event) => event.type === "turn_item.updated" && event.turnItem.type !== "error",
+            );
+            assert.isAbove(items.length, 0);
+            const runtimeRequests = opened.all.filter(
+              (event) => event.type === "runtime_request.updated",
+            );
+            assert.isTrue(
+              runtimeRequests.every(
+                (event) =>
+                  event.type === "runtime_request.updated" &&
+                  event.runtimeRequest.status !== "pending",
+              ),
+            );
+          }).pipe(Effect.scoped, Effect.provide(mockLayer)),
+        ),
     );
 
     it.effect(
