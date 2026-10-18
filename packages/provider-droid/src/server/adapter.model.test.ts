@@ -246,6 +246,162 @@ describe("DroidAdapterV2 real model ids and the router", () => {
   );
 });
 
+describe("DroidAdapterV2 effort stability after the router", () => {
+  const specFrame = (modelId: string, reasoningEffort: string | undefined) => ({
+    interactionMode: "spec",
+    autonomyLevel: "off",
+    modelId,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    specModeModelId: modelId,
+    ...(reasoningEffort === undefined ? {} : { specModeReasoningEffort: reasoningEffort }),
+  });
+
+  it.effect(
+    "[VAL-HIST-012] leaving the router for a model's default effort sends one frame, then an identical turn sends none",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid({ availableModels: MODELS });
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened, { model: "auto", effort: undefined });
+        yield* runTurn(opened, fake, thread, { model: "auto", effort: undefined });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 2,
+          model: OTHER_MODEL,
+          effort: undefined,
+        });
+        assert.deepStrictEqual(settingsFrames(fake), [frame(OTHER_MODEL, "low")]);
+
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 3,
+          model: OTHER_MODEL,
+          effort: undefined,
+        });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 4,
+          model: OTHER_MODEL,
+          effort: undefined,
+        });
+        assert.deepStrictEqual(
+          settingsFrames(fake),
+          [frame(OTHER_MODEL, "low")],
+          "an unchanged selection and policy sends no settings frame",
+        );
+        assert.deepStrictEqual(methodsOf(fake), [
+          "droid.initialize_session",
+          "droid.add_user_message",
+          "droid.update_session_settings",
+          "droid.add_user_message",
+          "droid.add_user_message",
+          "droid.add_user_message",
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] spec mode and the implement turn after the restored default keep sending that effort",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid({ availableModels: MODELS });
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened, { model: "auto", effort: undefined });
+        yield* runTurn(opened, fake, thread, { model: "auto", effort: undefined });
+        const named = { model: OTHER_MODEL, effort: undefined };
+        yield* runTurn(opened, fake, thread, { runOrdinal: 2, ...named });
+        yield* runTurn(opened, fake, thread, { runOrdinal: 3, ...named });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 4,
+          ...named,
+          interactionMode: "plan",
+        });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 5,
+          ...named,
+          interactionMode: "plan",
+        });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 6,
+          ...named,
+          interactionMode: "default",
+        });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 7,
+          ...named,
+          interactionMode: "default",
+        });
+
+        assert.deepStrictEqual(settingsFrames(fake), [
+          frame(OTHER_MODEL, "low"),
+          specFrame(OTHER_MODEL, "low"),
+          frame(OTHER_MODEL, "low"),
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] an explicit effort or another model after the restored default behaves as before",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid({ availableModels: MODELS });
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened, { model: "auto", effort: undefined });
+        yield* runTurn(opened, fake, thread, { model: "auto", effort: undefined });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 2,
+          model: OTHER_MODEL,
+          effort: undefined,
+        });
+        yield* runTurn(opened, fake, thread, { runOrdinal: 3, model: OTHER_MODEL, effort: "high" });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 4,
+          model: OTHER_MODEL,
+          effort: undefined,
+        });
+        yield* runTurn(opened, fake, thread, { runOrdinal: 5, model: MODEL, effort: undefined });
+
+        assert.deepStrictEqual(settingsFrames(fake), [
+          frame(OTHER_MODEL, "low"),
+          frame(OTHER_MODEL, "high"),
+          frame(OTHER_MODEL, undefined),
+          frame(MODEL, undefined),
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] a fresh session and a non-router model with no chosen effort send no invented effort",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid({ availableModels: MODELS });
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened, { effort: undefined });
+        yield* runTurn(opened, fake, thread, { effort: undefined });
+        yield* runTurn(opened, fake, thread, { runOrdinal: 2, effort: undefined });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 3,
+          effort: undefined,
+          interactionMode: "plan",
+        });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 4,
+          model: OTHER_MODEL,
+          effort: undefined,
+        });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 5,
+          model: OTHER_MODEL,
+          effort: undefined,
+        });
+
+        const initialize = requestsOf(fake, "droid.initialize_session")[0]?.params;
+        assert.notProperty(initialize, "reasoningEffort");
+        assert.deepStrictEqual(settingsFrames(fake), [
+          specFrame(MODEL, undefined),
+          frame(OTHER_MODEL, undefined),
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
+
 describe("DroidAdapterV2 reroute notice", () => {
   const replyTurn = Effect.fnUntraced(function* (
     opened: OpenRuntime,

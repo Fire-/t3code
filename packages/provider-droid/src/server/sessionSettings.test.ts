@@ -10,6 +10,7 @@ import {
   droidModelCatalog,
   droidSessionSettings,
   droidSettingsParams,
+  sameDroidSessionSettings,
   type DroidModelInfo,
 } from "./sessionSettings.ts";
 
@@ -119,6 +120,72 @@ describe("the router model [VAL-HIST-012]", () => {
     const previous = settingsFor(selected("plain-model", "low"), { models: LISTED });
     assert.strictEqual(
       settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous }).reasoningEffort,
+      undefined,
+    );
+  });
+});
+
+describe("the restored default effort stays while the selection does [VAL-HIST-012]", () => {
+  const restored = () =>
+    settingsFor(selected("claude-opus-5-5"), {
+      models: LISTED,
+      previous: settingsFor(selected("auto"), { models: LISTED }),
+    });
+
+  it("[VAL-HIST-012] an identical selection computes the same settings, so no frame follows", () => {
+    const first = restored();
+    assert.strictEqual(first.reasoningEffort, "medium");
+    const next = settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: first });
+    assert.strictEqual(next.reasoningEffort, "medium");
+    assert.isTrue(sameDroidSessionSettings(first, next));
+  });
+
+  it("[VAL-HIST-012] spec mode and the implement turn after it carry the restored effort", () => {
+    const first = restored();
+    const spec = settingsFor(selected("claude-opus-5-5"), {
+      models: LISTED,
+      previous: first,
+      interactionMode: "plan",
+    });
+    assert.deepStrictEqual(droidSettingsParams(spec), {
+      interactionMode: "spec",
+      autonomyLevel: "off",
+      modelId: "claude-opus-5-5",
+      reasoningEffort: "medium",
+      specModeModelId: "claude-opus-5-5",
+      specModeReasoningEffort: "medium",
+    });
+    const implement = settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: spec });
+    assert.strictEqual(implement.reasoningEffort, "medium");
+    assert.strictEqual(implement.interactionMode, "auto");
+  });
+
+  it("[VAL-HIST-012] a chosen effort replaces it, and a later turn without one does not bring it back", () => {
+    const chosen = settingsFor(selected("claude-opus-5-5", "high"), {
+      models: LISTED,
+      previous: restored(),
+    });
+    assert.strictEqual(chosen.reasoningEffort, "high");
+    assert.strictEqual(
+      settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: chosen })
+        .reasoningEffort,
+      undefined,
+    );
+  });
+
+  it("[VAL-HIST-012] another model does not inherit it", () => {
+    assert.strictEqual(
+      settingsFor(selected("plain-model"), { models: LISTED, previous: restored() })
+        .reasoningEffort,
+      undefined,
+    );
+  });
+
+  it("[VAL-HIST-012] a model that was never entered from the router stays without an effort", () => {
+    const fresh = settingsFor(selected("claude-opus-5-5"), { models: LISTED });
+    assert.strictEqual(fresh.reasoningEffort, undefined);
+    assert.strictEqual(
+      settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: fresh }).reasoningEffort,
       undefined,
     );
   });

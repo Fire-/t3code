@@ -100,17 +100,22 @@ export const droidSessionSettings = (input: {
     input.modelSelection,
     DROID_REASONING_EFFORT_OPTION_ID,
   );
+  const defaultEffort = listed?.defaultReasoningEffort;
+  // The router left no effort behind that the new model could inherit, so a model entered from it
+  // without a chosen effort starts at its own default. It has to stay there on the turns that
+  // follow: those carry no chosen effort either, and recomputing none would read as a change.
+  const atDefaultEffort =
+    input.previous !== undefined &&
+    (input.previous.router ||
+      (input.previous.modelId === modelId && input.previous.reasoningEffort === defaultEffort));
   return {
     interactionMode: input.interactionMode === "plan" ? "spec" : "auto",
     autonomyLevel: droidAutonomyLevel(input.runtimeMode),
     modelId,
     router,
-    // The router left no effort behind that the new model could inherit, so a model entered
-    // from it without a chosen effort starts at its own default.
     reasoningEffort: router
       ? undefined
-      : (chosenEffort ??
-        (input.previous?.router === true ? listed?.defaultReasoningEffort : undefined)),
+      : (chosenEffort ?? (atDefaultEffort ? defaultEffort : undefined)),
   };
 };
 
