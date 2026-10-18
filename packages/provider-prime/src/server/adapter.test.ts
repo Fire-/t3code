@@ -23,6 +23,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -268,6 +269,54 @@ const recordedTurn = (
   completedAt: null,
 });
 
+const SESSION_ENTRY_TIME = "2026-10-17T10:00:00.000Z";
+/** Prime's v3 session header (core/session-manager.ts SessionHeader). */
+const primeSessionHeader = {
+  type: "session",
+  version: 3,
+  id: "019a0000-0000-7000-8000-000000000001",
+  timestamp: SESSION_ENTRY_TIME,
+  cwd: "/workspace",
+};
+const primeSessionMessage = (id: string, message: Record<string, unknown>) => ({
+  type: "message",
+  id,
+  parentId: null,
+  timestamp: SESSION_ENTRY_TIME,
+  message: { timestamp: 1, ...message },
+});
+const primeSessionUser = (id: string, text: string) =>
+  primeSessionMessage(id, { role: "user", content: [{ type: "text", text }] });
+const primeSessionAssistant = (id: string, text: string) =>
+  primeSessionMessage(id, {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stopReason: "stop",
+  });
+const primeSessionCustom = (id: string, customType: string, content: string) => ({
+  type: "custom_message",
+  id,
+  parentId: null,
+  timestamp: SESSION_ENTRY_TIME,
+  customType,
+  content,
+  display: true,
+});
+/** A Prime session JSONL in a scoped temp dir; `undefined` leaves the path absent. */
+const writePrimeSession = Effect.fnUntraced(function* (
+  entries: ReadonlyArray<unknown> | undefined,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "prime-fork-source-" });
+  const file = `${directory}/source.jsonl`;
+  if (entries !== undefined) {
+    yield* fileSystem.writeFileString(
+      file,
+      entries.map((entry) => `${encodeJsonLine(entry)}\n`).join(""),
+    );
+  }
+  return file;
+});
 const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
   const exitCode = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
@@ -2313,6 +2362,13 @@ describe("PrimeAdapterV2", () => {
         const fake = yield* makeFakePrime;
         const forkFake = yield* makeFakePrime;
         const forkFile = "/fake/forked.jsonl";
+        const sourceFile = yield* writePrimeSession([
+          primeSessionHeader,
+          ...sourceEntries.flatMap((text, index) => [
+            primeSessionUser(`entry-${index + 1}`, text),
+            primeSessionAssistant(`reply-${index + 1}`, "ok"),
+          ]),
+        ]);
         const { runtime, takeEvent } = yield* openRuntime(
           fake,
           "default",
@@ -2320,6 +2376,7 @@ describe("PrimeAdapterV2", () => {
           SESSION_ID,
           forkFake,
         );
+        fake.queueState({ sessionFile: sourceFile });
         const source = yield* runtime.ensureThread({
           threadId: THREAD_ID,
           modelSelection: modelSelection("default"),
@@ -2342,9 +2399,9 @@ describe("PrimeAdapterV2", () => {
         assert.equal(forked.appThreadId, target);
         assert.equal(forked.nativeThreadRef?.nativeId, forkFile);
         assert.notEqual(forked.id, source.id);
-        assert.equal(source.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+        assert.equal(source.nativeThreadRef?.nativeId, sourceFile);
         const args = forkFake.lastSpawn().args;
-        assert.equal(args[args.indexOf("--fork") + 1], FAKE_SESSION_FILE);
+        assert.equal(args[args.indexOf("--fork") + 1], sourceFile);
         assert.include(args, "--no-extensions");
         assert.include(args, "--no-tools");
         assert.notInclude(args, "--no-session");
@@ -3246,6 +3303,190 @@ describe("PrimeAdapterV2", () => {
         );
         yield* startTurn(runtime, source);
         yield* fake.takeRequest("prompt");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  /**
+   * Core opens the fork target's session and calls forkThread there
+   * (ProviderTurnStartService), so the source thread's Prime process is not the
+   * one doing the fork.
+   */
+  const openForkTarget = Effect.fnUntraced(function* (sourceFile: string) {
+    const sourceFake = yield* makeFakePrime;
+    const sourceRuntime = yield* openRuntime(sourceFake);
+    sourceFake.queueState({ sessionFile: sourceFile });
+    const source = yield* sourceRuntime.runtime.ensureThread({
+      threadId: THREAD_ID,
+      modelSelection: modelSelection("default"),
+      runtimePolicy,
+    });
+    const targetFake = yield* makeFakePrime;
+    const forkFake = yield* makeFakePrime;
+    const target = ThreadId.make("fork-target");
+    const { runtime } = yield* openRuntime(
+      targetFake,
+      "default",
+      target,
+      ProviderSessionId.make("provider-session-fork-target"),
+      forkFake,
+    );
+    return { source, sourceFake, targetFake, forkFake, runtime, target };
+  });
+  const copiesOrForks = (fake: FakePrime) =>
+    fake.allRequests().some((request) => request.type === "fork" || request.type === "clone");
+
+  it.effect(
+    "[VAL-FORK-002] refuses before copying the session when a rolled-back turn hides a later goal run (target runtime)",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const sourceFile = yield* writePrimeSession([
+          primeSessionHeader,
+          primeSessionUser("e1", "one"),
+          primeSessionAssistant("a1", "reply one"),
+          primeSessionCustom("g3", "goal_context", "Goal: ship it"),
+          primeSessionAssistant("a3", "working on the goal"),
+        ]);
+        const sourceBytes = yield* fileSystem.readFile(sourceFile);
+        const { source, sourceFake, targetFake, forkFake, runtime, target } =
+          yield* openForkTarget(sourceFile);
+        const sourceRequests = sourceFake.allRequests().length;
+        // Turn 2 was rolled back, so its user entry is gone from the source session.
+        const sourceTurns = [
+          recordedTurn(source.id, 1, ["one"]),
+          recordedTurn(source.id, 2, ["two"]),
+          recordedTurn(source.id, 3, [], "goal"),
+        ];
+        forkFake.setForkMessages([{ entryId: "e1", text: "one" }]);
+        const error = yield* runtime
+          .forkThread({
+            sourceProviderThread: source,
+            sourceProviderTurns: sourceTurns,
+            providerTurnId: sourceTurns[0]!.id,
+            targetThreadId: target,
+          })
+          .pipe(Effect.flip);
+        const message = boundaryRefusal(error, "ProviderAdapterForkThreadError");
+        assert.include(message, "turn 3 (a goal run)");
+        assert.include(message, "The source thread is unchanged.");
+        assert.deepEqual(forkFake.lastSpawn().args, [], "no --fork copy of the source was made");
+        assert.isFalse(copiesOrForks(forkFake) || copiesOrForks(targetFake));
+        assert.isFalse(copiesOrForks(sourceFake));
+        assert.equal(sourceFake.allRequests().length, sourceRequests);
+        assert.deepEqual(yield* fileSystem.readFile(sourceFile), sourceBytes);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-FORK-002] forks at the first discarded prompt when a heartbeat follows it (target runtime)",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const sourceFile = yield* writePrimeSession([
+          primeSessionHeader,
+          primeSessionUser("e1", "one"),
+          primeSessionAssistant("a1", "reply one"),
+          primeSessionUser("e2", "two"),
+          primeSessionAssistant("a2", "reply two"),
+          primeSessionCustom("h3", "heartbeat_prompt", "heartbeat"),
+          primeSessionAssistant("a3", "heartbeat reply"),
+        ]);
+        const sourceBytes = yield* fileSystem.readFile(sourceFile);
+        const { source, sourceFake, targetFake, forkFake, runtime, target } =
+          yield* openForkTarget(sourceFile);
+        const sourceRequests = sourceFake.allRequests().length;
+        const sourceTurns = [
+          recordedTurn(source.id, 1, ["one"]),
+          recordedTurn(source.id, 2, ["two"]),
+          recordedTurn(source.id, 3, [], "heartbeat"),
+        ];
+        const forkFile = "/fake/forked-on-target.jsonl";
+        forkFake.setForkMessages([
+          { entryId: "e1", text: "one" },
+          { entryId: "e2", text: "two" },
+        ]);
+        forkFake.queueState({ sessionFile: forkFile });
+        targetFake.queueState({ sessionFile: forkFile });
+        const forked = yield* runtime.forkThread({
+          sourceProviderThread: source,
+          sourceProviderTurns: sourceTurns,
+          providerTurnId: sourceTurns[0]!.id,
+          targetThreadId: target,
+        });
+        assert.equal(forked.appThreadId, target);
+        assert.equal(forked.nativeThreadRef?.nativeId, forkFile);
+        assert.equal(forked.forkedFrom?.providerThreadId, source.id);
+        const args = forkFake.lastSpawn().args;
+        assert.equal(args[args.indexOf("--fork") + 1], sourceFile);
+        assert.deepEqual(
+          forkFake
+            .allRequests()
+            .filter((request) => request.type === "fork")
+            .map((request) => request.entryId),
+          ["e2"],
+        );
+        assert.equal(
+          targetFake.allRequests().findLast((request) => request.type === "switch_session")
+            ?.sessionPath,
+          forkFile,
+        );
+        assert.equal(sourceFake.allRequests().length, sourceRequests);
+        assert.deepEqual(yield* fileSystem.readFile(sourceFile), sourceBytes);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    { label: "is missing", entries: undefined, detail: "could not read" },
+    {
+      label: "does not start with a session header",
+      entries: [primeSessionUser("e1", "one"), primeSessionUser("e2", "two")],
+      detail: "not a Prime session",
+    },
+    {
+      label: "uses a newer session format",
+      entries: [
+        { ...primeSessionHeader, version: 4 },
+        primeSessionUser("e1", "one"),
+        primeSessionUser("e2", "two"),
+      ],
+      detail: "format version 4",
+    },
+  ])(
+    "[VAL-FORK-002] refuses a historical fork before launch when the source session file $label",
+    ({ entries, detail }) =>
+      Effect.gen(function* () {
+        const sourceFile = yield* writePrimeSession(entries);
+        const fake = yield* makeFakePrime;
+        const forkFake = yield* makeFakePrime;
+        const { runtime } = yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, forkFake);
+        fake.queueState({ sessionFile: sourceFile });
+        const source = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const sourceTurns = [
+          recordedTurn(source.id, 1, ["one"]),
+          recordedTurn(source.id, 2, ["two"]),
+        ];
+        forkFake.setForkMessages([
+          { entryId: "e1", text: "one" },
+          { entryId: "e2", text: "two" },
+        ]);
+        const error = yield* runtime
+          .forkThread({
+            sourceProviderThread: source,
+            sourceProviderTurns: sourceTurns,
+            providerTurnId: sourceTurns[0]!.id,
+            targetThreadId: ThreadId.make("fork-target"),
+          })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterForkThreadError");
+        const message = primeRecordString(error.cause, "detail") ?? "";
+        assert.include(message, detail);
+        assert.include(message, "The source thread is unchanged");
+        assert.deepEqual(forkFake.lastSpawn().args, [], "no --fork copy of the source was made");
+        assert.isFalse(copiesOrForks(fake) || copiesOrForks(forkFake));
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
   it.effect("settles a command-only prompt from its deferred ack and idle probe", () =>

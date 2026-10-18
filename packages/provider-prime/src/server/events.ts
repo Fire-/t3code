@@ -1,4 +1,6 @@
 import type { OrchestrationV2Notification, OrchestrationV2ProviderGoal } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import {
   primeRecordField as recordField,
@@ -826,4 +828,70 @@ export function primeForkBoundary(input: {
   return boundary === undefined
     ? { type: "keep_all" }
     : { type: "fork", entryId: boundary.entryId };
+}
+
+export type PrimeSessionForkMessages =
+  | { readonly type: "messages"; readonly messages: ReadonlyArray<PrimeForkMessage> }
+  | { readonly type: "invalid"; readonly reason: string };
+
+const decodeSessionLine = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
+/** The session format Prime 1.0.0 writes (core/session-manager.ts CURRENT_SESSION_VERSION). */
+const PRIME_SESSION_VERSION = 3;
+
+/**
+ * Reads a Prime session JSONL line by line into what `get_fork_messages`
+ * would list after `prime --fork` copied it, without asking Prime to copy it.
+ * Mirrors Prime's loader (core/session-manager.ts loadEntriesFromFile: torn
+ * lines are skipped, and the first parsed entry must be a session header with
+ * an id, or forkFrom refuses the file) and AgentSession.getUserMessagesForForking
+ * (core/agent-session.ts): every `message` entry with role `user` and non-empty
+ * text, in file order, abandoned branches included, because
+ * SessionManager.getEntries returns every non-header entry.
+ */
+export function primeSessionForkReader() {
+  let header: unknown;
+  let parsedAny = false;
+  let missingEntryId = false;
+  const messages: Array<PrimeForkMessage> = [];
+  return {
+    line(line: string): void {
+      const parsed = decodeSessionLine(line);
+      if (Option.isNone(parsed)) return;
+      const entry = parsed.value;
+      if (!parsedAny) {
+        parsedAny = true;
+        header = entry;
+        return;
+      }
+      if (recordString(entry, "type") !== "message") return;
+      const message = recordField(entry, "message");
+      if (recordString(message, "role") !== "user") return;
+      const text = primeContentText(recordField(message, "content"));
+      if (text.length === 0) return;
+      const entryId = recordString(entry, "id");
+      if (entryId === undefined) missingEntryId = true;
+      else messages.push({ entryId, text });
+    },
+    result(): PrimeSessionForkMessages {
+      if (recordString(header, "type") !== "session" || recordString(header, "id") === undefined) {
+        return { type: "invalid", reason: "the file is not a Prime session" };
+      }
+      // migrateToCurrentVersion: v1 entries get fresh random ids, so only the
+      // copy knows them; v2 -> v3 only renames `hookMessage` roles to `custom`.
+      // Prime rewrites a migrated file when it opens it, so a session T3 has
+      // run turns in is already current.
+      const version = primeRecordNumber(header, "version") ?? 1;
+      if (version < 2 || version > PRIME_SESSION_VERSION) {
+        return {
+          type: "invalid",
+          reason: `the session uses format version ${version}, and T3 reads versions 2 to ${PRIME_SESSION_VERSION}`,
+        };
+      }
+      if (missingEntryId) {
+        return { type: "invalid", reason: "a user entry in the session has no id" };
+      }
+      return { type: "messages", messages };
+    },
+  };
 }

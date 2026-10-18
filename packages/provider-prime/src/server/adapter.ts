@@ -64,11 +64,13 @@ import {
   primeRlmChildSignature,
   primeRlmChildView,
   primeSessionCommandFailure,
+  primeSessionForkReader,
   primeToolItem,
   primeTurnFingerprint,
   primeUserEntryHash,
   PRIME_STRANDED_LEADS,
   type PrimeAutonomousContinuation,
+  type PrimeForkMessage,
   type PrimeStrandedLead,
   type PrimeTurnLead,
 } from "./events.ts";
@@ -3557,6 +3559,51 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 lead: discarded.lead,
               });
             }
+            // The source's projection still lists turns a rollback discarded.
+            const forkBoundary = (messages: ReadonlyArray<PrimeForkMessage>, ordinal: number) =>
+              Effect.gen(function* () {
+                const boundary = primeForkBoundary({
+                  messages,
+                  turns: sourceTurns,
+                  boundaryOrdinal: ordinal,
+                  skipUnmatched: true,
+                });
+                if (boundary.type === "error") return yield* protocolError(boundary.message);
+                if (boundary.type === "stranded") {
+                  return yield* new PrimeRollbackBoundaryError({
+                    operation: "fork",
+                    turnOrdinal: boundary.ordinal,
+                    lead: boundary.lead,
+                  });
+                }
+                return boundary;
+              });
+            // `--fork` writes the session copy before any RPC can be asked
+            // (main.ts createSessionManager -> SessionManager.forkFrom), and core
+            // forks on the target thread's runtime, so the source's Prime process
+            // may not exist. Reading the source file read-only, as Prime will read
+            // it, refuses an unsupported cut before anything is copied.
+            if (target !== undefined) {
+              const reader = primeSessionForkReader();
+              const read = yield* fileSystem.stream(sourceFile).pipe(
+                Stream.decodeText,
+                Stream.splitLines,
+                Stream.runForEach((line) => Effect.sync(() => reader.line(line))),
+                Effect.result,
+              );
+              if (read._tag === "Failure") {
+                return yield* protocolError(
+                  `Prime could not read the fork source session: ${read.failure.message}. The source thread is unchanged`,
+                );
+              }
+              const sourceMessages = reader.result();
+              if (sourceMessages.type === "invalid") {
+                return yield* protocolError(
+                  `Prime cannot fork this source session: ${sourceMessages.reason}. The source thread is unchanged`,
+                );
+              }
+              yield* forkBoundary(sourceMessages.messages, target.ordinal);
+            }
             // CLI --fork uses Prime's own session format and sets the destination cwd. RPC
             // switch_session/clone alone would retain the source cwd.
             const forkLaunch = buildPrimeRpcLaunch({
@@ -3586,21 +3633,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                   );
                   if (forkMessages === undefined)
                     return yield* protocolError("Prime returned malformed fork messages");
-                  // The source's projection still lists turns a rollback discarded.
-                  const boundary = primeForkBoundary({
-                    messages: forkMessages,
-                    turns: sourceTurns,
-                    boundaryOrdinal: target.ordinal,
-                    skipUnmatched: true,
-                  });
-                  if (boundary.type === "error") return yield* protocolError(boundary.message);
-                  if (boundary.type === "stranded") {
-                    return yield* new PrimeRollbackBoundaryError({
-                      operation: "fork",
-                      turnOrdinal: boundary.ordinal,
-                      lead: boundary.lead,
-                    });
-                  }
+                  // The copy is what Prime cuts, so it decides again if the source
+                  // changed after the read above.
+                  const boundary = yield* forkBoundary(forkMessages, target.ordinal);
                   if (boundary.type === "fork") {
                     const result = yield* forkConnection.request({
                       type: "fork",

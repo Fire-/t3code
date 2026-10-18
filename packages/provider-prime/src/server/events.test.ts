@@ -16,6 +16,7 @@ import {
   primeIpythonUpdate,
   primeRlmChildSignature,
   primeRlmChildView,
+  primeSessionForkReader,
   primeToolItem,
   primeTurnEntries,
   primeTurnFingerprint,
@@ -989,5 +990,146 @@ describe("primeForkBoundary", () => {
       }).type,
       "error",
     );
+  });
+});
+
+describe("primeSessionForkReader", () => {
+  const read = (lines: ReadonlyArray<unknown>) => {
+    const reader = primeSessionForkReader();
+    for (const line of lines) reader.line(typeof line === "string" ? line : JSON.stringify(line));
+    return reader.result();
+  };
+  const header = (version: number | undefined = 3) => ({
+    type: "session",
+    ...(version === undefined ? {} : { version }),
+    id: "019a0000-0000-7000-8000-000000000001",
+    timestamp: "2026-10-17T10:00:00.000Z",
+    cwd: "/workspace",
+  });
+  const entry = (id: string, parentId: string | null, body: Record<string, unknown>) => ({
+    id,
+    parentId,
+    timestamp: "2026-10-17T10:00:01.000Z",
+    ...body,
+  });
+  const message = (id: string, parentId: string | null, value: Record<string, unknown>) =>
+    entry(id, parentId, { type: "message", message: { timestamp: 1, ...value } });
+
+  it("[VAL-FORK-002] lists the user entries Prime's get_fork_messages would return, from real entry shapes", () => {
+    const result = read([
+      header(),
+      entry("m0", null, { type: "model_change", provider: "mistral", modelId: "zai-glm-5-3" }),
+      entry("d0", "m0", {
+        type: "custom_message",
+        customType: "harness_digest",
+        content: "<harness-digest>",
+        display: false,
+      }),
+      message("u1", "d0", { role: "user", content: "plain text prompt" }),
+      message("a1", "u1", {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "plan" },
+          { type: "text", text: "reply" },
+          { type: "toolCall", id: "call-1", name: "ipython", arguments: { code: "1" } },
+        ],
+        stopReason: "toolUse",
+      }),
+      message("t1", "a1", {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "ipython",
+        content: [{ type: "text", text: "1" }],
+        isError: false,
+      }),
+      message("u2", "t1", {
+        role: "user",
+        content: [
+          { type: "text", text: "multi " },
+          { type: "image", data: "aGk=", mimeType: "image/png" },
+          { type: "text", text: "part" },
+        ],
+      }),
+      message("u3", "u2", { role: "user", content: [] }),
+      message("u4", "u3", {
+        role: "user",
+        content: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+      }),
+      message("u5", "u4", { role: "user", content: "" }),
+      entry("g1", "u5", {
+        type: "custom_message",
+        customType: "goal_context",
+        content: "Goal: ship it",
+        display: true,
+      }),
+      message("c1", "g1", { role: "custom", customType: "heartbeat_prompt", content: "tick" }),
+      entry("x1", "c1", { type: "custom", customType: "t3", data: { role: "user" } }),
+      entry("l1", "x1", { type: "label", targetId: "u1", label: "user" }),
+      "{ not json",
+      "",
+      message("u6", "l1", { role: "user", content: "after a torn line" }),
+    ]);
+    assert.deepEqual(result, {
+      type: "messages",
+      messages: [
+        { entryId: "u1", text: "plain text prompt" },
+        { entryId: "u2", text: "multi part" },
+        { entryId: "u6", text: "after a torn line" },
+      ],
+    });
+  });
+
+  it("[VAL-FORK-002] keeps entries from abandoned branches, as Prime's getEntries does", () => {
+    assert.deepEqual(
+      read([
+        header(),
+        message("u1", null, { role: "user", content: "one" }),
+        message("u2", "u1", { role: "user", content: "branch a" }),
+        message("u3", "u1", { role: "user", content: "branch b" }),
+      ]),
+      {
+        type: "messages",
+        messages: [
+          { entryId: "u1", text: "one" },
+          { entryId: "u2", text: "branch a" },
+          { entryId: "u3", text: "branch b" },
+        ],
+      },
+    );
+  });
+
+  it("[VAL-FORK-002] reads a v2 session like v3, since migration only renames hook messages", () => {
+    assert.deepEqual(
+      read([
+        header(2),
+        message("h1", null, { role: "hookMessage", customType: "x", content: "hook" }),
+        message("u1", "h1", { role: "user", content: "one" }),
+      ]),
+      { type: "messages", messages: [{ entryId: "u1", text: "one" }] },
+    );
+  });
+
+  it.each([
+    { label: "an empty file", lines: [] },
+    { label: "only blank or torn lines", lines: ["", "{ torn"] },
+    {
+      label: "a first entry that is not a session header",
+      lines: [message("u1", null, { role: "user", content: "one" }), header()],
+    },
+    { label: "a header without an id", lines: [{ type: "session", version: 3 }] },
+    {
+      label: "a v1 session, whose entries Prime gives fresh ids",
+      lines: [header(undefined), { type: "message", message: { role: "user", content: "one" } }],
+    },
+    {
+      label: "a session format newer than Prime 1.0.0's",
+      lines: [header(4), message("u1", null, { role: "user", content: "one" })],
+    },
+    {
+      label: "a user entry without an id",
+      lines: [header(), { type: "message", message: { role: "user", content: "one" } }],
+    },
+  ])("[VAL-FORK-002] refuses $label", ({ lines }) => {
+    assert.equal(read(lines).type, "invalid");
   });
 });
