@@ -3597,12 +3597,16 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 );
               }
               const sourceMessages = reader.result();
-              if (sourceMessages.type === "invalid") {
-                return yield* protocolError(
-                  `Prime cannot fork this source session: ${sourceMessages.reason}. The source thread is unchanged`,
+              // Failing open keeps a future Prime session format from blocking
+              // every historical fork. The check on the copy below still
+              // guarantees the cut; the cost is a rare unregistered copy.
+              if (sourceMessages.type === "untrusted") {
+                yield* Effect.logWarning(
+                  `Prime could not check the fork source session before copying it (${sourceMessages.reason}); the copy's fork messages decide the cut.`,
                 );
+              } else {
+                yield* forkBoundary(sourceMessages.messages, target.ordinal);
               }
-              yield* forkBoundary(sourceMessages.messages, target.ordinal);
             }
             // CLI --fork uses Prime's own session format and sets the destination cwd. RPC
             // switch_session/clone alone would retain the source cwd.

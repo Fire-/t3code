@@ -830,67 +830,150 @@ export function primeForkBoundary(input: {
     : { type: "fork", entryId: boundary.entryId };
 }
 
+/**
+ * `untrusted` means the reader does not recognise the file well enough to
+ * predict Prime's list. Its reason is fixed text plus line or version
+ * numbers, never file content, so it is safe to log.
+ */
 export type PrimeSessionForkMessages =
   | { readonly type: "messages"; readonly messages: ReadonlyArray<PrimeForkMessage> }
-  | { readonly type: "invalid"; readonly reason: string };
+  | { readonly type: "untrusted"; readonly reason: string };
 
 const decodeSessionLine = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 
-/** The session format Prime 1.0.0 writes (core/session-manager.ts CURRENT_SESSION_VERSION). */
+/** core/session-manager.ts:42 CURRENT_SESSION_VERSION in Prime 1.0.0. */
 const PRIME_SESSION_VERSION = 3;
+
+/** The SessionEntry union, core/session-manager.ts:215-229. */
+const PRIME_SESSION_ENTRY_TYPES: ReadonlySet<string> = new Set([
+  "message",
+  "thinking_level_change",
+  "service_tier_change",
+  "model_change",
+  "compaction",
+  "branch_summary",
+  "custom",
+  "child_usage_attributed",
+  "custom_message",
+  "label",
+  "session_info",
+  "session_state",
+  "agent_status",
+  "git_state",
+]);
+
+const USER_PARTS: ReadonlySet<string> = new Set(["text", "image"]);
+const ASSISTANT_PARTS: ReadonlySet<string> = new Set(["text", "thinking", "toolCall"]);
+
+/**
+ * Content shapes per AgentMessage role: pi-ai's Message (packages/ai/src/
+ * types.ts:159-238) plus Prime's CustomAgentMessages (core/messages.ts:308-381).
+ */
+const PRIME_MESSAGE_CONTENT: ReadonlyMap<
+  string,
+  { readonly text: boolean; readonly parts: ReadonlySet<string> }
+> = new Map([
+  ["user", { text: true, parts: USER_PARTS }],
+  ["custom", { text: true, parts: USER_PARTS }],
+  ["assistant", { text: false, parts: ASSISTANT_PARTS }],
+  ["toolResult", { text: false, parts: USER_PARTS }],
+]);
+/** Roles whose fields hold no user-entry text, so forking never reads them. */
+const PRIME_CONTENTLESS_ROLES: ReadonlySet<string> = new Set([
+  "bashExecution",
+  "branchSummary",
+  "compactionSummary",
+]);
+
+function isPrimeMessage(message: unknown, version: number): boolean {
+  const role = recordString(message, "role");
+  if (role === undefined) return false;
+  if (PRIME_CONTENTLESS_ROLES.has(role)) return true;
+  // migrateV2ToV3 renames `hookMessage` to `custom` (core/session-manager.ts:392).
+  const shape = PRIME_MESSAGE_CONTENT.get(
+    role === "hookMessage" && version === 2 ? "custom" : role,
+  );
+  if (shape === undefined) return false;
+  const content = recordField(message, "content");
+  if (shape.text && typeof content === "string") return true;
+  return (
+    Array.isArray(content) &&
+    content.every((part) => {
+      const type = recordString(part, "type");
+      if (type === undefined || !shape.parts.has(type)) return false;
+      return type !== "text" || recordString(part, "text") !== undefined;
+    })
+  );
+}
 
 /**
  * Reads a Prime session JSONL line by line into what `get_fork_messages`
  * would list after `prime --fork` copied it, without asking Prime to copy it.
- * Mirrors Prime's loader (core/session-manager.ts loadEntriesFromFile: torn
- * lines are skipped, and the first parsed entry must be a session header with
- * an id, or forkFrom refuses the file) and AgentSession.getUserMessagesForForking
- * (core/agent-session.ts): every `message` entry with role `user` and non-empty
- * text, in file order, abandoned branches included, because
- * SessionManager.getEntries returns every non-header entry.
+ * Mirrors Prime's loader (core/session-manager.ts:401-417 and 753-766: blank
+ * lines are skipped, and the first entry must be a session header with a
+ * string id) and AgentSession.getUserMessagesForForking (core/agent-session.ts:
+ * 14817-14843): every `message` entry with role `user` and non-empty text, in
+ * file order, abandoned branches included, because SessionManager.getEntries
+ * returns every non-header entry.
+ *
+ * Prime also skips torn lines, but a line the reader cannot parse or an
+ * entry shape it does not know could be a newer format, so either makes the
+ * whole result untrusted rather than a guess.
  */
 export function primeSessionForkReader() {
-  let header: unknown;
-  let parsedAny = false;
-  let missingEntryId = false;
+  let lineNumber = 0;
+  let version: number | undefined;
+  let untrusted: string | undefined;
   const messages: Array<PrimeForkMessage> = [];
+  const readEntry = (entry: unknown): string | undefined => {
+    if (version === undefined) {
+      if (recordString(entry, "type") !== "session" || recordString(entry, "id") === undefined) {
+        return "the file does not start with a Prime session header";
+      }
+      // migrateToCurrentVersion (core/session-manager.ts:385-395): v1 entries
+      // get fresh random ids, so only the copy knows them; v2 -> v3 only
+      // renames `hookMessage` roles. Prime rewrites a migrated file when it
+      // opens it, so a session T3 has run turns in is already current.
+      const field = recordField(entry, "version");
+      if (field === undefined) return "the session uses format version 1, which T3 does not read";
+      const parsed = primeRecordNumber(entry, "version");
+      if (parsed === undefined) return "the session header has a version T3 does not recognise";
+      if (parsed !== 2 && parsed !== PRIME_SESSION_VERSION) {
+        return `the session uses format version ${parsed}, and T3 reads versions 2 to ${PRIME_SESSION_VERSION}`;
+      }
+      version = parsed;
+      return undefined;
+    }
+    const type = recordString(entry, "type");
+    if (type === undefined) return `line ${lineNumber} is not a session entry`;
+    if (!PRIME_SESSION_ENTRY_TYPES.has(type)) {
+      return `line ${lineNumber} has an entry type T3 does not recognise`;
+    }
+    if (type !== "message") return undefined;
+    const message = recordField(entry, "message");
+    if (!isPrimeMessage(message, version)) {
+      return `line ${lineNumber} has a message T3 does not recognise`;
+    }
+    if (recordString(message, "role") !== "user") return undefined;
+    const text = primeContentText(recordField(message, "content"));
+    if (text.length === 0) return undefined;
+    const entryId = recordString(entry, "id");
+    if (entryId === undefined) return `line ${lineNumber} is a user entry without an id`;
+    messages.push({ entryId, text });
+    return undefined;
+  };
   return {
     line(line: string): void {
+      lineNumber += 1;
+      if (untrusted !== undefined || line.trim().length === 0) return;
       const parsed = decodeSessionLine(line);
-      if (Option.isNone(parsed)) return;
-      const entry = parsed.value;
-      if (!parsedAny) {
-        parsedAny = true;
-        header = entry;
-        return;
-      }
-      if (recordString(entry, "type") !== "message") return;
-      const message = recordField(entry, "message");
-      if (recordString(message, "role") !== "user") return;
-      const text = primeContentText(recordField(message, "content"));
-      if (text.length === 0) return;
-      const entryId = recordString(entry, "id");
-      if (entryId === undefined) missingEntryId = true;
-      else messages.push({ entryId, text });
+      untrusted = Option.isNone(parsed)
+        ? `line ${lineNumber} is not JSON`
+        : readEntry(parsed.value);
     },
     result(): PrimeSessionForkMessages {
-      if (recordString(header, "type") !== "session" || recordString(header, "id") === undefined) {
-        return { type: "invalid", reason: "the file is not a Prime session" };
-      }
-      // migrateToCurrentVersion: v1 entries get fresh random ids, so only the
-      // copy knows them; v2 -> v3 only renames `hookMessage` roles to `custom`.
-      // Prime rewrites a migrated file when it opens it, so a session T3 has
-      // run turns in is already current.
-      const version = primeRecordNumber(header, "version") ?? 1;
-      if (version < 2 || version > PRIME_SESSION_VERSION) {
-        return {
-          type: "invalid",
-          reason: `the session uses format version ${version}, and T3 reads versions 2 to ${PRIME_SESSION_VERSION}`,
-        };
-      }
-      if (missingEntryId) {
-        return { type: "invalid", reason: "a user entry in the session has no id" };
-      }
+      if (untrusted !== undefined) return { type: "untrusted", reason: untrusted };
+      if (version === undefined) return { type: "untrusted", reason: "the file has no entries" };
       return { type: "messages", messages };
     },
   };

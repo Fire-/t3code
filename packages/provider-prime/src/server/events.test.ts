@@ -1016,7 +1016,7 @@ describe("primeSessionForkReader", () => {
     entry(id, parentId, { type: "message", message: { timestamp: 1, ...value } });
 
   it("[VAL-FORK-002] lists the user entries Prime's get_fork_messages would return, from real entry shapes", () => {
-    const result = read([
+    const lines = [
       header(),
       entry("m0", null, { type: "model_change", provider: "mistral", modelId: "zai-glm-5-3" }),
       entry("d0", "m0", {
@@ -1065,17 +1065,25 @@ describe("primeSessionForkReader", () => {
       message("c1", "g1", { role: "custom", customType: "heartbeat_prompt", content: "tick" }),
       entry("x1", "c1", { type: "custom", customType: "t3", data: { role: "user" } }),
       entry("l1", "x1", { type: "label", targetId: "u1", label: "user" }),
-      "{ not json",
+      entry("s1", "l1", { type: "session_info", name: "named" }),
+      entry("k1", "s1", { type: "agent_status", status: { summary: "ok" } }),
       "",
-      message("u6", "l1", { role: "user", content: "after a torn line" }),
-    ]);
-    assert.deepEqual(result, {
+      "   ",
+      message("u6", "k1", { role: "user", content: "after a blank line" }),
+    ];
+    assert.deepEqual(read(lines), {
       type: "messages",
       messages: [
         { entryId: "u1", text: "plain text prompt" },
         { entryId: "u2", text: "multi part" },
-        { entryId: "u6", text: "after a torn line" },
+        { entryId: "u6", text: "after a blank line" },
       ],
+    });
+    // Prime would skip a torn line, but the reader cannot tell a torn line from
+    // a format it does not know, so it gives up rather than guess.
+    assert.deepEqual(read([...lines.slice(0, -1), "{ not json", lines.at(-1)]), {
+      type: "untrusted",
+      reason: "line 19 is not JSON",
     });
   });
 
@@ -1109,27 +1117,104 @@ describe("primeSessionForkReader", () => {
     );
   });
 
-  it.each([
+  const SENTINEL = "sentinel-session-content";
+  const user = (content: unknown) => message("u1", null, { role: "user", content });
+  const untrustedCases: ReadonlyArray<{
+    readonly label: string;
+    readonly lines: ReadonlyArray<unknown>;
+  }> = [
     { label: "an empty file", lines: [] },
-    { label: "only blank or torn lines", lines: ["", "{ torn"] },
+    { label: "only blank lines", lines: ["", "  "] },
+    { label: "a torn first line", lines: [`{ "type": "session", "id": "${SENTINEL}`] },
     {
       label: "a first entry that is not a session header",
-      lines: [message("u1", null, { role: "user", content: "one" }), header()],
+      lines: [message("u1", null, { role: "user", content: SENTINEL }), header()],
     },
-    { label: "a header without an id", lines: [{ type: "session", version: 3 }] },
+    { label: "a header without an id", lines: [{ type: "session", version: 3, cwd: SENTINEL }] },
     {
       label: "a v1 session, whose entries Prime gives fresh ids",
       lines: [header(undefined), { type: "message", message: { role: "user", content: "one" } }],
     },
     {
       label: "a session format newer than Prime 1.0.0's",
-      lines: [header(4), message("u1", null, { role: "user", content: "one" })],
+      lines: [header(4), message("u1", null, { role: "user", content: SENTINEL })],
     },
+    { label: "a version that is not a number", lines: [{ ...header(), version: SENTINEL }] },
     {
       label: "a user entry without an id",
-      lines: [header(), { type: "message", message: { role: "user", content: "one" } }],
+      lines: [header(), { type: "message", message: { role: "user", content: SENTINEL } }],
     },
-  ])("[VAL-FORK-002] refuses $label", ({ lines }) => {
-    assert.equal(read(lines).type, "invalid");
+    {
+      label: "a non-blank line that does not parse",
+      lines: [header(), `{ ${SENTINEL}`, user("one")],
+    },
+    { label: "a line that is not an object", lines: [header(), JSON.stringify(SENTINEL)] },
+    { label: "an entry without a string type", lines: [header(), { id: SENTINEL, type: 7 }] },
+    {
+      label: "an entry type outside Prime's session entry union",
+      lines: [header(), entry("f1", null, { type: SENTINEL })],
+    },
+    { label: "a second session header", lines: [header(), header()] },
+    {
+      label: "a message entry without a message",
+      lines: [header(), entry("m1", null, { type: "message", message: SENTINEL })],
+    },
+    {
+      label: "a message role Prime does not define",
+      lines: [header(), message("m1", null, { role: SENTINEL, content: "one" })],
+    },
+    {
+      label: "a hookMessage role in a v3 session, which migration renamed",
+      lines: [header(), message("m1", null, { role: "hookMessage", content: SENTINEL })],
+    },
+    { label: "user content that is neither text nor parts", lines: [header(), user({ SENTINEL })] },
+    {
+      label: "a user content part of an unknown type",
+      lines: [header(), user([{ type: SENTINEL, text: SENTINEL }])],
+    },
+    {
+      label: "a user text part without string text",
+      lines: [header(), user([{ type: "text", value: SENTINEL }])],
+    },
+    {
+      label: "assistant content that is not a part list",
+      lines: [header(), message("a1", null, { role: "assistant", content: SENTINEL })],
+    },
+    {
+      label: "a tool result with a thinking part",
+      lines: [
+        header(),
+        message("t1", null, {
+          role: "toolResult",
+          content: [{ type: "thinking", thinking: SENTINEL }],
+        }),
+      ],
+    },
+  ];
+
+  it.each(untrustedCases)("[VAL-FORK-002] does not trust $label", ({ lines }) => {
+    assert.equal(read(lines).type, "untrusted");
+  });
+
+  it("[VAL-FORK-002] never puts session file content in an untrusted reason", () => {
+    for (const { label, lines } of untrustedCases) {
+      const result = read(lines);
+      assert.equal(result.type, "untrusted", label);
+      if (result.type !== "untrusted") continue;
+      assert.notInclude(result.reason, SENTINEL, label);
+      assert.notInclude(result.reason, "019a0000", label);
+      assert.notInclude(result.reason, "/workspace", label);
+    }
+  });
+
+  it("[VAL-FORK-002] names the line and version, and keeps the first reason", () => {
+    assert.deepEqual(read([header(4), "{ torn"]), {
+      type: "untrusted",
+      reason: "the session uses format version 4, and T3 reads versions 2 to 3",
+    });
+    assert.deepEqual(read([header(), user("one"), "", entry("f1", null, { type: "x" }), "{"]), {
+      type: "untrusted",
+      reason: "line 4 has an entry type T3 does not recognise",
+    });
   });
 });
