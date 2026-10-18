@@ -13,6 +13,8 @@ const MIN_INSTRUCTION_LINE_CHARS = 20;
 /** Shorter values would match inside ordinary words. */
 const MIN_API_KEY_CHARS = 8;
 const MIN_HOST_NAME_CHARS = 4;
+/** What the adapter sends as `machineId`; it names no machine and would match ordinary text. */
+const NEUTRAL_MACHINE_IDS: ReadonlySet<string> = new Set(["default"]);
 
 export interface LeakCheck {
   readonly category: string;
@@ -30,6 +32,7 @@ export interface LeakCheckInput {
   readonly userName: string;
   readonly hostNames: ReadonlyArray<string>;
   readonly hostIds: ReadonlyArray<string>;
+  readonly machineIds: ReadonlyArray<string>;
   /** Recording-only directories that must have become placeholders. */
   readonly tempDirs: ReadonlyArray<string>;
   /** Text of the global instruction files; only its distinctive lines are kept, in memory. */
@@ -86,6 +89,10 @@ export function buildLeakChecks(input: LeakCheckInput): ReadonlyArray<LeakCheck>
       input.hostNames.filter((name) => name.length >= MIN_HOST_NAME_CHARS),
     ),
     containsAny("host id", input.hostIds),
+    containsAny(
+      "machine id",
+      input.machineIds.filter((id) => !NEUTRAL_MACHINE_IDS.has(id)),
+    ),
     containsAny("Droid home path", [".factory/"]),
     containsAny("agents home path", [".agents/"]),
     containsAny("system temp path", ["/var/folders", "/private/tmp", "/private/var"]),

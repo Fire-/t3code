@@ -37,7 +37,7 @@ import {
   REJECTED_TRANSCRIPT_DIRECTORY,
   writeRejectedTranscript,
 } from "./droidReplayLeakCheck.ts";
-import { collectHostIds, scrubDroidEntries } from "./droidReplayScrub.ts";
+import { collectHostIds, collectMachineIds, scrubDroidEntries } from "./droidReplayScrub.ts";
 
 /**
  * Which fixtures may be recorded, and what each needs around the binary. The fixture
@@ -301,6 +301,7 @@ const recordTranscript = (input: {
     }).pipe(Effect.scoped, provideDeterministicTestRuntime);
 
     const hostIds = collectHostIds(entries);
+    const machineIds = collectMachineIds(entries);
     const protocolVersion = recordedProtocolVersion(entries);
     const transcript = {
       ...placeholder,
@@ -340,6 +341,7 @@ const recordTranscript = (input: {
       userName,
       hostNames,
       hostIds,
+      machineIds,
       tempDirs: [paths.root, paths.workspace],
       instructionTexts: yield* readGlobalInstructionTexts(home),
       apiKey: process.env.FACTORY_API_KEY,

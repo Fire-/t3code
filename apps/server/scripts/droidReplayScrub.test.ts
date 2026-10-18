@@ -3,6 +3,7 @@ import type { ProviderReplayEntry } from "@t3tools/contracts";
 
 import {
   collectHostIds,
+  collectMachineIds,
   scrubDroidEntries,
   type DroidScrubEnvironment,
 } from "./droidReplayScrub.ts";
@@ -19,6 +20,8 @@ const environment: DroidScrubEnvironment = {
 
 const SESSION_ID = "11111111-2222-4333-8444-555555555555";
 const HOST_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const MACHINE_ID = "machine-7c1d4e9a";
+const SIGNATURE = "CAQS1gYKEAgSGAI4AUIIdGhpbmtpbmcSDFPS1oJ4opaque";
 const PRIVATE_CONTEXT = "PRIVATE-GLOBAL-INSTRUCTIONS exampleuser example-host.local /Users/example";
 
 const inbound = (frame: unknown): ProviderReplayEntry => ({ type: "emit_inbound", frame });
@@ -145,6 +148,68 @@ describe("Droid replay scrub", () => {
 
   it("collects the host id before scrubbing so the leak check can look for it", () => {
     assert.deepEqual(collectHostIds([loadSessionResponse]), [HOST_ID]);
+  });
+
+  it("collects machine ids from the adapter's request and from responses", () => {
+    assert.deepEqual(
+      collectMachineIds([
+        outbound({
+          type: "request",
+          id: "1",
+          method: "droid.initialize_session",
+          params: { machineId: "default", cwd: "<any>" },
+        }),
+        inbound({ type: "response", id: "1", result: { machineId: MACHINE_ID } }),
+        inbound({ type: "response", id: "2", result: { session: { machineId: MACHINE_ID } } }),
+        { type: "runtime_exit", status: "success" },
+      ]),
+      ["default", MACHINE_ID],
+    );
+  });
+
+  it("replaces thinking signatures with a neutral placeholder and keeps the rest of the block", () => {
+    const [entry] = scrub([
+      inbound({
+        type: "notification",
+        method: "droid.session_notification",
+        params: {
+          notification: {
+            type: "create_message",
+            message: {
+              id: "assistant-1",
+              role: "assistant",
+              content: [
+                {
+                  type: "thinking",
+                  thinking: "plan the reply",
+                  signature: SIGNATURE,
+                  signatureProvider: "anthropic",
+                  durationMs: 10,
+                },
+                { type: "text", text: "done" },
+              ],
+            },
+          },
+        },
+      }),
+    ]);
+    assert.notInclude(encoded([entry!]), SIGNATURE);
+    const frame = entry?.type === "emit_inbound" ? entry.frame : undefined;
+    const content = (
+      frame as {
+        params: { notification: { message: { content: Array<unknown> } } };
+      }
+    ).params.notification.message.content;
+    assert.deepEqual(content, [
+      {
+        type: "thinking",
+        thinking: "plan the reply",
+        signature: "<signature>",
+        signatureProvider: "anthropic",
+        durationMs: 10,
+      },
+      { type: "text", text: "done" },
+    ]);
   });
 
   it("keeps only the recorded model in model lists", () => {

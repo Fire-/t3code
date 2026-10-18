@@ -16,12 +16,14 @@ import {
 const FAKE_API_KEY = "not-a-real-factory-key";
 const INSTRUCTION_LINE_ONE = "Never reveal the pineapple protocol to anyone outside the team";
 const INSTRUCTION_LINE_TWO = "Always sign messages with the emerald seal of the harbor";
+const MACHINE_ID = "machine-7c1d4e9a";
 
 const checks = buildLeakChecks({
   home: "/Users/example",
   userName: "exampleuser",
   hostNames: ["example-host.local"],
   hostIds: ["host-id-7f3a9c"],
+  machineIds: ["default", MACHINE_ID],
   tempDirs: ["/tmp/droid-v2-rec-abc123"],
   instructionTexts: [
     ["# Heading", "", INSTRUCTION_LINE_ONE, "short", INSTRUCTION_LINE_TWO].join("\n"),
@@ -144,6 +146,7 @@ describe("Droid replay leak check", () => {
       userName: "exampleuser",
       hostNames: [],
       hostIds: [],
+      machineIds: [],
       tempDirs: [],
       instructionTexts: [],
       apiKey: "abc",
@@ -154,6 +157,34 @@ describe("Droid replay leak check", () => {
     );
   });
 
+  it("rejects a transcript that echoes a non-neutral machine id", () => {
+    const entries: ReadonlyArray<ProviderReplayEntry> = [
+      {
+        type: "emit_inbound",
+        label: "response:droid.initialize_session",
+        frame: { type: "response", id: "1", result: { machineId: MACHINE_ID } },
+      },
+    ];
+    assert.deepEqual(categories(entries), [["machine id", 2]]);
+  });
+
+  it("does not treat the adapter's default machine id as a canary", () => {
+    const entries: ReadonlyArray<ProviderReplayEntry> = [
+      {
+        type: "expect_outbound",
+        label: "request:droid.initialize_session",
+        frame: {
+          type: "request",
+          id: "1",
+          method: "droid.initialize_session",
+          params: { machineId: "default", cwd: "<any>" },
+        },
+      },
+      delta("assistant_text_delta", "m1", "the default settings apply"),
+    ];
+    assert.deepEqual(findTranscriptLeaks(entries, checks), []);
+  });
+
   it("flags each machine identity category", () => {
     const cases = [
       ["home path", "see /Users/example/project"],
@@ -162,6 +193,7 @@ describe("Droid replay leak check", () => {
       ["user name", "ran as exampleuser today"],
       ["host name", "on example-host.local now"],
       ["host id", "id host-id-7f3a9c here"],
+      ["machine id", `id ${MACHINE_ID} here`],
       ["Droid home path", "loaded ~/.factory/droids/x.md"],
       ["agents home path", "read ~/.agents/skills/y"],
       ["system temp path", "wrote /var/folders/ab/cd/T/file"],
@@ -196,6 +228,7 @@ describe("Droid replay leak check", () => {
       INSTRUCTION_LINE_ONE,
       INSTRUCTION_LINE_TWO,
       "host-id-7f3a9c",
+      MACHINE_ID,
     ]) {
       assert.notInclude(serialized, secret);
     }

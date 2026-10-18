@@ -4,6 +4,7 @@ import * as Predicate from "effect/Predicate";
 
 const HIDDEN_CONTEXT_PLACEHOLDER = "<hidden-context>";
 const HOST_ID_PLACEHOLDER = "<host-id>";
+const SIGNATURE_PLACEHOLDER = "<signature>";
 const ANY_PLACEHOLDER = "<any>";
 
 /** Wall-clock values are shifted so the earliest one lands here and offsets between them survive. */
@@ -47,15 +48,17 @@ const withoutPrivateAlias = (path: string): string => path.replace(/^\/private(?
 const pathPattern = (path: string): RegExp =>
   new RegExp(`(?:/private)?${escapeRegExp(withoutPrivateAlias(path))}${PATH_END}`, "gu");
 
-/** Host ids come from the responses themselves, so a leak check can look for what was replaced. */
-export function collectHostIds(entries: ReadonlyArray<ProviderReplayEntry>): ReadonlyArray<string> {
+function collectKeyedStrings(
+  entries: ReadonlyArray<ProviderReplayEntry>,
+  wanted: string,
+): ReadonlyArray<string> {
   const found = new Set<string>();
   const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
     } else if (isRecord(value)) {
       for (const [key, item] of Object.entries(value)) {
-        if (key === "hostId" && Predicate.isString(item) && item.length > 0) found.add(item);
+        if (key === wanted && Predicate.isString(item) && item.length > 0) found.add(item);
         else visit(item);
       }
     }
@@ -63,6 +66,17 @@ export function collectHostIds(entries: ReadonlyArray<ProviderReplayEntry>): Rea
   for (const entry of entries) if (entry.type !== "runtime_exit") visit(entry.frame);
   return [...found];
 }
+
+/** Host ids come from the responses themselves, so a leak check can look for what was replaced. */
+export const collectHostIds = (entries: ReadonlyArray<ProviderReplayEntry>) =>
+  collectKeyedStrings(entries, "hostId");
+
+/**
+ * The scrubber leaves machine ids alone, so a value the adapter did not send itself stays in the
+ * transcript and the leak check rejects it.
+ */
+export const collectMachineIds = (entries: ReadonlyArray<ProviderReplayEntry>) =>
+  collectKeyedStrings(entries, "machineId");
 
 function blankHiddenContent(record: Record<string, unknown>): Record<string, unknown> {
   if (
@@ -174,7 +188,10 @@ export function scrubDroidEntries(
 
   const walk = (value: unknown, key?: string): unknown => {
     if (Predicate.isString(value)) {
-      return key === "hostId" ? HOST_ID_PLACEHOLDER : scrubber.text(value);
+      if (key === "hostId") return HOST_ID_PLACEHOLDER;
+      // Thinking-block signatures are opaque provider blobs; the adapter never sends them back.
+      if (key === "signature") return SIGNATURE_PLACEHOLDER;
+      return scrubber.text(value);
     }
     if (Predicate.isNumber(value)) return scrubber.number(key, value);
     if (Array.isArray(value)) {
