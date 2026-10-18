@@ -6,6 +6,7 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import { DroidSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -51,6 +52,7 @@ export type DroidDriverEnv =
   | ProviderHost.ProviderHost
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
+  | Path.Path
   | HttpClient.HttpClient
   | ProviderLatestVersions.ProviderLatestVersions;
 
@@ -65,6 +67,8 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
       // Inherits the host environment, so FACTORY_API_KEY reaches Droid when it is set there.
@@ -97,6 +101,8 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         checkProvider: checkDroidProviderStatus(effectiveConfig, processEnv).pipe(
           Effect.map(stampIdentity),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, pathService),
         ),
         enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
           resolveMaintenance().pipe(

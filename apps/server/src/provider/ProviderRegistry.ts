@@ -159,12 +159,18 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
 
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
   const isCodex = provider.driver === ProviderDriverKind.make("codex");
-  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
+  const isDroid = provider.driver === ProviderDriverKind.make("droid");
+  if (
+    !isAntigravity &&
+    !isCodex &&
+    !isDroid &&
+    provider.driver !== ProviderDriverKind.make("opencode")
+  ) {
     return true;
   }
 
   if (
-    (isAntigravity || isCodex) &&
+    (isAntigravity || isCodex || isDroid) &&
     (!provider.enabled || provider.auth.status === "unauthenticated")
   ) {
     return false;
@@ -176,8 +182,15 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   const isPendingInitialProbe =
     provider.enabled && !provider.installed && provider.status === "warning";
   const didInstalledProviderProbeFail = provider.installed && provider.status === "error";
+  // Droid discovers its list live: a ready probe's list is authoritative, while a degraded
+  // probe (discovery failed or timed out) only knows the custom models.
+  const isDegradedInstalledDroidProbe =
+    isDroid && provider.installed && provider.status !== "ready";
   return (
-    isPendingAntigravityAuthentication || isPendingInitialProbe || didInstalledProviderProbeFail
+    isPendingAntigravityAuthentication ||
+    isPendingInitialProbe ||
+    didInstalledProviderProbeFail ||
+    isDegradedInstalledDroidProbe
   );
 };
 

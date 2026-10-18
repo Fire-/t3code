@@ -63,6 +63,94 @@ describe("mobile model options", () => {
     ]);
   });
 
+  it("[VAL-REG-017] labels a Droid snapshot and shows each model's sub-provider and effort choices", () => {
+    const reasoning = {
+      optionDescriptors: [
+        {
+          id: "reasoningEffort",
+          label: "Reasoning",
+          type: "select",
+          options: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High", isDefault: true },
+          ],
+        },
+      ],
+    };
+    const config = {
+      providers: [
+        {
+          instanceId: "droid",
+          driver: "droid",
+          enabled: true,
+          installed: true,
+          auth: { status: "unknown" },
+          models: [
+            {
+              slug: "claude-opus-5-5",
+              name: "Claude Opus 5.5 (2x)",
+              subProvider: "Anthropic",
+              isCustom: false,
+              isDefault: true,
+              capabilities: reasoning,
+            },
+            {
+              slug: "gpt-6-sol",
+              name: "GPT-6 Sol (1.5x)",
+              subProvider: "OpenAI",
+              isCustom: false,
+              capabilities: reasoning,
+            },
+            {
+              slug: "glm-5.3",
+              name: "GLM 5.3 (0.4x)",
+              subProvider: "Droid Core",
+              isCustom: false,
+              capabilities: { optionDescriptors: [] },
+            },
+            { slug: "my-model", name: "my-model", isCustom: true, capabilities: null },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    const options = buildModelOptions(config, null, undefined, null);
+
+    expect(options).toMatchObject([
+      {
+        key: "droid:claude-opus-5-5",
+        label: "Claude Opus 5.5 (2x)",
+        subtitle: "Anthropic",
+        providerLabel: "Droid",
+        providerDriver: "droid",
+        isDefault: true,
+      },
+      { key: "droid:gpt-6-sol", subtitle: "OpenAI", isDefault: false },
+      { key: "droid:glm-5.3", subtitle: "Droid Core" },
+      { key: "droid:my-model", subtitle: "" },
+    ]);
+    expect(options[0]?.capabilities?.optionDescriptors?.[0]).toMatchObject({
+      id: "reasoningEffort",
+      type: "select",
+    });
+    expect(options[0]?.selection).toEqual({ instanceId: "droid", model: "claude-opus-5-5" });
+    expect(groupByProvider(options)).toEqual([
+      { providerKey: "droid", providerLabel: "Droid", models: options },
+    ]);
+
+    const [chosen] = buildModelOptions(
+      config,
+      {
+        instanceId: ProviderInstanceId.make("droid"),
+        model: "claude-opus-5-5",
+        options: [{ id: "reasoningEffort", value: "low" }],
+      },
+      undefined,
+      null,
+    );
+    expect(chosen?.selection.options).toEqual([{ id: "reasoningEffort", value: "low" }]);
+  });
+
   it("carries configured ACP identity into model and provider catalogs", () => {
     const iconUrl = "https://cdn.agentclientprotocol.com/registry/v1/latest/antigravity-acp.svg";
     const config = {

@@ -87,6 +87,44 @@ describe("instance-scoped model selection", () => {
     );
   });
 
+  it('[VAL-REG-017] lists a Droid snapshot under "Droid" with each model\'s sub-provider and credit multiplier', () => {
+    const droid = ProviderDriverKind.make("droid");
+    const base = provider({ provider: droid, instanceId: "droid" });
+    const { displayName: _unset, ...snapshot } = base;
+    const providers: ReadonlyArray<ServerProvider> = [
+      {
+        ...snapshot,
+        auth: { status: "unknown" },
+        models: [
+          ["claude-opus-5-5", "Claude Opus 5.5 (2x)", "Anthropic"],
+          ["gpt-6-sol", "GPT-6 Sol (1.5x)", "OpenAI"],
+          ["glm-5.3", "GLM 5.3 (0.4x)", "Droid Core"],
+        ].map(([slug, name, subProvider], index) => ({
+          slug: slug!,
+          name: name!,
+          subProvider: subProvider!,
+          isCustom: false,
+          ...(index === 0 ? { isDefault: true } : {}),
+          capabilities: { optionDescriptors: [] },
+        })),
+      },
+    ];
+    const [entry] = deriveProviderInstanceEntries(providers);
+
+    expect(entry).toMatchObject({ driverKind: "droid", displayName: "Droid" });
+    expect(getAppModelOptionsForInstance(DEFAULT_UNIFIED_SETTINGS, entry!)).toEqual([
+      {
+        slug: "claude-opus-5-5",
+        name: "Claude Opus 5.5 (2x)",
+        subProvider: "Anthropic",
+        isCustom: false,
+        isDefault: true,
+      },
+      { slug: "gpt-6-sol", name: "GPT-6 Sol (1.5x)", subProvider: "OpenAI", isCustom: false },
+      { slug: "glm-5.3", name: "GLM 5.3 (0.4x)", subProvider: "Droid Core", isCustom: false },
+    ]);
+  });
+
   it("keeps custom models on the provider instance that declared them", () => {
     const providers = [
       provider({

@@ -6,14 +6,17 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -25,6 +28,7 @@ import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import type { DroidSettings } from "../settings.ts";
 import { DroidDriver } from "./driver.ts";
 import { DROID_HOOKS_OFF_SETTINGS } from "./hooksOffSettings.ts";
+import { makeRpcMockAgent } from "./rpcMockAgent.testkit.ts";
 import { DROID_PRESENTATION } from "./status.ts";
 
 const layerTest = Layer.mergeAll(
@@ -70,6 +74,42 @@ const makeDroidSpawner = (version = "0.244.0") => {
   return { spawner, launches };
 };
 
+/** Real subprocess tests run on the live clock; the timeout only fails a hung test. */
+const live = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.timeout("30 seconds"), TestClock.withLive);
+
+/**
+ * The carried mock agent serves the stream-jsonrpc spawn for real; `--version` is answered by a
+ * canned handle because the agent's launcher only accepts the `exec` arguments.
+ */
+const makeMockDroidSpawner = Effect.fn("makeMockDroidSpawner")(function* () {
+  const real = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const agent = yield* makeRpcMockAgent();
+  const launches: Array<ChildProcess.StandardCommand> = [];
+  const spawner = ChildProcessSpawner.make((command) => {
+    if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+    launches.push(command);
+    return command.args.includes("--version")
+      ? Effect.succeed(makeSpawnedHandle(encoder.encode("0.244.0\n")))
+      : real.spawn(command);
+  });
+  return { spawner, launches, readLog: agent.readLog, binaryPath: agent.binaryPath };
+});
+
+const receivedMethods = (log: ReadonlyArray<Record<string, unknown>>) =>
+  log
+    .filter((entry) => entry.type === "recv")
+    .map((entry) => (Predicate.isObject(entry.message) ? entry.message.method : undefined))
+    .filter(Predicate.isString);
+
+const assertM2Presentation = (snapshot: ServerProvider) => {
+  assert.deepEqual(snapshot.supportedRuntimeModes, DROID_PRESENTATION.supportedRuntimeModes);
+  assert.strictEqual(snapshot.requiresNewThreadForModelChange, false);
+  assert.strictEqual(snapshot.reportsContextWindow, false);
+  assert.strictEqual(snapshot.supportsConversationRollback, false);
+  assert.strictEqual(snapshot.showInteractionModeToggle, false);
+};
+
 const create = (config: Partial<DroidSettings> = {}, enabled = true) =>
   DroidDriver.create({
     instanceId: ProviderInstanceId.make("droid-test"),
@@ -100,31 +140,62 @@ it.layer(layerTest)("DroidDriver", (it) => {
     }),
   );
 
-  it.effect("stamps the instance identity on a probed snapshot and lists custom models", () =>
+  it.effect(
+    "[VAL-STATUS-004][VAL-STATUS-009] stamps the instance identity on a probed snapshot with discovered and custom models",
+    () =>
+      Effect.gen(function* () {
+        const { spawner, launches, readLog, binaryPath } = yield* makeMockDroidSpawner();
+        const instance = yield* create({ binaryPath, customModels: ["custom:my-model"] }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        const initial = yield* instance.snapshot.getSnapshot;
+        assertM2Presentation(initial);
+        yield* instance.snapshot.refresh;
+        const snapshot = yield* instance.snapshot.getSnapshot;
+        assert.equal(instance.driverKind, "droid");
+        assert.equal(snapshot.driver, "droid");
+        assert.equal(snapshot.instanceId, "droid-test");
+        assert.equal(snapshot.displayName, "My Droid");
+        assert.equal(snapshot.accentColor, "#abcdef");
+        assert.equal(snapshot.status, "ready");
+        assert.equal(snapshot.version, "0.244.0");
+        assertM2Presentation(snapshot);
+        assert.equal(
+          snapshot.continuation?.groupKey,
+          instance.continuationIdentity.continuationKey,
+        );
+        assert.deepEqual(
+          snapshot.models.map((model) => [model.slug, model.isCustom]),
+          [
+            ["auto", false],
+            ["claude-opus-5-5", false],
+            ["gpt-6-sol", false],
+            ["deepseek-v4.1-flash", false],
+            ["glm-5.3", false],
+            ["custom:my-model", true],
+          ],
+        );
+        const probe = launches.find((launch) => launch.args.includes("--version"));
+        assert.isDefined(probe);
+        assert.equal(probe!.command, binaryPath);
+        assert.equal(probe!.options.env?.T3_DROID_TEST, "instance-value");
+        const discovery = launches.find((launch) => launch.args[0] === "exec");
+        assert.equal(discovery?.options.env?.T3_DROID_TEST, "instance-value");
+        assert.deepEqual(receivedMethods(yield* readLog), ["droid.list_models"]);
+      }).pipe(Effect.scoped, live),
+  );
+
+  it.effect("[VAL-STATUS-001] repeated background refreshes never open a session", () =>
     Effect.gen(function* () {
-      const { spawner, launches } = makeDroidSpawner();
-      const instance = yield* create({ customModels: ["custom:my-model"] }).pipe(
+      const { spawner, readLog, binaryPath } = yield* makeMockDroidSpawner();
+      const instance = yield* create({ binaryPath }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
       yield* instance.snapshot.refresh;
-      const snapshot = yield* instance.snapshot.getSnapshot;
-      assert.equal(instance.driverKind, "droid");
-      assert.equal(snapshot.driver, "droid");
-      assert.equal(snapshot.instanceId, "droid-test");
-      assert.equal(snapshot.displayName, "My Droid");
-      assert.equal(snapshot.accentColor, "#abcdef");
-      assert.equal(snapshot.status, "ready");
-      assert.equal(snapshot.version, "0.244.0");
-      assert.equal(snapshot.continuation?.groupKey, instance.continuationIdentity.continuationKey);
-      assert.deepEqual(
-        snapshot.models.map((model) => model.slug),
-        ["custom:my-model"],
-      );
-      const probe = launches.find((launch) => launch.args.includes("--version"));
-      assert.isDefined(probe);
-      assert.equal(probe!.command, "custom-droid");
-      assert.equal(probe!.options.env?.T3_DROID_TEST, "instance-value");
-    }).pipe(Effect.scoped),
+      yield* instance.snapshot.refresh;
+      const methods = receivedMethods(yield* readLog);
+      assert.deepEqual(methods, ["droid.list_models", "droid.list_models"]);
+    }).pipe(Effect.scoped, live),
   );
 
   it.effect("[VAL-REG-004] does not spawn Droid for a disabled instance", () =>
