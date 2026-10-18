@@ -122,7 +122,7 @@ const EXPECTED_CAPABILITIES = {
   planning: {
     emitsPlanUpdated: false,
     emitsTodoList: false,
-    emitsProposedPlan: false,
+    emitsProposedPlan: true,
     supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
   },

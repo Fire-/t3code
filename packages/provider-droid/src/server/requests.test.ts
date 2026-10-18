@@ -1,8 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import {
+  DROID_EXIT_SPEC_MODE,
   droidApprovalRequest,
   droidAskUserReply,
+  droidExitSpecModePlan,
   droidPermissionReply,
   droidUserInputRequest,
 } from "./requests.ts";
@@ -232,5 +234,57 @@ describe("droidAskUserReply", () => {
     assert.isUndefined(droidAskUserReply(request, {}));
     assert.isUndefined(droidAskUserReply(request, { "question-1": 42 }));
     assert.isUndefined(droidAskUserReply(request, undefined));
+  });
+});
+
+describe("droidExitSpecModePlan", () => {
+  const exitParams = (entry: { readonly details?: unknown; readonly input?: unknown }) => ({
+    toolUses: [
+      {
+        toolUse: { type: "tool_use", id: "tool-9", name: "ExitSpecMode", input: entry.input ?? {} },
+        confirmationType: DROID_EXIT_SPEC_MODE,
+        details: entry.details ?? { type: "exit_spec_mode" },
+      },
+    ],
+    options: [{ label: "No, keep iterating on spec", value: "cancel" }],
+  });
+
+  it("[VAL-PLAN-002] an exit_spec_mode request is recognized by its confirmation type", () => {
+    const request = droidApprovalRequest(exitParams({}));
+    assert.strictEqual(request.confirmationType, DROID_EXIT_SPEC_MODE);
+    assert.strictEqual(DROID_EXIT_SPEC_MODE, "exit_spec_mode");
+    assert.deepStrictEqual(request.toolUseIds, ["tool-9"]);
+  });
+
+  it("[VAL-PLAN-003] the plan is details.plan, exactly as Droid wrote it", () => {
+    const plan = "# Plan\n\n1. Create `hello.txt`.\n";
+    assert.strictEqual(
+      droidExitSpecModePlan(
+        exitParams({ details: { type: "exit_spec_mode", plan }, input: { plan: "ignored" } }),
+      ),
+      plan,
+    );
+  });
+
+  it("[VAL-PLAN-003] the ExitSpecMode tool input stands in when the details carry no plan", () => {
+    assert.strictEqual(
+      droidExitSpecModePlan(exitParams({ input: { plan: "From the input" } })),
+      "From the input",
+    );
+    assert.strictEqual(
+      droidExitSpecModePlan(
+        exitParams({ details: { type: "exit_spec_mode", plan: "  " }, input: { plan: "Input" } }),
+      ),
+      "Input",
+    );
+  });
+
+  it("[VAL-PLAN-003] no plan text anywhere is undefined, never an empty plan", () => {
+    assert.isUndefined(droidExitSpecModePlan(exitParams({})));
+    assert.isUndefined(
+      droidExitSpecModePlan(exitParams({ details: { plan: 42 }, input: { plan: "" } })),
+    );
+    assert.isUndefined(droidExitSpecModePlan({ toolUses: [] }));
+    assert.isUndefined(droidExitSpecModePlan(undefined));
   });
 });

@@ -10,9 +10,11 @@
 import {
   type NodeId,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PlanArtifact,
   type OrchestrationV2ProviderRef,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type PlanId,
   type RunId,
   type ThreadId,
   type ThreadTokenUsageSnapshot,
@@ -833,6 +835,67 @@ function mapToolProgress(
       },
     ],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Proposed plans
+// ---------------------------------------------------------------------------
+
+/**
+ * The plan Droid wrote before asking to leave spec mode: a `proposed_plan` item in the turn and
+ * its artifact, which supersedes the thread's previous proposal. `sourceId` is the ExitSpecMode
+ * tool use (or the request) that carried the plan. The adapter allocates `planId` and keeps the
+ * returned `plan` as the next call's `previous`.
+ */
+export function mapDroidProposedPlan(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  input: {
+    readonly planId: PlanId;
+    readonly sourceId: string;
+    readonly markdown: string;
+    readonly previous: OrchestrationV2PlanArtifact | undefined;
+  },
+  now: DateTime.Utc,
+): DroidMapResult & { readonly plan: OrchestrationV2PlanArtifact } {
+  const nativeItemId = `${ctx.providerTurn.id}:plan:${input.sourceId}`;
+  const base = itemBase(ctx, nativeItemId, state.nextItemOrdinal, now, now);
+  const plan: OrchestrationV2PlanArtifact = {
+    id: input.planId,
+    threadId: ctx.threadId,
+    runId: ctx.runId,
+    nodeId: base.nodeId,
+    kind: "proposed_plan",
+    status: "active",
+    markdown: input.markdown,
+  };
+  const events: Array<ProviderAdapterV2Event> = [];
+  if (input.previous !== undefined) {
+    events.push({
+      type: "plan.updated",
+      driver: DROID_DRIVER,
+      plan: { ...input.previous, status: "superseded" },
+    });
+  }
+  events.push(
+    nodeEvent(ctx, nativeItemId, "plan", "completed", now, now),
+    { type: "plan.updated", driver: DROID_DRIVER, plan },
+    {
+      type: "turn_item.updated",
+      driver: DROID_DRIVER,
+      turnItem: {
+        ...base,
+        status: "completed",
+        title: null,
+        completedAt: now,
+        type: "proposed_plan",
+        planId: input.planId,
+        markdown: input.markdown,
+        streaming: false,
+      },
+    },
+  );
+  return { state: { ...state, nextItemOrdinal: state.nextItemOrdinal + 1 }, events, plan };
 }
 
 // ---------------------------------------------------------------------------

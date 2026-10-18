@@ -3,6 +3,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   NodeId,
+  PlanId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
@@ -22,6 +23,7 @@ import {
   droidTurnTokenUsage,
   flushDroidStreams,
   mapDroidNotification,
+  mapDroidProposedPlan,
   settleDroidTurn,
 } from "./events.ts";
 
@@ -1509,5 +1511,81 @@ describe("notifications the content mapper does not own", () => {
       { type: "assistant_message_retracted" },
     ]);
     assert.deepStrictEqual(events, []);
+  });
+});
+
+describe("mapDroidProposedPlan", () => {
+  const PLAN_ID = PlanId.make("plan-1");
+  const ctx = context();
+  const state = createDroidTurnState({ firstItemOrdinal: 101 });
+  const markdown = "# Plan\n\n1. Do it.";
+
+  it("[VAL-PLAN-003] a proposed plan is a completed plan node, an active artifact, and a finished item", () => {
+    const result = mapDroidProposedPlan(
+      state,
+      ctx,
+      { planId: PLAN_ID, sourceId: "tool-9", markdown, previous: undefined },
+      at(5),
+    );
+    assert.deepStrictEqual(
+      result.events.map((event) => event.type),
+      ["node.updated", "plan.updated", "turn_item.updated"],
+    );
+    const nativeItemId = "provider-turn-1:plan:tool-9";
+    const nodeId = derive.nodeFromProviderItem({ driver: DROID, nativeItemId });
+    const [node, planEvent, itemEvent] = result.events;
+    assert.strictEqual(node?.type === "node.updated" && node.node.id, nodeId);
+    assert.strictEqual(node?.type === "node.updated" && node.node.kind, "plan");
+    assert.strictEqual(node?.type === "node.updated" && node.node.status, "completed");
+    assert.deepStrictEqual(planEvent?.type === "plan.updated" && planEvent.plan, {
+      id: PLAN_ID,
+      threadId: ThreadId.make("thread-1"),
+      runId: RunId.make("run-1"),
+      nodeId,
+      kind: "proposed_plan",
+      status: "active",
+      markdown,
+    });
+    const item = itemEvent?.type === "turn_item.updated" ? itemEvent.turnItem : undefined;
+    assert.strictEqual(item?.type, "proposed_plan");
+    if (item?.type !== "proposed_plan") return;
+    assert.strictEqual(item.planId, PLAN_ID);
+    assert.strictEqual(item.markdown, markdown);
+    assert.strictEqual(item.streaming, false);
+    assert.strictEqual(item.status, "completed");
+    assert.strictEqual(item.ordinal, 101);
+    assert.strictEqual(item.nodeId, nodeId);
+    assert.strictEqual(item.nativeItemRef?.nativeId, nativeItemId);
+    assert.strictEqual(result.state.nextItemOrdinal, 102);
+    assert.strictEqual(result.plan.id, PLAN_ID);
+  });
+
+  it("[VAL-PLAN-003] the previous proposal is superseded before the new one is published", () => {
+    const first = mapDroidProposedPlan(
+      state,
+      ctx,
+      { planId: PLAN_ID, sourceId: "tool-1", markdown: "# First", previous: undefined },
+      at(1),
+    );
+    const second = mapDroidProposedPlan(
+      first.state,
+      ctx,
+      {
+        planId: PlanId.make("plan-2"),
+        sourceId: "tool-2",
+        markdown: "# Second",
+        previous: first.plan,
+      },
+      at(2),
+    );
+    const plans = ofType(second.events, "plan.updated").map((event) => [
+      event.plan.id,
+      event.plan.status,
+    ]);
+    assert.deepStrictEqual(plans, [
+      [PLAN_ID, "superseded"],
+      [PlanId.make("plan-2"), "active"],
+    ]);
+    assert.strictEqual(second.state.nextItemOrdinal, 103);
   });
 });

@@ -300,7 +300,7 @@ const assertPresentation = (
   assert.strictEqual(snapshot.requiresNewThreadForModelChange, false);
   assert.strictEqual(snapshot.reportsContextWindow, true);
   assert.strictEqual(snapshot.supportsConversationRollback, false);
-  assert.strictEqual(snapshot.showInteractionModeToggle, false);
+  assert.strictEqual(snapshot.showInteractionModeToggle, true);
 };
 
 describe("DROID_PRESENTATION", () => {
@@ -315,7 +315,7 @@ describe("DROID_PRESENTATION", () => {
     assert.isTrue(DROID_PRESENTATION.reportsContextWindow);
     // Each turns on in the feature that implements it: VAL-PLAN-012 (M4) and VAL-HIST-004 (M5).
     assert.isFalse(DROID_PRESENTATION.supportsConversationRollback);
-    assert.isFalse(DROID_PRESENTATION.showInteractionModeToggle);
+    assert.isTrue(DROID_PRESENTATION.showInteractionModeToggle);
   });
 });
 

@@ -40,7 +40,7 @@ import { makeDroidRpcRuntime } from "./rpc.ts";
 
 export const DROID_PRESENTATION = {
   displayName: "Droid",
-  showInteractionModeToggle: false,
+  showInteractionModeToggle: true,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"],
   reportsContextWindow: true,
   requiresNewThreadForModelChange: false,

@@ -119,7 +119,7 @@ const assertPresentation = (snapshot: ServerProvider) => {
   // The adapter fills `contextUsage` from Droid's token counts, so the UI can show a window.
   assert.strictEqual(snapshot.reportsContextWindow, true);
   assert.strictEqual(snapshot.supportsConversationRollback, false);
-  assert.strictEqual(snapshot.showInteractionModeToggle, false);
+  assert.strictEqual(snapshot.showInteractionModeToggle, true);
 };
 
 const create = (config: Partial<DroidSettings> = {}, enabled = true) =>

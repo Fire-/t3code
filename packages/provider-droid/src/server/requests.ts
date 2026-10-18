@@ -15,6 +15,9 @@ import { droidAskUserQuestionsFromParams, type DroidAskUserQuestion } from "./pr
 /** Droid's own option id for saying no; every permission prompt carries it. */
 export const DROID_CANCEL_OPTION = "cancel";
 
+/** The `confirmationType` of the permission Droid raises when its agent wants to leave spec mode. */
+export const DROID_EXIT_SPEC_MODE = "exit_spec_mode";
+
 const MAX_PROMPT_CHARS = 4_000;
 
 /**
@@ -155,6 +158,23 @@ export function droidPermissionReply(
   }
   const selectedOption = request.optionIds.get(decision);
   return selectedOption === undefined ? undefined : { selectedOption };
+}
+
+const nonBlank = (value: unknown): string | undefined =>
+  Predicate.isString(value) && value.trim().length > 0 ? value : undefined;
+
+/**
+ * The plan an `exit_spec_mode` request carries. `details.plan` is the text Droid shows; the
+ * ExitSpecMode tool input holds the same plan and stands in when the details lack it. The text is
+ * kept exactly as written, because it is what the user will read and implement.
+ */
+export function droidExitSpecModePlan(params: unknown): string | undefined {
+  const toolUses = field(params, "toolUses");
+  const first = Array.isArray(toolUses) ? toolUses[0] : undefined;
+  return (
+    nonBlank(field(field(first, "details"), "plan")) ??
+    nonBlank(field(field(field(first, "toolUse"), "input"), "plan"))
+  );
 }
 
 export interface DroidQuestion extends DroidAskUserQuestion {

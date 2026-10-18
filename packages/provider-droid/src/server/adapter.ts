@@ -5,6 +5,7 @@ import {
   type ChatAttachment,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PlanArtifact,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRef,
@@ -50,6 +51,7 @@ import {
   createDroidTurnState,
   DROID_ZERO_COUNTS,
   mapDroidNotification,
+  mapDroidProposedPlan,
   settleDroidTurn,
   type DroidEventContext,
   type DroidMapperState,
@@ -63,8 +65,10 @@ import {
 } from "./protocol.ts";
 import {
   DROID_CANCEL_OPTION,
+  DROID_EXIT_SPEC_MODE,
   droidApprovalRequest,
   droidAskUserReply,
+  droidExitSpecModePlan,
   droidPermissionReply,
   droidUserInputRequest,
   type DroidApprovalRequest,
@@ -141,7 +145,7 @@ const DroidProviderCapabilitiesV2 = {
   planning: {
     emitsPlanUpdated: false,
     emitsTodoList: false,
-    emitsProposedPlan: false,
+    emitsProposedPlan: true,
     supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
   },
@@ -230,6 +234,8 @@ interface DroidThreadState {
   providerThread: OrchestrationV2ProviderThread;
   activeTurn: ActiveDroidTurn | null;
   history: ReadonlyArray<DroidHistoryMessage>;
+  /** The thread's newest proposed plan; a later proposal supersedes it. */
+  latestPlan: OrchestrationV2PlanArtifact | undefined;
 }
 
 const MAX_ERROR_MESSAGE_CHARS = 1_000;
@@ -825,10 +831,22 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         const state = threadState;
         if (state === null) return;
         if (notification.type === "settings_updated") {
+          // Only the autonomy level is read back. The interaction mode never is: Droid stays in
+          // spec mode after a plan whatever an echo says, and `applied` has to keep saying so for
+          // the next default turn to send the switch.
           const level = echoedDroidAutonomy(notification);
           if (applied !== undefined && level !== undefined) {
             applied = { ...applied, autonomyLevel: level };
           }
+          return;
+        }
+        if (notification.type === "spec_handoff_session_created") {
+          // Only a `proceed_new_session*` reply starts one and t3 never sends it. The new session
+          // is empty, so the thread keeps the session it has.
+          const describeId = (value: unknown) => (Predicate.isString(value) ? value : "unknown");
+          yield* logWarning(
+            `Droid started session ${describeId(notification["newSessionId"])} for a spec handoff (${describeId(notification["specHandoffId"])}) from session ${boundNativeId()}; the thread stays on its own session.`,
+          );
           return;
         }
         const turn = state.activeTurn;
@@ -872,6 +890,75 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         yield* emitMapped(state, mapped.events);
       });
 
+      const projectProposedPlan = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        sourceId: string,
+        markdown: string,
+      ) {
+        const planId = yield* idAllocator.allocate.plan({
+          threadId: turn.turnInput.threadId,
+          runId: turn.turnInput.runId,
+          driver: DROID_PROVIDER,
+        });
+        const mapped = mapDroidProposedPlan(
+          turn.mapper,
+          eventContext(state, turn),
+          { planId, sourceId, markdown, previous: state.latestPlan },
+          yield* DateTime.now,
+        );
+        turn.mapper = mapped.state;
+        state.latestPlan = mapped.plan;
+        yield* emitMapped(state, mapped.events);
+      });
+
+      /**
+       * Droid asks to leave spec mode once its plan is written. t3 captures the plan as a proposal
+       * and cancels the request: Droid stays in spec mode, finishes the turn without implementing,
+       * and implementing is a later turn of the user's choosing. The user is never asked, and no
+       * `proceed_*` option is ever sent (the `proceed_new_session*` ones would move Droid to a
+       * session t3 does not follow).
+       */
+      const answerExitSpecMode = Effect.fnUntraced(function* (
+        state: DroidThreadState | null,
+        turn: ActiveDroidTurn | null,
+        inboundId: string,
+        request: DroidApprovalRequest,
+        params: unknown,
+      ) {
+        // The cancel leaves Droid in spec mode, so the next turn that wants auto must send it.
+        if (applied !== undefined) applied = { ...applied, interactionMode: "spec" };
+        if (state !== null && turn !== null) {
+          const markdown = droidExitSpecModePlan(params);
+          if (markdown === undefined) {
+            yield* logWarning(
+              "Droid sent an exit_spec_mode request without a plan; cancelling it.",
+            );
+          } else {
+            // The reply must go out whatever happens to the projection.
+            yield* projectProposedPlan(
+              state,
+              turn,
+              request.toolUseIds[0] ?? inboundId,
+              markdown,
+            ).pipe(
+              Effect.catchCause((cause) =>
+                logWarning(`Droid's plan could not be projected: ${Cause.pretty(cause)}`),
+              ),
+            );
+          }
+          // Droid reports the cancelled ExitSpecMode as an error result; that is the plan being
+          // held for the user, not a failed tool.
+          turn.mapper = {
+            ...turn.mapper,
+            declinedToolUseIds: new Set([...turn.mapper.declinedToolUseIds, ...request.toolUseIds]),
+          };
+        } else {
+          yield* logDebug("Cancelling a Droid exit_spec_mode request that arrived outside a turn.");
+        }
+        yield* rpc.respond(inboundId, { selectedOption: DROID_CANCEL_OPTION }).pipe(Effect.ignore);
+      });
+
       const handleInbound = Effect.fnUntraced(function* (
         event: Extract<DroidRpcEvent, { readonly _tag: "Request" }>,
       ) {
@@ -891,6 +978,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           }
           case "droid.request_permission": {
             const request = droidApprovalRequest(event.params);
+            if (request.confirmationType === DROID_EXIT_SPEC_MODE) {
+              return yield* answerExitSpecMode(state, turn, event.id, request, event.params);
+            }
             if (request.confirmationType === "ask_user") {
               // Droid has only been seen asking questions through `droid.ask_user`.
               yield* logWarning(
@@ -1009,7 +1099,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         );
         applied = settings;
         sessionUsage = DROID_ZERO_COUNTS;
-        threadState = { providerThread, activeTurn: null, history: [] };
+        threadState = { providerThread, activeTurn: null, history: [], latestPlan: undefined };
         yield* emit({
           type: "provider_thread.updated",
           driver: DROID_PROVIDER,
@@ -1049,6 +1139,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           providerThread,
           activeTurn: null,
           history: visibleDroidHistory(field(field(result, "session"), "messages")),
+          latestPlan: undefined,
         };
         yield* emit({
           type: "provider_thread.updated",
