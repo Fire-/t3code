@@ -613,16 +613,7 @@ describe("tool calls and results [VAL-TURN-008]", () => {
   });
 
   it("[VAL-TURN-008] maps every other tool to dynamic_tool with its name, latest input and output", () => {
-    for (const name of [
-      "Read",
-      "LS",
-      "Grep",
-      "Glob",
-      "WebSearch",
-      "FetchUrl",
-      "TodoWrite",
-      "Task",
-    ]) {
+    for (const name of ["Read", "LS", "Grep", "Glob", "WebSearch", "FetchUrl", "TodoWrite"]) {
       const { events } = feed([
         toolCall(name, {}),
         toolCall(name, { file_path: "/tmp/project/a.ts" }),
@@ -639,6 +630,19 @@ describe("tool calls and results [VAL-TURN-008]", () => {
       assert.strictEqual(final.output, "contents");
       assert.strictEqual(final.status, "completed");
     }
+  });
+
+  it("[VAL-SUB-001] leaves a Task call and its result to the subagent projection", () => {
+    const { events } = feed([
+      toolCall("Task", {}),
+      toolCall("Task", { prompt: "dig", description: "dig", subagent_type: "worker" }),
+      toolResult("session_id: child-1\nreport"),
+    ]);
+    assert.deepStrictEqual(turnItems(events), []);
+    assert.deepStrictEqual(
+      events.filter((event) => event.type === "node.updated"),
+      [],
+    );
   });
 
   it("[VAL-TURN-008] fails the item and keeps the error text when the tool_result has isError", () => {

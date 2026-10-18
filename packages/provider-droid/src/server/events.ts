@@ -42,7 +42,7 @@ import {
   subtractDroidCounts,
 } from "./protocol.ts";
 
-const DROID_DRIVER = ProviderDriverKind.make("droid");
+export const DROID_DRIVER = ProviderDriverKind.make("droid");
 
 export const DROID_ZERO_COUNTS: DroidTokenCounts = {
   inputTokens: 0,
@@ -808,12 +808,15 @@ function mapToolCall(
   const toolUse = notification["toolUse"];
   const toolUseId = Predicate.isObject(toolUse) ? asTrimmed(toolUse["id"]) : undefined;
   if (!Predicate.isObject(toolUse) || toolUseId === undefined) return unchanged(state);
+  const name = asTrimmed(toolUse["name"]);
+  // A Task is a subagent, not a tool row: `subagents.ts` projects it.
+  if (name !== undefined && droidToolKind(name) === "task") return unchanged(state);
   const nativeItemId = toolNativeItemId(ctx, toolUseId);
   const existing = state.tools.get(nativeItemId);
   if (existing?.completed) return unchanged(state);
   const tool: ToolState = {
     nativeItemId,
-    name: asTrimmed(toolUse["name"]) ?? existing?.name ?? "Tool",
+    name: name ?? existing?.name ?? "Tool",
     input: toolUse["input"] ?? existing?.input ?? {},
     surface: existing?.surface,
     completed: false,

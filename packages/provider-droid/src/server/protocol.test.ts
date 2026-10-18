@@ -7,7 +7,6 @@ import {
   DROID_NOTIFICATION_TYPES,
   DROID_PICK_OPTIONS_CANCELLED,
   DROID_PROTOCOL_VERSION,
-  DROID_TASK_COMPLETION_ID_PREFIX,
   DROID_TOOL_OUTPUT_MAX_CHARS,
   awaitedTaskReport,
   boundDroidToolOutput,
@@ -16,6 +15,8 @@ import {
   droidAskUserQuestionsFromParams,
   droidEditDiffCounts,
   droidMessageText,
+  droidTaskCompletionOf,
+  droidTaskResultReport,
   droidTokenCounts,
   droidToolKind,
   droidToolPath,
@@ -154,7 +155,7 @@ describe("tool parsers", () => {
       ["ToolSearch", "search"],
       ["WebSearch", "search"],
       ["FetchUrl", "fetch"],
-      ["Task", "unknown"],
+      ["Task", "task"],
       ["mini___slow_count", "unknown"],
     ];
     for (const [name, kind] of table) {
@@ -277,6 +278,22 @@ describe("tool parsers", () => {
     assert.strictEqual(awaitedTaskReport("   "), undefined);
     assert.strictEqual(awaitedTaskReport(undefined), undefined);
   });
+
+  it("strips the framing from a Task result before bounding it, whatever shape the content has", () => {
+    const framed = (report: string) =>
+      `session_id: child-1\nUse this report as the source of record for the delegated work.\n\n${report}`;
+    assert.strictEqual(droidTaskResultReport(framed("the report")), "the report");
+    assert.strictEqual(
+      droidTaskResultReport([{ type: "text", text: framed("block report") }]),
+      "block report",
+    );
+    const bounded = droidTaskResultReport(framed("x".repeat(DROID_TOOL_OUTPUT_MAX_CHARS * 2)));
+    assert.isDefined(bounded);
+    assert.isFalse(bounded?.includes("session_id") ?? true);
+    assert.isTrue((bounded?.length ?? Infinity) <= DROID_TOOL_OUTPUT_MAX_CHARS);
+    assert.isUndefined(droidTaskResultReport(undefined));
+    assert.isUndefined(droidTaskResultReport(framed("  ")));
+  });
 });
 
 describe("background task completion", () => {
@@ -298,8 +315,27 @@ describe("background task completion", () => {
       `Background task "bg" (${input.taskId}) just ${input.word}. This is a new asynchronous completion event.`,
     ].join("\n");
 
-  it("uses the Droid id prefix for the injected message", () => {
-    assert.strictEqual(DROID_TASK_COMPLETION_ID_PREFIX, "task-completion:");
+  const message = (id: string, role: string, text: string) => ({
+    message: { id, role, content: [{ type: "text", text }] },
+  });
+
+  it("reads the completion out of Droid's injected message, by its id prefix", () => {
+    const text = completion({ taskId: "child-1", word: "completed", output: "sub-ok" });
+    const expected = { taskId: "child-1", status: "completed" as const, summary: "sub-ok" };
+    assert.deepStrictEqual(
+      droidTaskCompletionOf(message("task-completion:abc", "system", text)),
+      expected,
+    );
+    // A stored history reads the same message back as a user message.
+    assert.deepStrictEqual(
+      droidTaskCompletionOf(message("task-completion:abc", "user", text)),
+      expected,
+    );
+    assert.isUndefined(droidTaskCompletionOf(message("a-user-message", "system", text)));
+    assert.isUndefined(
+      droidTaskCompletionOf(message("task-completion:abc", "system", "not a report")),
+    );
+    assert.isUndefined(droidTaskCompletionOf({}));
   });
 
   it("reads a completed report and drops the trailing instructions to the model", () => {

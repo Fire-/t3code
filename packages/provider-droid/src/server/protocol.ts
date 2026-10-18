@@ -161,12 +161,14 @@ function truncateDetail(value: string): string {
   return value.length > DETAIL_MAX_CHARS ? `${value.slice(0, DETAIL_MAX_CHARS - 3)}...` : value;
 }
 
-export type DroidToolKind = "execute" | "edit" | "read" | "search" | "fetch" | "unknown";
+export type DroidToolKind = "execute" | "edit" | "read" | "search" | "fetch" | "task" | "unknown";
 
 export function droidToolKind(toolName: string): DroidToolKind {
   switch (toolName) {
     case "Execute":
       return "execute";
+    case "Task":
+      return "task";
     case "Edit":
     case "MultiEdit":
     case "Create":
@@ -306,8 +308,22 @@ export function awaitedTaskReport(text: string | undefined): string | undefined 
   return asTrimmed(lines.join("\n"));
 }
 
+/**
+ * The report of a `Task` tool result: the text with Droid's framing lines removed, stripped
+ * before it is bounded so a long report cannot cut the framing in half.
+ */
+export function droidTaskResultReport(content: unknown): string | undefined {
+  const text = Predicate.isString(content)
+    ? content
+    : Array.isArray(content)
+      ? textBlocks(content).join("\n")
+      : undefined;
+  const report = awaitedTaskReport(text);
+  return report === undefined ? undefined : boundDroidToolOutput(report);
+}
+
 /** Droid's id prefix for the message a background task's completion arrives as. */
-export const DROID_TASK_COMPLETION_ID_PREFIX = "task-completion:";
+const DROID_TASK_COMPLETION_ID_PREFIX = "task-completion:";
 
 export interface DroidTaskCompletion {
   readonly taskId: string;
@@ -333,6 +349,21 @@ export function parseDroidTaskCompletion(text: string): DroidTaskCompletion | un
   const output = rawOutput === "No output available" ? undefined : rawOutput;
   const failure = asTrimmed(/^failure: *(.*)$/mu.exec(body)?.[1]);
   return { taskId, status, summary: status === "failed" ? (failure ?? output) : output };
+}
+
+/**
+ * The completion a `create_message` notification carries, when it is Droid's background-task
+ * message: its id has the `task-completion:` prefix and its text follows the CLI's template. The
+ * live role is `system`; a stored one reads as `user`, so the role is not checked.
+ */
+export function droidTaskCompletionOf(
+  notification: Readonly<Record<string, unknown>>,
+): DroidTaskCompletion | undefined {
+  const message = notification["message"];
+  if (!Predicate.isObject(message)) return undefined;
+  const id = asString(message["id"]);
+  if (id === undefined || !id.startsWith(DROID_TASK_COMPLETION_ID_PREFIX)) return undefined;
+  return parseDroidTaskCompletion(droidMessageText(message["content"]));
 }
 
 export interface DroidTokenCounts {

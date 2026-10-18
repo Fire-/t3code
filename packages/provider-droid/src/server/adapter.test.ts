@@ -127,9 +127,9 @@ const EXPECTED_CAPABILITIES = {
     planDeltasHaveItemIds: false,
   },
   subagents: {
-    supportsSubagents: false,
+    supportsSubagents: true,
     exposesSubagentThreadIds: false,
-    emitsSubagentLifecycle: false,
+    emitsSubagentLifecycle: true,
     canWaitForSubagents: false,
     canCloseSubagents: false,
     canForkSubagentThread: false,
@@ -162,7 +162,7 @@ const EXPECTED_CAPABILITIES = {
 describe("DroidAdapterV2", () => {
   describe("capabilities and registration", () => {
     it.effect(
-      "[VAL-TURN-002][VAL-REQ-015] pins the capability object, with steering and structured questions on, and the four runtime modes",
+      "[VAL-TURN-002][VAL-REQ-015][VAL-SUB-016] pins the capability object, with steering, structured questions, and subagents on, and the four runtime modes",
       () =>
         Effect.gen(function* () {
           const fake = yield* makeFakeDroid();

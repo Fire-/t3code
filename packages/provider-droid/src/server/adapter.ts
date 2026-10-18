@@ -20,6 +20,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -67,8 +68,11 @@ import {
   type DroidHistoryMessage,
 } from "./history.ts";
 import {
+  boundDroidToolOutput,
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
+  droidTaskCompletionOf,
+  type DroidTaskCompletion,
   type DroidTokenCounts,
 } from "./protocol.ts";
 import {
@@ -100,6 +104,17 @@ import {
   type DroidSessionSettings,
 } from "./sessionSettings.ts";
 import { definedDroidEnvironment } from "./status.ts";
+import {
+  droidSubagentRoster,
+  droidTaskCall,
+  launchDroidSubagent,
+  noteDroidTaskCall,
+  settleDroidSubagent,
+  settleDroidTaskResult,
+  type DroidSubagent,
+  type DroidSubagentOutcome,
+  type DroidSubagentUpdate,
+} from "./subagents.ts";
 
 export const DROID_PROVIDER = ProviderDriverKind.make("droid");
 const DEFAULT_DROID_SETTINGS = Schema.decodeSync(DroidSettings)({});
@@ -167,9 +182,9 @@ const DroidProviderCapabilitiesV2 = {
     planDeltasHaveItemIds: false,
   },
   subagents: {
-    supportsSubagents: false,
+    supportsSubagents: true,
     exposesSubagentThreadIds: false,
-    emitsSubagentLifecycle: false,
+    emitsSubagentLifecycle: true,
     canWaitForSubagents: false,
     canCloseSubagents: false,
     canForkSubagentThread: false,
@@ -258,7 +273,31 @@ interface DroidThreadState {
   history: ReadonlyArray<DroidHistoryMessage>;
   /** The thread's newest proposed plan; a later proposal supersedes it. */
   latestPlan: OrchestrationV2PlanArtifact | undefined;
+  /**
+   * The Task subagents of this session by tool use id. The roster of pending background tasks is
+   * derived from the running background ones, so the two cannot disagree.
+   */
+  readonly subagents: Map<string, DroidSubagent>;
 }
+
+const backgroundSubagentsOf = (state: DroidThreadState) =>
+  [...state.subagents.values()].filter(
+    (subagent) => subagent.background && subagent.status === "running",
+  );
+
+/** How a Task subagent ends with the turn that still holds it open. */
+const subagentStatusOnTurnEnd = (outcome: TurnOutcome): DroidSubagentOutcome["status"] =>
+  outcome.kind === "interrupted" ? "interrupted" : "failed";
+
+const completionOutcome = (completion: DroidTaskCompletion): DroidSubagentOutcome => ({
+  status:
+    completion.status === "completed"
+      ? "completed"
+      : completion.status === "stopped"
+        ? "cancelled"
+        : "failed",
+  result: completion.summary === undefined ? null : boundDroidToolOutput(completion.summary),
+});
 
 const MAX_ERROR_MESSAGE_CHARS = 1_000;
 
@@ -512,13 +551,24 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           });
         });
 
+      /**
+       * The roster is read off the subagents each time rather than kept beside them, and every
+       * thread update the adapter publishes carries it, so no update can drop or resurrect a task.
+       */
+      const rosterOf = (state: DroidThreadState) => droidSubagentRoster(state.subagents.values());
+
       const updateProviderThread = (
         state: DroidThreadState,
         patch: Partial<OrchestrationV2ProviderThread>,
       ) =>
         Effect.gen(function* () {
           const updatedAt = yield* DateTime.now;
-          state.providerThread = { ...state.providerThread, ...patch, updatedAt };
+          state.providerThread = {
+            ...state.providerThread,
+            ...patch,
+            pendingBackgroundTasks: rosterOf(state),
+            updatedAt,
+          };
           yield* emit({
             type: "provider_thread.updated",
             driver: DROID_PROVIDER,
@@ -544,6 +594,67 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           if (event.type === "provider_thread.updated") state.providerThread = event.providerThread;
           yield* emit(event);
         }
+      });
+
+      /**
+       * Records subagent updates and publishes them. A changed roster goes out first: the run's
+       * subscription stays open until the subagent's terminal arrives, and by then the thread must
+       * already have stopped listing the task.
+       */
+      const publishSubagents = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn | null,
+        updates: ReadonlyArray<DroidSubagentUpdate>,
+      ) {
+        if (updates.length === 0) return;
+        const before = rosterOf(state);
+        for (const update of updates) {
+          state.subagents.set(update.subagent.toolUseId, update.subagent);
+          if (update.surfaced && turn !== null) {
+            turn.mapper = { ...turn.mapper, nextItemOrdinal: turn.mapper.nextItemOrdinal + 1 };
+          }
+        }
+        if (!Equal.equals(before, rosterOf(state))) yield* updateProviderThread(state, {});
+        for (const update of updates) {
+          for (const event of update.events) yield* emit(event);
+        }
+      });
+
+      const settleSubagents = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        subagents: ReadonlyArray<DroidSubagent>,
+        outcome: DroidSubagentOutcome,
+      ) {
+        const now = yield* DateTime.now;
+        yield* publishSubagents(
+          state,
+          null,
+          subagents.flatMap((subagent) => settleDroidSubagent(subagent, outcome, now) ?? []),
+        );
+      });
+
+      /**
+       * Ends the background subagents of a session the adapter stops following. Droid stops them
+       * with its process, and a replaced session is never read again, so nothing would clear them
+       * later.
+       */
+      const retireBackground = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        status: DroidSubagentOutcome["status"],
+      ) {
+        yield* settleSubagents(state, backgroundSubagentsOf(state), { status, result: null });
+      });
+
+      /** A background task's report: the subagent ends with it, and the roster stops listing it. */
+      const settleBackgroundTask = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        completion: DroidTaskCompletion,
+      ) {
+        const subagent = backgroundSubagentsOf(state).find(
+          (candidate) => candidate.childSessionId === completion.taskId,
+        );
+        if (subagent === undefined) return;
+        yield* settleSubagents(state, [subagent], completionOutcome(completion));
       });
 
       const openRequest = Effect.fnUntraced(function* (
@@ -703,6 +814,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               providerSessionId: input.providerSessionId,
               nativeThreadRef: droidRef(sessionId),
               status: "idle",
+              // A new session starts no background task, whatever the row listed for the old one.
+              pendingBackgroundTasks: [],
               updatedAt: at,
             }
           : {
@@ -763,6 +876,25 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               yield* DateTime.now,
             ),
           );
+        }
+        // An awaited subagent ends with the turn that waits on it. A background one outlives the
+        // turn, unless the process goes away with it.
+        const processGone = outcome.disposition === "broken" || ended;
+        yield* settleSubagents(
+          state,
+          [...state.subagents.values()].filter(
+            (subagent) =>
+              subagent.status === "running" &&
+              (subagent.background
+                ? processGone
+                : subagent.providerTurnId === turn.providerTurn.id),
+          ),
+          { status: subagentStatusOnTurnEnd(outcome), result: null },
+        );
+        for (const [toolUseId, subagent] of state.subagents) {
+          if (subagent.providerTurnId === turn.providerTurn.id && subagent.surface === undefined) {
+            state.subagents.delete(toolUseId);
+          }
         }
         const completedAt = yield* DateTime.now;
         const settled = settleDroidTurn(
@@ -906,6 +1038,57 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         });
       });
 
+      /**
+       * The frames of a `Task`: the call, the child session starting, and the result. Returns
+       * whether the frame belonged to a Task, so the tool mapper never sees it.
+       */
+      const handleSubagentFrame = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        notification: DroidNotification,
+      ) {
+        const call = notification.type === "tool_call" ? droidTaskCall(notification) : undefined;
+        if (call !== undefined) {
+          state.subagents.set(
+            call.toolUseId,
+            noteDroidTaskCall(state.subagents.get(call.toolUseId), eventContext(state, turn), call),
+          );
+          return true;
+        }
+        if (
+          notification.type !== "child_session_available" &&
+          notification.type !== "tool_result"
+        ) {
+          return false;
+        }
+        const toolUseId = field(notification, "toolUseId");
+        const known = Predicate.isString(toolUseId)
+          ? state.subagents.get(toolUseId.trim())
+          : undefined;
+        // A result of any other tool is the mapper's, and a child session announces itself.
+        if (known === undefined && notification.type === "tool_result") return false;
+        const now = yield* DateTime.now;
+        const ctx = eventContext(state, turn);
+        const ordinal = turn.mapper.nextItemOrdinal;
+        const update =
+          notification.type === "child_session_available"
+            ? launchDroidSubagent(known, ctx, notification, ordinal, now)
+            : settleDroidTaskResult(
+                known,
+                ctx,
+                notification,
+                {
+                  interrupted: turn.mapper.interruptRequested,
+                  declined:
+                    known !== undefined && turn.mapper.declinedToolUseIds.has(known.toolUseId),
+                },
+                ordinal,
+                now,
+              );
+        if (update !== undefined) yield* publishSubagents(state, turn, [update]);
+        return true;
+      });
+
       const handleNotification = Effect.fnUntraced(function* (notification: DroidNotification) {
         const state = threadState;
         if (state === null) return;
@@ -923,6 +1106,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return;
         }
         const turn = state.activeTurn;
+        if (notification.type === "create_message") {
+          // Droid reports a finished background task as a message of its own, and does so while
+          // idle as well: the task ended whether or not a turn is open to take the report.
+          const completion = droidTaskCompletionOf(notification);
+          if (completion !== undefined) return yield* settleBackgroundTask(state, completion);
+        }
         if (turn === null) return;
         if (notification.type === "error") {
           const message = field(notification, "message");
@@ -946,6 +1135,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         if (notification.type === "queued_messages_discarded") {
           return yield* handleDiscardedSteers(state, turn, notification);
         }
+        if (yield* handleSubagentFrame(state, turn, notification)) return;
         if (notification.type === "create_message") noteQueuedSteerStarted(turn, notification);
         const mapped = mapDroidNotification(
           turn.mapper,
@@ -1094,6 +1284,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
                 );
               }
               const deliberate = closing || stopRequested;
+              // Background tasks end with the process, a deliberate stop included. A turn that
+              // was open has retired them already; this covers the process dying while idle.
+              if (state !== null) {
+                yield* retireBackground(state, deliberate ? "interrupted" : "failed");
+              }
               if (cause !== undefined && !deliberate) {
                 yield* logWarning(`Droid process ended: ${Cause.pretty(cause)}`);
               }
@@ -1212,9 +1407,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           activeTurn: null,
           history: [],
           latestPlan: undefined,
+          subagents: new Map(),
         };
         noteStartedSession(settings, result);
         sessionUsage = DROID_ZERO_COUNTS;
+        if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = state;
         yield* emit({
           type: "provider_thread.updated",
@@ -1249,9 +1446,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           activeTurn: null,
           history: visibleDroidHistory(field(field(result, "session"), "messages")),
           latestPlan: undefined,
+          subagents: new Map(),
         };
         noteLoadedSession(result);
         sessionUsage = undefined;
+        if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = state;
         yield* emit({
           type: "provider_thread.updated",
@@ -1268,6 +1467,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         if (threadState?.activeTurn != null) {
           return yield* protocolError("Cannot start a Droid session while a turn is active");
         }
+        if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = null;
         known = {};
         const settings = desiredSettings(threadInput.runtimePolicy, threadInput.modelSelection);
@@ -1293,6 +1493,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         if (current?.activeTurn != null) {
           return yield* protocolError("Cannot resume a Droid session while a turn is active");
         }
+        if (current !== null) yield* retireBackground(current, "interrupted");
         threadState = null;
         known = {};
         const state = yield* adoptSession(nativeId, row, appThreadId);
@@ -1367,7 +1568,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             return yield* protocolError("Droid turn ownership changed before it could start");
           }
           const startedAt = yield* DateTime.now;
-          state.providerThread = turnInput.providerThread;
+          state.providerThread = {
+            ...turnInput.providerThread,
+            pendingBackgroundTasks: rosterOf(state),
+          };
           const providerTurn: OrchestrationV2ProviderTurn = {
             id: idAllocator.derive.providerTurn({
               driver: DROID_PROVIDER,
@@ -1856,7 +2060,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             return yield* protocolError("Droid turn ownership changed before it could start");
           }
           const startedAt = yield* DateTime.now;
-          state.providerThread = turnInput.providerThread;
+          state.providerThread = {
+            ...turnInput.providerThread,
+            pendingBackgroundTasks: rosterOf(state),
+          };
           const providerTurn: OrchestrationV2ProviderTurn = {
             id: idAllocator.derive.providerTurn({
               driver: DROID_PROVIDER,
@@ -2020,11 +2227,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           };
           noteLoadedSession(forked.loaded);
           sessionUsage = undefined;
+          if (hosted !== null) yield* retireBackground(hosted, "interrupted");
           threadState = {
             providerThread,
             activeTurn: null,
             history: visibleDroidHistory(field(field(forked.loaded, "session"), "messages")),
             latestPlan: undefined,
+            subagents: new Map(),
           };
           return providerThread;
         }).pipe(permit.withPermits(1));
@@ -2038,6 +2247,17 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return sessionEntity;
         },
         events: Stream.fromQueue(events),
+        backgroundTasksEndWithProcess: true,
+        hasPendingBackgroundWork: Effect.sync(
+          () => threadState !== null && backgroundSubagentsOf(threadState).length > 0,
+        ),
+        hasPendingBackgroundWorkForThread: (providerThread) =>
+          Effect.sync(
+            () =>
+              threadState !== null &&
+              threadState.providerThread.id === providerThread.id &&
+              backgroundSubagentsOf(threadState).length > 0,
+          ),
         ensureThread: (threadInput) =>
           ensureThread(threadInput).pipe(
             Effect.mapError(
