@@ -37,6 +37,7 @@ import {
   REJECTED_TRANSCRIPT_DIRECTORY,
   writeRejectedTranscript,
 } from "./droidReplayLeakCheck.ts";
+import { DROID_PROBE_FIXTURES } from "./droidReplayProbes.ts";
 import { collectHostIds, collectMachineIds, scrubDroidEntries } from "./droidReplayScrub.ts";
 
 /**
@@ -56,6 +57,13 @@ const DROID_RECORDING_SCENARIOS: Readonly<Record<string, DroidRecordingScenario>
   multi_turn: {},
   provider_thread_resume: { awaitPreviousExit: true },
   turn_interrupt_mid_tool: {},
+  message_steering: {},
+  plan_questions: {},
+  proposed_plan: {},
+  // Probes (`droidReplayProbes.ts`) record to /tmp, not to a fixture file. Each restarts the
+  // process between its two turns.
+  exit_spec_mode_off: { awaitPreviousExit: true },
+  exit_spec_mode_high: { awaitPreviousExit: true },
 };
 
 /** Model turns cost real credits, so only the model agreed for fixtures may record. */
@@ -76,12 +84,15 @@ function readArgValue(name: string): string | undefined {
 }
 
 const scenarioName = readArgValue("--scenario");
-const recordableNames = ORCHESTRATOR_REPLAY_FIXTURES.filter(
-  (entry) =>
-    DROID_RECORDING_SCENARIOS[entry.name] !== undefined &&
-    entry.providers.some((provider) => provider.driver === DROID_PROVIDER),
-).map((entry) => entry.name);
-const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find((entry) => entry.name === scenarioName);
+const recordableFixtures = [...ORCHESTRATOR_REPLAY_FIXTURES, ...DROID_PROBE_FIXTURES];
+const recordableNames = recordableFixtures
+  .filter(
+    (entry) =>
+      DROID_RECORDING_SCENARIOS[entry.name] !== undefined &&
+      entry.providers.some((provider) => provider.driver === DROID_PROVIDER),
+  )
+  .map((entry) => entry.name);
+const fixture = recordableFixtures.find((entry) => entry.name === scenarioName);
 const variant = fixture?.providers.find((provider) => provider.driver === DROID_PROVIDER);
 const scenario = scenarioName === undefined ? undefined : DROID_RECORDING_SCENARIOS[scenarioName];
 if (fixture === undefined || variant === undefined || scenario === undefined) {
@@ -274,6 +285,33 @@ const recordTranscript = (input: {
     const continuationOptions =
       variant.runContinuationWorker === true ? { runContinuationWorker: true } : {};
 
+    const scrubOptions = {
+      modelId: variant.modelSelection.model,
+      workspace: paths.workspace,
+      recordingRoot: paths.root,
+      systemTmpDir,
+      home,
+      userName,
+      hostNames,
+    };
+    // A scenario step that fails mid-run (a pending approval nobody answers) loses the frames
+    // already recorded, so keep the scrubbed prefix for diagnosis instead of another model turn.
+    const keepPartialRecording = Effect.suspend(() =>
+      writeRejectedTranscript({
+        directory: REJECTED_TRANSCRIPT_DIRECTORY,
+        fixture: `${fixture.name}.partial`,
+        encoded: encodeTranscriptNdjson({
+          ...placeholder,
+          entries: scrubDroidEntries(entries, scrubOptions),
+        }),
+      }).pipe(
+        Effect.tap((file) =>
+          Console.error(`Live scenario failed; partial scrubbed transcript kept at ${file}`),
+        ),
+        Effect.ignore,
+      ),
+    );
+
     yield* Effect.gen(function* () {
       yield* followWallClock.pipe(Effect.forkScoped);
       const materialized = yield* materializeInput;
@@ -298,7 +336,11 @@ const recordTranscript = (input: {
         },
         continuationOptions,
       );
-    }).pipe(Effect.scoped, provideDeterministicTestRuntime);
+    }).pipe(
+      Effect.scoped,
+      provideDeterministicTestRuntime,
+      Effect.tapCause(() => keepPartialRecording),
+    );
 
     const hostIds = collectHostIds(entries);
     const machineIds = collectMachineIds(entries);
@@ -311,15 +353,7 @@ const recordTranscript = (input: {
         droidVersion,
         factoryProtocolVersion: protocolVersion ?? "unknown",
       },
-      entries: scrubDroidEntries(entries, {
-        modelId: variant.modelSelection.model,
-        workspace: paths.workspace,
-        recordingRoot: paths.root,
-        systemTmpDir,
-        home,
-        userName,
-        hostNames,
-      }),
+      entries: scrubDroidEntries(entries, scrubOptions),
     } satisfies ProviderReplayTranscript;
 
     const encoded = encodeTranscriptNdjson(transcript);

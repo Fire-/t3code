@@ -37,6 +37,113 @@ export function droidRequests(
   });
 }
 
+/** The requests Droid itself sent the adapter (`ask_user`, `request_permission`), in order. */
+export function droidInboundRequests(
+  transcript: ProviderReplayTranscript,
+  name: string,
+): ReadonlyArray<DroidRecordedRequest> {
+  return transcript.entries.flatMap((entry, index) => {
+    if (entry.type !== "emit_inbound" || field(entry.frame, "type") !== "request") return [];
+    if (field(entry.frame, "method") !== `droid.${name}`) return [];
+    return [
+      {
+        index,
+        id: field(entry.frame, "id"),
+        method: `droid.${name}`,
+        params: field(entry.frame, "params"),
+      },
+    ];
+  });
+}
+
+/** Droid's requests to leave spec mode: `request_permission` with confirmationType `exit_spec_mode`. */
+export function droidExitSpecModeRequests(
+  transcript: ProviderReplayTranscript,
+): ReadonlyArray<DroidRecordedRequest> {
+  return droidInboundRequests(transcript, "request_permission").filter((request) => {
+    const toolUses = field(request.params, "toolUses");
+    return Array.isArray(toolUses) && field(toolUses[0], "confirmationType") === "exit_spec_mode";
+  });
+}
+
+/** The `result` the adapter wrote back to one of Droid's own requests. */
+export function adapterReplyTo(
+  transcript: ProviderReplayTranscript,
+  inbound: DroidRecordedRequest,
+): unknown {
+  const replies = transcript.entries.flatMap((entry, index) =>
+    index > inbound.index &&
+    entry.type === "expect_outbound" &&
+    field(entry.frame, "type") === "response" &&
+    field(entry.frame, "id") === inbound.id
+      ? [entry.frame]
+      : [],
+  );
+  assert.lengthOf(replies, 1, `the adapter answers ${inbound.method} exactly once`);
+  return field(replies[0], "result");
+}
+
+export interface DroidRecordedNotification {
+  readonly index: number;
+  readonly notification: unknown;
+}
+
+/** The session notifications Droid sent, in order, optionally of one `type`. */
+export function droidNotifications(
+  transcript: ProviderReplayTranscript,
+  type?: string,
+): ReadonlyArray<DroidRecordedNotification> {
+  return transcript.entries.flatMap((entry, index) => {
+    if (entry.type !== "emit_inbound") return [];
+    if (field(entry.frame, "method") !== "droid.session_notification") return [];
+    const notification = field(field(entry.frame, "params"), "notification");
+    return type === undefined || field(notification, "type") === type
+      ? [{ index, notification }]
+      : [];
+  });
+}
+
+/** Tools that write files, which Droid never runs in spec mode. */
+export const DROID_FILE_WRITE_TOOLS: ReadonlyArray<string> = [
+  "Create",
+  "Edit",
+  "ApplyPatch",
+  "MultiEdit",
+];
+
+/** Every tool that can change the workspace. Spec mode may still run `Execute` for read-only commands. */
+export const DROID_WRITE_TOOLS: ReadonlyArray<string> = [...DROID_FILE_WRITE_TOOLS, "Execute"];
+
+/** The tool calls Droid announced, in order; repeated frames for one call are kept. */
+export function droidToolCalls(
+  transcript: ProviderReplayTranscript,
+): ReadonlyArray<{ readonly index: number; readonly name: string }> {
+  return droidNotifications(transcript, "tool_call").flatMap(({ index, notification }) => {
+    const name = field(field(notification, "toolUse"), "name");
+    return typeof name === "string" ? [{ index, name }] : [];
+  });
+}
+
+/**
+ * The settings the session had when the request at `requestIndex` went out: the params of the
+ * latest settings-bearing frame (`initialize_session`, or `update_session_settings` on a resumed
+ * or changed session) written before it.
+ */
+export function droidSettingsFrameBefore(
+  transcript: ProviderReplayTranscript,
+  requestIndex: number,
+) {
+  const frames = droidRequests(transcript).filter(
+    (request) =>
+      request.index < requestIndex &&
+      (request.method === "droid.initialize_session" ||
+        request.method === "droid.update_session_settings"),
+  );
+  const latest = frames.at(-1);
+  assert.isDefined(latest, "a settings frame precedes the message");
+  return latest?.params;
+}
+
 export function droidProcessStartIndexes(transcript: ProviderReplayTranscript) {
   return transcript.entries.flatMap((entry, index) =>
     entry.type === "expect_outbound" && field(entry.frame, "type") === "process_start"
@@ -46,7 +153,7 @@ export function droidProcessStartIndexes(transcript: ProviderReplayTranscript) {
 }
 
 /** What Droid answered to one of the adapter's requests: the first response after it with its id. */
-function droidResponseTo(
+export function droidResponseTo(
   transcript: ProviderReplayTranscript,
   request: DroidRecordedRequest,
 ): unknown {

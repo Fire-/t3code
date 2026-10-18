@@ -292,6 +292,10 @@ export type OrchestratorFixtureInputStep =
   | {
       readonly type: "advance_clock";
       readonly duration: Duration.Input;
+    }
+  | {
+      readonly type: "set_interaction_mode";
+      readonly interactionMode: ProviderInteractionMode;
     };
 
 export interface OrchestratorFixtureInput {
@@ -918,6 +922,17 @@ export function materializeFixtureInput(input: {
               }),
             });
           }
+          break;
+        case "set_interaction_mode":
+          pushDispatch({
+            type: "thread.interaction-mode.set",
+            commandId: yield* idAllocator.allocate.command({
+              fixtureName: input.scenario,
+              commandName: `set-interaction-mode-${step.interactionMode}-${messageIndex}`,
+            }),
+            threadId: ids.threadId,
+            interactionMode: step.interactionMode,
+          });
           break;
       }
     }

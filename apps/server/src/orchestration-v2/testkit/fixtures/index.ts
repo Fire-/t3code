@@ -53,6 +53,7 @@ import { assertGrokSubagentLineageOutput } from "./grok_subagent_lineage/output.
 import { assertClaudeMessageSteeringOutput } from "./message_steering/claude_output.ts";
 import { assertMessageSteeringOutput } from "./message_steering/codex_output.ts";
 import { assertCursorMessageSteeringOutput } from "./message_steering/cursor_output.ts";
+import { assertDroidMessageSteeringOutput } from "./message_steering/droid_output.ts";
 import { assertGrokMessageSteeringOutput } from "./message_steering/grok_output.ts";
 import { messageSteeringInput } from "./message_steering/input.ts";
 import { assertPiMessageSteeringOutput } from "./message_steering/pi_output.ts";
@@ -115,10 +116,12 @@ import {
   assertCodexPlanQuestionsOutput,
   assertPlanQuestionsOutput,
 } from "./plan_questions/codex_output.ts";
+import { assertDroidPlanQuestionsOutput } from "./plan_questions/droid_output.ts";
 import { assertOpenCodePlanQuestionsOutput } from "./plan_questions/opencode_output.ts";
 import { planQuestionsInput } from "./plan_questions/input.ts";
 import { assertProposedPlanOutput } from "./proposed_plan/codex_output.ts";
 import { assertProposedPlanCursorOutput } from "./proposed_plan/cursor_output.ts";
+import { assertDroidProposedPlanOutput } from "./proposed_plan/droid_output.ts";
 import { proposedPlanInput } from "./proposed_plan/input.ts";
 import { assertQueuedCancelledWhileActiveOutput } from "./queued_cancelled_while_active/codex_output.ts";
 import { queuedCancelledWhileActiveInput } from "./queued_cancelled_while_active/input.ts";
@@ -1482,6 +1485,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertOpenCodePlanQuestionsOutput,
       },
+      {
+        driver: ProviderDriverKind.make("droid"),
+        transcriptFile: new URL("./plan_questions/droid_transcript.ndjson", import.meta.url),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidPlanQuestionsOutput,
+      },
     ],
   },
   {
@@ -1501,6 +1510,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: CURSOR_MODEL_SELECTION,
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertProposedPlanCursorOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("droid"),
+        transcriptFile: new URL("./proposed_plan/droid_transcript.ndjson", import.meta.url),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidProposedPlanOutput,
       },
     ],
   },
@@ -1543,6 +1558,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./message_steering/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiMessageSteeringOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("droid"),
+        transcriptFile: new URL("./message_steering/droid_transcript.ndjson", import.meta.url),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidMessageSteeringOutput,
       },
     ],
   },

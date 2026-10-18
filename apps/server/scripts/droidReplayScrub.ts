@@ -48,6 +48,21 @@ const withoutPrivateAlias = (path: string): string => path.replace(/^\/private(?
 const pathPattern = (path: string): RegExp =>
   new RegExp(`(?:/private)?${escapeRegExp(withoutPrivateAlias(path))}${PATH_END}`, "gu");
 
+/**
+ * Droid cuts long titles mid-path, so a leading piece of the recording root ("/private/tmp/droid")
+ * can reach the transcript, and the full-path patterns miss it.
+ */
+function makeRootFragmentScrubber(recordingRoot: string): (text: string) => string {
+  const root = withoutPrivateAlias(recordingRoot);
+  const parent = root.slice(0, root.lastIndexOf("/"));
+  if (parent.length === 0) return (text) => text;
+  const candidate = new RegExp(`(?:/private)?${escapeRegExp(parent)}(?:/[A-Za-z0-9_-]*)?`, "gu");
+  return (text) =>
+    text.replace(candidate, (match) =>
+      root.startsWith(withoutPrivateAlias(match)) ? "<recording-root>" : match,
+    );
+}
+
 function collectKeyedStrings(
   entries: ReadonlyArray<ProviderReplayEntry>,
   wanted: string,
@@ -121,6 +136,7 @@ function makeTextScrubber(environment: DroidScrubEnvironment, hostIds: ReadonlyA
     return FIXED_EPOCH_MS + (milliseconds - anchor);
   };
 
+  const scrubRootFragments = makeRootFragmentScrubber(environment.recordingRoot);
   const replacements: ReadonlyArray<readonly [RegExp, string]> = [
     [pathPattern(environment.workspace), "<workspace>"],
     [pathPattern(environment.recordingRoot), "<recording-root>"],
@@ -149,7 +165,7 @@ function makeTextScrubber(environment: DroidScrubEnvironment, hostIds: ReadonlyA
     for (const [pattern, replacement] of replacements) {
       scrubbed = scrubbed.replace(pattern, replacement);
     }
-    return scrubbed
+    return scrubRootFragments(scrubbed)
       .replace(ISO_TIMESTAMP, (stamp) =>
         DateTime.formatIso(DateTime.makeUnsafe(shiftEpoch(Date.parse(stamp)))),
       )

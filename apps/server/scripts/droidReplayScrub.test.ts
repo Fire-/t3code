@@ -324,6 +324,38 @@ describe("Droid replay scrub", () => {
     }
   });
 
+  it("replaces a recording root that Droid cut off mid-name", () => {
+    const titles = [
+      "Create /private/tmp/droid",
+      "Create /private/tmp/droid-v2-rec-ab",
+      "Create /tmp/droid-v2-rec-abc123",
+    ];
+    const text = encoded(
+      titles.map(
+        (titleHint) =>
+          scrub([
+            inbound({
+              type: "notification",
+              params: { notification: { type: "tool_call", toolUse: { input: { titleHint } } } },
+            }),
+          ])[0]!,
+      ),
+    );
+    assert.equal(text.split("Create <recording-root>").length - 1, titles.length);
+    assert.notInclude(text, "droid");
+    assert.notInclude(text, "/private");
+  });
+
+  it("keeps temporary paths outside the recording root", () => {
+    const [entry] = scrub([
+      inbound({
+        type: "notification",
+        params: { notification: { type: "tool_result", content: "see /tmp/other/notes.txt" } },
+      }),
+    ]);
+    assert.include(encoded([entry!]), "see /tmp/other/notes.txt");
+  });
+
   it("drops trace headers and shifts wall-clock times to a fixed epoch", () => {
     const scrubbed = scrub([
       inbound({
