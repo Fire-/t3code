@@ -99,11 +99,12 @@ const newRef = (nativeId: string) => ({
   strength: "strong" as const,
 });
 
-/** Turns of a stored session whose message ids are `u1` and `u2`, as the orchestrator would hold them. */
+/** One turn per message id of a stored session (`u1` and `u2` unless named), as the orchestrator would hold them. */
 const storedTurns = (
   row: OrchestrationV2ProviderThread,
+  nativeIds: ReadonlyArray<string> = ["u1", "u2"],
 ): ReadonlyArray<OrchestrationV2ProviderTurn> =>
-  ["u1", "u2"].map((nativeId, index) => ({
+  nativeIds.map((nativeId, index) => ({
     id: `provider-turn:${nativeId}` as OrchestrationV2ProviderTurn["id"],
     providerThreadId: row.id,
     nodeId: NodeId.make("node:stored-turn"),
@@ -711,6 +712,147 @@ describe("DroidAdapterV2 rollback", () => {
             loadAllMessages: true,
           });
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("a history with plan-mode turns and a folded steer", () => {
+    const text = (value: string) => [{ type: "text", text: value }];
+    const stored = (
+      id: string,
+      role: "user" | "assistant",
+      parentId: string | null,
+      content: string,
+      visibility?: "llm_only",
+    ) => ({ id, role, parentId, content: text(content), ...(visibility ? { visibility } : {}) });
+
+    /**
+     * u1 is an auto turn. u2 and u3 are spec turns: u2 carries the `llm_only` spec reminder, u3
+     * has an assistant parent. u4 is the first default turn after spec mode, so it carries "Spec
+     * mode has ended.", and the steer Droid folded into it hangs off its reply with Droid's own
+     * steer reminder. u5 follows.
+     */
+    const HISTORY = [
+      stored("context-u1", "user", null, "<system-reminder>context</system-reminder>", "llm_only"),
+      stored("u1", "user", "context-u1", "Remember APPLE."),
+      stored("a1", "assistant", "u1", "OK"),
+      stored("context-u2", "user", "a1", "<system-reminder>context</system-reminder>", "llm_only"),
+      stored("u2", "user", "context-u2", "Reply pong."),
+      stored(
+        "__internal__system-reminder__s",
+        "user",
+        "u2",
+        "<system-reminder>\nSpec mode is active. Do NOT edit files",
+        "llm_only",
+      ),
+      stored("a2", "assistant", "__internal__system-reminder__s", "pong"),
+      stored("u3", "user", "a2", "Reply ping."),
+      stored("a3", "assistant", "u3", "ping"),
+      stored("u4", "user", "a3", "Count to 60."),
+      stored(
+        "__internal__system-reminder__e",
+        "user",
+        "u4",
+        "<system-reminder>Spec mode has ended.</system-reminder>",
+        "llm_only",
+      ),
+      stored("a4", "assistant", "__internal__system-reminder__e", "1 2 3"),
+      stored("steer", "user", "a4", "Then reply QUEUED."),
+      stored(
+        "__internal__system-reminder__f",
+        "user",
+        "steer",
+        "<system-reminder>A follow-up user message arrived while you were working. Treat it as steering, not implicit cancellation.</system-reminder>",
+        "llm_only",
+      ),
+      stored("a5", "assistant", "__internal__system-reminder__f", "QUEUED"),
+      stored("u5", "user", "a5", "Reply done."),
+      stored("a6", "assistant", "u5", "done"),
+    ];
+
+    // The visible conversation, oldest first: u1, u2, u3, u4 with its steer, u5.
+    const VISIBLE = [
+      ["user", "Remember APPLE."],
+      ["assistant", "OK"],
+      ["user", "Reply pong."],
+      ["assistant", "pong"],
+      ["user", "Reply ping."],
+      ["assistant", "ping"],
+      ["user", "Count to 60."],
+      ["assistant", "1 2 3"],
+      ["user", "Then reply QUEUED."],
+      ["assistant", "QUEUED"],
+      ["user", "Reply done."],
+      ["assistant", "done"],
+    ];
+
+    it.effect(
+      "[VAL-PLAN-011] rolls back to each checkpoint without dropping a spec or post-spec turn or splitting the folded steer from its turn",
+      () =>
+        Effect.gen(function* () {
+          const checkpoints: ReadonlyArray<{
+            readonly name: string;
+            readonly toTurn: number | null;
+            readonly rewindsTo: string | null;
+            readonly visibleCount: number;
+          }> = [
+            { name: "thread start", toTurn: null, rewindsTo: "u1", visibleCount: 0 },
+            { name: "u1, the auto turn", toTurn: 1, rewindsTo: "u2", visibleCount: 2 },
+            {
+              name: "u2, a spec turn with the reminder",
+              toTurn: 2,
+              rewindsTo: "u3",
+              visibleCount: 4,
+            },
+            {
+              name: "u3, an assistant-parented spec turn",
+              toTurn: 3,
+              rewindsTo: "u4",
+              visibleCount: 6,
+            },
+            // The steer stays with u4: the cut falls before u5, not before the steer.
+            {
+              name: "u4, the turn the steer folded into",
+              toTurn: 4,
+              rewindsTo: "u5",
+              visibleCount: 10,
+            },
+            { name: "u5, the latest turn", toTurn: 5, rewindsTo: null, visibleCount: 12 },
+          ];
+
+          const outcomes = yield* Effect.forEach(checkpoints, (checkpoint) =>
+            Effect.gen(function* () {
+              const fake = yield* makeFakeDroid({
+                sessions: {
+                  "stored-session": { settings: FAKE_DROID_DEFAULT_SETTINGS, messages: HISTORY },
+                },
+              });
+              const opened = yield* openRuntime(fake);
+              const row = yield* makeProviderThread("stored-session");
+              // The steer joined u4's T3 turn, so it has no provider turn of its own.
+              const turns = storedTurns(row, ["u1", "u2", "u3", "u4", "u5"]);
+              const snapshot = yield* opened.runtime.rollbackThread(
+                checkpoint.toTurn === null
+                  ? rollbackToStart(row, turns)
+                  : rollbackToTurn(row, turns, checkpoint.toTurn),
+              );
+              const rewind = requestsOf(fake, "droid.execute_rewind")[0];
+              return {
+                name: checkpoint.name,
+                rewindsTo: rewind === undefined ? null : String(rewind.params["messageId"]),
+                visible: snapshot.messages.map((message) => [message.role, message.text]),
+              };
+            }).pipe(Effect.scoped),
+          );
+
+          assert.deepStrictEqual(
+            outcomes,
+            checkpoints.map((checkpoint) => ({
+              name: checkpoint.name,
+              rewindsTo: checkpoint.rewindsTo,
+              visible: VISIBLE.slice(0, checkpoint.visibleCount),
+            })),
+          );
+        }).pipe(Effect.provide(layerTest)),
     );
   });
 

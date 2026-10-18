@@ -4,26 +4,20 @@
  * characters) and `__internal__system-reminder__<uuid>`, both `llm_only`. None of it may reach an
  * event, an item, or a snapshot, so it is dropped here and never copied.
  *
- * Two readings of the same list: the visible messages (`visibleDroidHistory`), and the turns t3
- * saw (`droidHistoryTurns`, with `droidRewindMessageId` to pick a rewind point in them). A rollback
- * t3 asks for does not read the stored list: the provider turns t3 recorded already carry the
- * message ids (`droidRollbackMessageId`), and a steer Droid ran as a native turn of its own stays
- * with the t3 turn it belongs to. A fork reads the stored ids once, to tell the recorded turns
- * the history still holds from the ones a rollback removed (`droidForkRewindMessageId`).
+ * Only the visible messages are read from the list (`visibleDroidHistory`). Turns are never
+ * rebuilt from it: a user message in the list may be a steer Droid folded into a running turn,
+ * and spec-mode turns carry `llm_only` reminders of their own, so the list alone does not say
+ * where a t3 turn begins. The provider turns t3 recorded already carry the message ids, so a
+ * rollback reads those (`droidRollbackMessageId`), and a steer stays with the t3 turn it was sent
+ * to. A fork reads the stored ids once, to tell the recorded turns the history still holds from
+ * the ones a rollback removed (`droidForkRewindMessageId`).
  */
 import type { OrchestrationV2ProviderRef } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 
-import { DROID_TASK_COMPLETION_ID_PREFIX, droidMessageText } from "./protocol.ts";
+import { droidMessageText } from "./protocol.ts";
 
 const PLUMBING_ID_PREFIXES = ["context-", "__internal__system-reminder__"] as const;
-
-/**
- * Droid trails a steer it folded into the running turn with this `llm_only` reminder. Mode
- * reminders ("Spec mode is active", "Spec mode has ended.") hang off real turns the same way, so
- * only this text marks a steer.
- */
-const FOLDED_STEER_REMINDER = "A follow-up user message arrived while you were working";
 
 const isPlumbingId = (id: string): boolean =>
   PLUMBING_ID_PREFIXES.some((prefix) => id.startsWith(prefix));
@@ -52,54 +46,6 @@ export function visibleDroidHistory(messages: unknown): ReadonlyArray<DroidHisto
   });
 }
 
-export interface DroidHistoryTurn {
-  /** The Droid user message that began the turn: its `nativeTurnRef`, and what `execute_rewind` takes. */
-  readonly messageId: string;
-  readonly text: string;
-}
-
-/**
- * The turns t3 saw in a stored history, oldest first, so a resumed session has rewind targets.
- * It mirrors what the live adapter records: each user message is a turn, a late steer included,
- * except a steer folded into a running turn. A background task's completion that ran as a turn
- * of its own is stored as an `llm_only` user message hanging off an assistant reply; one folded
- * into a running turn hangs off a tool result instead. Droid's other `llm_only` and `user_only`
- * messages (context, mode reminders, errors) are not turns.
- */
-export function droidHistoryTurns(messages: unknown): ReadonlyArray<DroidHistoryTurn> {
-  if (!Array.isArray(messages)) return [];
-  const roleById = new Map<string, unknown>();
-  const reminderByParent = new Map<string, string>();
-  for (const message of messages) {
-    if (!Predicate.isObject(message)) continue;
-    const id = idOf(message["id"]);
-    if (id !== undefined) roleById.set(id, message["role"]);
-    const parentId = idOf(message["parentId"]);
-    if (parentId !== undefined && message["visibility"] === "llm_only") {
-      reminderByParent.set(
-        parentId,
-        `${reminderByParent.get(parentId) ?? ""}${droidMessageText(message["content"])}`,
-      );
-    }
-  }
-  return messages.flatMap((message): ReadonlyArray<DroidHistoryTurn> => {
-    if (!Predicate.isObject(message) || message["role"] !== "user") return [];
-    const messageId = idOf(message["id"]);
-    if (messageId === undefined) return [];
-    const text = droidMessageText(message["content"]);
-    if (messageId.startsWith(DROID_TASK_COMPLETION_ID_PREFIX)) {
-      const parentId = idOf(message["parentId"]);
-      return parentId !== undefined && roleById.get(parentId) === "assistant"
-        ? [{ messageId, text }]
-        : [];
-    }
-    if (isPlumbingId(messageId)) return [];
-    if (message["visibility"] === "llm_only" || message["visibility"] === "user_only") return [];
-    if (reminderByParent.get(messageId)?.includes(FOLDED_STEER_REMINDER)) return [];
-    return [{ messageId, text }];
-  });
-}
-
 /**
  * The Droid message a t3 rollback rewinds to, read from the provider turns t3 recorded: each one
  * keeps the id of the user message that began it as its `nativeTurnRef`. The boundary is the
@@ -123,25 +69,6 @@ export function droidRollbackMessageId(input: {
     .toSorted((a, b) => a.ordinal - b.ordinal)[0]?.nativeTurnRef;
   if (ref === undefined || ref === null) return null;
   return ref.strength === "strong" && ref.nativeId !== null ? ref.nativeId : undefined;
-}
-
-export type DroidRollbackTarget =
-  | { readonly type: "thread_start" }
-  | { readonly type: "provider_turn"; readonly messageId: string };
-
-/**
- * The message `execute_rewind` takes to end the conversation at `target`: the first turn after
- * it, or the first turn of all when rolling back to the start. A steer folded into the target
- * turn sits before that next turn, so it stays with the target. `undefined` when no turn follows
- * the target or the target is not in `turns`.
- */
-export function droidRewindMessageId(
-  turns: ReadonlyArray<DroidHistoryTurn>,
-  target: DroidRollbackTarget,
-): string | undefined {
-  if (target.type === "thread_start") return turns[0]?.messageId;
-  const index = turns.findIndex((turn) => turn.messageId === target.messageId);
-  return index < 0 ? undefined : turns[index + 1]?.messageId;
 }
 
 /** Every message id of a stored history, plumbing included. Ids only: no content leaves here. */
