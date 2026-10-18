@@ -57,12 +57,12 @@ export function assertTurnInterruptMidToolDroidOutput(
     "a command that has an input shows the command line the model asked for",
   );
   // Droid answers a stopped tool with an error `tool_result` ("Tool execution cancelled by
-  // user") before the turn completes, so the item settles `failed`; one that never got a result
-  // settles `interrupted` with the turn.
-  assert.include(
-    ["interrupted", "failed"],
+  // user") after the interrupt request; that is a stop, so the item settles `interrupted` like
+  // every other provider's stopped command, never `failed`.
+  assert.equal(
     commandItems[0]?.status,
-    "the interrupted command is not left running",
+    "interrupted",
+    "the stopped command settles interrupted, not running or failed",
   );
   const interruptResult = projection.turnItems.find((item) => item.type === "run_interrupt_result");
   assert.equal(interruptResult?.status, "interrupted");

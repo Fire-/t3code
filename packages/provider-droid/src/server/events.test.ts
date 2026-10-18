@@ -669,6 +669,50 @@ describe("tool calls and results [VAL-TURN-008]", () => {
     assert.strictEqual(failedNode.length, 2);
   });
 
+  describe("an error tool_result after Stop", () => {
+    // Droid answers a cancelled tool with an error result, twice in a live run.
+    const cancelled = "Tool execution cancelled by user";
+    const running = [toolCall("Execute", { command: "sleep 60" })];
+    const stopped = (state: DroidMapperState): DroidMapperState => ({
+      ...state,
+      interruptRequested: true,
+    });
+
+    it("[VAL-TURN-020] settles the item and node interrupted when an interrupt was requested", () => {
+      const open = feed(running);
+      const { events } = feed([toolResult(cancelled, true)], { state: stopped(open.state) });
+      const settled = turnItems(events).at(-1);
+      assert.strictEqual(settled?.type, "command_execution");
+      assert.strictEqual(settled?.status, "interrupted");
+      assert.deepStrictEqual(
+        ofType(events, "node.updated").map((event) => event.node.status),
+        ["interrupted"],
+      );
+    });
+
+    it("[VAL-TURN-020] keeps a genuine tool error failed when no interrupt was requested", () => {
+      const open = feed(running);
+      const { events } = feed([toolResult("Error: command not found", true)], {
+        state: open.state,
+      });
+      assert.strictEqual(turnItems(events).at(-1)?.status, "failed");
+    });
+
+    it("[VAL-TURN-020] still completes a successful result that races the interrupt", () => {
+      const open = feed(running);
+      const { events } = feed([toolResult("done")], { state: stopped(open.state) });
+      assert.strictEqual(turnItems(events).at(-1)?.status, "completed");
+    });
+
+    it("[VAL-TURN-020] ignores the duplicate second error result", () => {
+      const open = feed(running);
+      const first = feed([toolResult(cancelled, true)], { state: stopped(open.state) });
+      assert.strictEqual(turnItems(first.events).at(-1)?.status, "interrupted");
+      const second = feed([toolResult(cancelled, true)], { state: first.state });
+      assert.deepStrictEqual(second.events, []);
+    });
+  });
+
   it("[VAL-TURN-008] keeps two concurrent tools on separate items", () => {
     const { events } = feed([
       toolCall("Read", { file_path: "/tmp/a" }, TOOL_ID),

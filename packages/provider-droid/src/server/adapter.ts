@@ -907,7 +907,19 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         if (turn === null || turn.providerTurn.id !== interruptInput.providerTurnId) {
           return yield* protocolError(`Droid turn ${interruptInput.providerTurnId} is not active`);
         }
-        yield* request("droid.interrupt_session", {});
+        // Under the event permit so a notification being mapped cannot overwrite the flag with
+        // the state it read before it.
+        const markInterruptRequested = (interruptRequested: boolean) =>
+          permit.withPermits(1)(
+            Effect.sync(() => {
+              turn.mapper = { ...turn.mapper, interruptRequested };
+            }),
+          );
+        // Set before the request: Droid's cancel answers can arrive before the reply does.
+        yield* markInterruptRequested(true);
+        yield* request("droid.interrupt_session", {}).pipe(
+          Effect.tapError(() => markInterruptRequested(false)),
+        );
       });
 
       const readThreadSnapshot = Effect.fnUntraced(function* (

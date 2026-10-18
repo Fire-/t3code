@@ -1263,6 +1263,77 @@ describe("DroidAdapterV2", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    describe("a tool Stop cancelled", () => {
+      /** Starts a turn with a running command, asks to stop it, then plays Droid's cancel answer. */
+      const stopRunningCommand = (fake: FakeDroid) =>
+        Effect.gen(function* () {
+          const opened = yield* openRuntime(fake);
+          const thread = yield* ensure(opened);
+          yield* startTurn(opened.runtime, thread);
+          const turn = yield* opened.takeEvent((event) => event.type === "provider_turn.updated");
+          if (turn.type !== "provider_turn.updated") return assert.fail("no provider turn");
+          const process = fake.current();
+          yield* process.emit({
+            type: "tool_call",
+            toolUse: {
+              type: "tool_use",
+              id: "tool-1",
+              name: "Execute",
+              input: { command: "sleep 60" },
+            },
+          });
+          const exit = yield* opened.runtime
+            .interruptTurn({ providerThread: thread, providerTurnId: turn.providerTurn.id })
+            .pipe(Effect.exit);
+          // Droid sends the error result twice before the cancelled completion.
+          for (const messageId of ["tool-result-1", "tool-result-2"]) {
+            yield* process.emit({
+              type: "tool_result",
+              toolUseId: "tool-1",
+              messageId,
+              content: "Tool execution cancelled by user",
+              isError: true,
+            });
+          }
+          yield* process.emit(completed(1, "cancelled"));
+          yield* opened.takeEvent(isTerminal);
+          yield* process.settle;
+          const commandStatuses = opened.all.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "command_execution"
+              ? [event.turnItem.status]
+              : [],
+          );
+          return { exit, commandStatuses, terminalCount: terminals(opened.all).length };
+        });
+
+      it.effect(
+        "[VAL-TURN-020] the error result Droid sends after interrupt_session settles the command interrupted",
+        () =>
+          Effect.gen(function* () {
+            const stopped = yield* stopRunningCommand(yield* makeFakeDroid());
+            assert.isTrue(Exit.isSuccess(stopped.exit));
+            assert.deepStrictEqual(stopped.commandStatuses, ["running", "interrupted"]);
+            assert.strictEqual(stopped.terminalCount, 1);
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+
+      it.effect(
+        "[VAL-TURN-020] a failed interrupt_session leaves the later tool error failed, not interrupted",
+        () =>
+          Effect.gen(function* () {
+            const stopped = yield* stopRunningCommand(
+              yield* makeFakeDroid({
+                overrides: {
+                  "droid.interrupt_session": () => ({ error: { code: -32603, message: "no" } }),
+                },
+              }),
+            );
+            assert.isTrue(Exit.isFailure(stopped.exit));
+            assert.deepStrictEqual(stopped.commandStatuses, ["running", "failed"]);
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+    });
+
     it.effect(
       "[VAL-TURN-013] interrupting a turn that is not active fails with the typed error",
       () =>

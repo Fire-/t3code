@@ -126,6 +126,11 @@ export interface DroidMapperState {
   readonly contextUsage: ThreadTokenUsageSnapshot | undefined;
   /** Set when `agent_turn_completed` arrives; carry it on the provider turn's final update. */
   readonly turnTokenUsage: TurnTokenUsage | undefined;
+  /**
+   * Set when Stop is sent to Droid. Droid answers a cancelled tool with an error `tool_result`
+   * (sometimes two) before the cancelled completion; that is a stop, not a tool failure.
+   */
+  readonly interruptRequested: boolean;
 }
 
 export interface DroidMapResult {
@@ -155,6 +160,7 @@ export function createDroidTurnState(input: {
     sessionUsage: input.sessionUsage,
     contextUsage: input.contextUsage,
     turnTokenUsage: undefined,
+    interruptRequested: false,
   };
 }
 
@@ -757,8 +763,9 @@ function mapToolResult(
   const tool =
     toolUseId === undefined ? undefined : state.tools.get(toolNativeItemId(ctx, toolUseId));
   if (tool === undefined || tool.completed) return unchanged(state);
+  const errorStatus = state.interruptRequested ? "interrupted" : "failed";
   return updateTool(state, ctx, tool, now, {
-    status: notification["isError"] === true ? "failed" : "completed",
+    status: notification["isError"] === true ? errorStatus : "completed",
     content: notification["content"],
   });
 }
