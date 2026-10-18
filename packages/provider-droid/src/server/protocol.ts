@@ -267,6 +267,39 @@ function textBlocks(content: ReadonlyArray<unknown>): ReadonlyArray<string> {
   );
 }
 
+const EXECUTE_EXIT_FOOTER_MARKER = "[Process exited with code ";
+
+/**
+ * `Execute` results end with `[Process exited with code N]` after blank lines. The footer
+ * becomes the exit code; the rest is the command's output.
+ */
+export function splitDroidExecuteOutput(text: string | undefined): {
+  readonly output: string | undefined;
+  readonly exitCode: number | undefined;
+} {
+  if (text === undefined) return { output: undefined, exitCode: undefined };
+  const markerAt = text.lastIndexOf(EXECUTE_EXIT_FOOTER_MARKER);
+  const footer =
+    markerAt === -1
+      ? undefined
+      : /^\[Process exited with code (-?\d+)\]\s*$/u.exec(text.slice(markerAt));
+  if (!footer?.[1]) return { output: text, exitCode: undefined };
+  const output = text.slice(0, markerAt).trimEnd();
+  return { output: output.length > 0 ? output : undefined, exitCode: Number(footer[1]) };
+}
+
+/** Added and removed line counts from an `Edit` result's `diffLines`. */
+export function droidEditDiffCounts(
+  content: unknown,
+): { readonly additions: number; readonly deletions: number } | undefined {
+  const parsed = Predicate.isString(content) ? decodeJsonObject(content) : undefined;
+  const lines = parsed?.["diffLines"];
+  if (!Array.isArray(lines)) return undefined;
+  const count = (type: string) =>
+    lines.filter((line) => Predicate.isObject(line) && line["type"] === type).length;
+  return { additions: count("added"), deletions: count("removed") };
+}
+
 /** The text blocks of a stored or streamed Droid message. */
 export function droidMessageText(content: unknown): string {
   if (Predicate.isString(content)) return content;

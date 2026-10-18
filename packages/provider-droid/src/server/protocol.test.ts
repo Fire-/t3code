@@ -14,6 +14,7 @@ import {
   decodeDroidFrame,
   decodeDroidNotificationParams,
   droidAskUserQuestionsFromParams,
+  droidEditDiffCounts,
   droidMessageText,
   droidTokenCounts,
   droidToolKind,
@@ -24,6 +25,7 @@ import {
   isDroidNotificationType,
   isZeroDroidUsage,
   parseDroidTaskCompletion,
+  splitDroidExecuteOutput,
   subtractDroidCounts,
 } from "./protocol.ts";
 
@@ -219,6 +221,49 @@ describe("tool parsers", () => {
       "one\ntwo",
     );
     assert.strictEqual(droidMessageText(undefined), "");
+  });
+
+  it("splits the exit-code footer off an Execute result", () => {
+    assert.deepStrictEqual(splitDroidExecuteOutput("hello\n\n\n[Process exited with code 0]"), {
+      output: "hello",
+      exitCode: 0,
+    });
+    assert.deepStrictEqual(splitDroidExecuteOutput("oops\n\n\n[Process exited with code 127]"), {
+      output: "oops",
+      exitCode: 127,
+    });
+    assert.deepStrictEqual(splitDroidExecuteOutput("\n\n\n[Process exited with code 1]"), {
+      output: undefined,
+      exitCode: 1,
+    });
+    assert.deepStrictEqual(splitDroidExecuteOutput("no footer here"), {
+      output: "no footer here",
+      exitCode: undefined,
+    });
+    assert.deepStrictEqual(
+      splitDroidExecuteOutput("echo [Process exited with code 3] is literal text"),
+      { output: "echo [Process exited with code 3] is literal text", exitCode: undefined },
+    );
+    assert.deepStrictEqual(splitDroidExecuteOutput(undefined), {
+      output: undefined,
+      exitCode: undefined,
+    });
+  });
+
+  it("counts added and removed lines in an Edit result's diffLines", () => {
+    const edit = JSON.stringify({
+      success: true,
+      diffLines: [
+        { type: "unchanged", content: "keep", lineNumber: 1 },
+        { type: "removed", content: "old", lineNumber: 2 },
+        { type: "added", content: "new one", lineNumber: 2 },
+        { type: "added", content: "new two", lineNumber: 3 },
+      ],
+    });
+    assert.deepStrictEqual(droidEditDiffCounts(edit), { additions: 2, deletions: 1 });
+    assert.isUndefined(droidEditDiffCounts("Error: Failed to edit file"));
+    assert.isUndefined(droidEditDiffCounts(JSON.stringify({ success: true })));
+    assert.isUndefined(droidEditDiffCounts(undefined));
   });
 
   it("strips Droid's framing from an awaited Task report", () => {
