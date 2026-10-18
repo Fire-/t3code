@@ -14,6 +14,7 @@ import {
   THREAD_ROLLBACK_SECOND_PROMPT,
 } from "../shared.ts";
 import {
+  assertDroidFrameCarriesCatalogEffort,
   assertDroidSessionThread,
   assertDroidTurnIdentity,
   droidInitializedSessionId,
@@ -80,6 +81,7 @@ export function assertDroidRewind(input: {
     (request) => request.index > loads[0]!.index && request.index < finalSend.index,
   );
   assert.lengthOf(settingsFrames, 1, "the rewound session gets its settings before the next turn");
+  assertDroidFrameCarriesCatalogEffort(transcript, loads[0]!, settingsFrames[0]!);
 
   assertDroidSessionThread(projection, String(rewoundSessionId));
   assert.equal(field(finalSend.params, "text"), DROID_ASSISTANT_REPLIES_PROMPT);

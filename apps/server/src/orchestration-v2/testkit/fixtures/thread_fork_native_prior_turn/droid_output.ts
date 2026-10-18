@@ -8,6 +8,7 @@ import {
   THREAD_FORK_NATIVE_PRIOR_TURN_BETA_PROMPT,
 } from "../shared.ts";
 import {
+  assertDroidFrameCarriesCatalogEffort,
   assertDroidSessionThread,
   droidInitializedSessionId,
   droidRequests,
@@ -75,6 +76,15 @@ export function assertDroidThreadForkNativePriorTurnOutput(
   assert.isAbove(finalLoad!.index, rewinds[0]!.index);
   assert.isAbove(forks[0]!.index, sends[1]!.index, "the fork comes after the source's two turns");
   assert.isBelow(finalLoad!.index, sends[2]!.index, "the fork's own turn runs on the rewound copy");
+  const settingsAfterLoad = droidRequests(transcript, "update_session_settings").filter(
+    (request) => request.index > finalLoad!.index && request.index < sends[2]!.index,
+  );
+  assert.lengthOf(
+    settingsAfterLoad,
+    1,
+    "the rewound copy gets its settings before the fork's turn",
+  );
+  assertDroidFrameCarriesCatalogEffort(transcript, finalLoad!, settingsAfterLoad[0]!);
 
   const forkSessionId = field(droidResponseTo(transcript, forks[0]!), "newSessionId");
   const rewoundSessionId = field(droidResponseTo(transcript, rewinds[0]!), "newSessionId");

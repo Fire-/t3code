@@ -89,12 +89,13 @@ import {
   type DroidRpcEvent,
 } from "./rpc.ts";
 import {
+  droidHoldsSettings,
   droidModelCatalog,
   droidSessionSettings,
   droidSettingsParams,
-  echoedDroidAutonomy,
   resolveDroidModelId,
-  sameDroidSessionSettings,
+  withDroidReport,
+  type DroidKnownSettings,
   type DroidModelInfo,
   type DroidSessionSettings,
 } from "./sessionSettings.ts";
@@ -461,10 +462,23 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const permit = yield* Semaphore.make(1);
 
       let threadState: DroidThreadState | null = null;
-      /** Unknown until the settings frame of the next turn: `load_session` takes no settings. */
-      let applied: DroidSessionSettings | undefined;
+      /**
+       * The settings Droid is known to hold: what the adapter sent, what `initialize_session` and
+       * `load_session` reported, and what `settings_updated` announced since.
+       */
+      let known: DroidKnownSettings = {};
+      /** `load_session` takes no settings, so the next turn sends them whatever `known` says. */
+      let settingsOwed = false;
       /** The model list the latest `initialize_session` or `load_session` reported. */
       let models: ReadonlyArray<DroidModelInfo> | undefined;
+      /**
+       * The policy and selection the thread last asked with. Only a turn names them and a rollback
+       * names neither, so its frame is computed from these against the rewound session's models.
+       */
+      let asked = {
+        runtimePolicy: input.runtimePolicy,
+        modelSelection: input.modelSelection,
+      };
       let sessionUsage: DroidTokenCounts | undefined;
       let closing = false;
       let ended = false;
@@ -896,13 +910,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         const state = threadState;
         if (state === null) return;
         if (notification.type === "settings_updated") {
-          // Only the autonomy level is read back. The interaction mode never is: Droid stays in
-          // spec mode after a plan whatever an echo says, and `applied` has to keep saying so for
-          // the next default turn to send the switch.
-          const level = echoedDroidAutonomy(notification);
-          if (applied !== undefined && level !== undefined) {
-            applied = { ...applied, autonomyLevel: level };
-          }
+          known = withDroidReport(known, notification["settings"], { interactionMode: false });
           return;
         }
         if (notification.type === "spec_handoff_session_created") {
@@ -992,7 +1000,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         params: unknown,
       ) {
         // The cancel leaves Droid in spec mode, so the next turn that wants auto must send it.
-        if (applied !== undefined) applied = { ...applied, interactionMode: "spec" };
+        known = { ...known, interactionMode: "spec" };
         if (state !== null && turn !== null) {
           const markdown = droidExitSpecModePlan(params);
           if (markdown === undefined) {
@@ -1132,24 +1140,54 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }).pipe(Effect.andThen(rpc.close), Effect.ignore),
       );
 
-      const settingsFrame = (settings: DroidSessionSettings) =>
-        request("droid.update_session_settings", droidSettingsParams(settings));
+      /**
+       * Sends one full settings frame. `known` takes the frame first so the echoes Droid sends for
+       * this very frame refine it rather than race it; a frame that fails leaves nothing known, so
+       * the next turn sends the settings again.
+       */
+      const sendSettings = (settings: DroidSessionSettings) => {
+        known = droidSettingsParams(settings);
+        settingsOwed = false;
+        return request("droid.update_session_settings", droidSettingsParams(settings)).pipe(
+          Effect.tapError(() =>
+            Effect.sync(() => {
+              known = {};
+            }),
+          ),
+        );
+      };
 
-      /** The settings a turn or thread asks for, against the models and settings the session has. */
+      /** The settings a turn or thread asks for, against the models the session reported. Records the ask. */
       const desiredSettings = (
         policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
         modelSelection: ProviderAdapter.ProviderAdapterV2TurnInput["modelSelection"],
-      ) =>
-        droidSessionSettings({
+      ) => {
+        asked = { runtimePolicy: policy, modelSelection };
+        return droidSessionSettings({
           runtimeMode: policy.runtimeMode,
           interactionMode: policy.interactionMode,
           modelSelection,
           models,
-          previous: applied,
         });
+      };
 
-      const rememberModels = (result: unknown) => {
+      /** A session answered `initialize_session`: it holds what was sent, as Droid reports it. */
+      const noteStartedSession = (sent: DroidSessionSettings, result: unknown) => {
         models = droidModelCatalog(result) ?? models;
+        known = withDroidReport(droidSettingsParams(sent), field(result, "settings"), {
+          interactionMode: true,
+        });
+        settingsOwed = false;
+      };
+
+      /**
+       * A session answered `load_session`. Droid reports what the stored session holds, but the load
+       * took no settings, so one full frame still follows before the next message.
+       */
+      const noteLoadedSession = (result: unknown) => {
+        models = droidModelCatalog(result) ?? models;
+        known = withDroidReport({}, field(result, "settings"), { interactionMode: true });
+        settingsOwed = true;
       };
 
       /** Opens a new Droid session carrying `settings` and makes it the thread's session. */
@@ -1175,8 +1213,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           history: [],
           latestPlan: undefined,
         };
-        rememberModels(result);
-        applied = settings;
+        noteStartedSession(settings, result);
         sessionUsage = DROID_ZERO_COUNTS;
         threadState = state;
         yield* emit({
@@ -1213,8 +1250,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           history: visibleDroidHistory(field(field(result, "session"), "messages")),
           latestPlan: undefined,
         };
-        rememberModels(result);
-        applied = undefined;
+        noteLoadedSession(result);
         sessionUsage = undefined;
         threadState = state;
         yield* emit({
@@ -1233,7 +1269,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return yield* protocolError("Cannot start a Droid session while a turn is active");
         }
         threadState = null;
-        applied = undefined;
+        known = {};
         const settings = desiredSettings(threadInput.runtimePolicy, threadInput.modelSelection);
         const state = yield* startSession(
           settings,
@@ -1258,7 +1294,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return yield* protocolError("Cannot resume a Droid session while a turn is active");
         }
         threadState = null;
-        applied = undefined;
+        known = {};
         const state = yield* adoptSession(nativeId, row, appThreadId);
         return state.providerThread;
       });
@@ -1307,22 +1343,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return yield* protocolError("Droid turn requested for a different native session");
         }
 
-        // One frame covers runtime mode, interaction mode, model, and effort; `applied` is set
-        // first so the echoes Droid sends for this very frame refine it rather than race it. It is
-        // set when no frame goes out too: a selection the wire cannot tell from the applied one
-        // can still change where the effort came from.
+        // One frame covers runtime mode, interaction mode, model, and effort, and goes out only
+        // when it would change something Droid is known to hold. The runtime mode stays the source
+        // of truth for autonomy, so a level Droid raised on its own is sent back here.
         const desired = desiredSettings(turnInput.runtimePolicy, turnInput.modelSelection);
-        const needsFrame = applied === undefined || !sameDroidSessionSettings(applied, desired);
-        applied = desired;
-        if (needsFrame) {
-          yield* settingsFrame(desired).pipe(
-            Effect.tapError(() =>
-              Effect.sync(() => {
-                applied = undefined;
-              }),
-            ),
-          );
-        }
+        if (settingsOwed || !droidHoldsSettings(known, desired)) yield* sendSettings(desired);
 
         const payload = yield* resolvePromptPayload(
           turnInput.message.text,
@@ -1674,7 +1699,6 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             return threadSnapshot(hosted);
           }
 
-          const settings = applied ?? desiredSettings(input.runtimePolicy, input.modelSelection);
           const rewind = request("droid.execute_rewind", {
             sessionId: sourceId,
             messageId,
@@ -1694,24 +1718,18 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
                   ),
                 )
               : yield* rewind;
+          const settingsNow = () => desiredSettings(asked.runtimePolicy, asked.modelSelection);
           if (rewoundId === undefined) {
-            return threadSnapshot(yield* startSession(settings, row, appThreadId));
+            return threadSnapshot(yield* startSession(settingsNow(), row, appThreadId));
           }
 
           const rewound = yield* adoptSession(rewoundId, row, appThreadId);
-          // The rewound session's settings are not read back, so they are sent again. A failed
-          // frame leaves `applied` unknown and the next turn sends them.
-          applied = settings;
-          yield* settingsFrame(settings).pipe(
+          // The load took no settings, so they go out now, computed against the rewound session's
+          // model list. A failed frame leaves nothing known and the next turn sends them again.
+          yield* sendSettings(settingsNow()).pipe(
             Effect.catch((error) =>
-              Effect.sync(() => {
-                applied = undefined;
-              }).pipe(
-                Effect.andThen(
-                  logWarning(
-                    `Droid did not take the settings of the rewound session: ${describeFailure(error)}`,
-                  ),
-                ),
+              logWarning(
+                `Droid did not take the settings of the rewound session: ${describeFailure(error)}`,
               ),
             ),
           );
@@ -1732,8 +1750,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           sessionId: nativeId,
           loadAllMessages: true,
         });
-        rememberModels(result);
-        applied = undefined;
+        noteLoadedSession(result);
         state.history = visibleDroidHistory(field(field(result, "session"), "messages"));
         // The counts belong to the retired session.
         turn.mapper = { ...turn.mapper, sessionUsage: undefined, turnBaseline: undefined };
@@ -1906,8 +1923,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const returnToHosted = Effect.fnUntraced(function* (hosted: DroidThreadState | null) {
         const hostedId = hosted?.providerThread.nativeThreadRef?.nativeId;
         if (hosted === null || hostedId === undefined || hostedId === null) return;
-        applied = undefined;
+        known = {};
         yield* request("droid.load_session", { sessionId: hostedId, loadAllMessages: true }).pipe(
+          Effect.map(noteLoadedSession),
           Effect.catch((error) =>
             Effect.sync(() => {
               if (threadState === hosted) threadState = null;
@@ -2000,8 +2018,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
                 : { providerTurnId: forkInput.providerTurnId }),
             },
           };
-          rememberModels(forked.loaded);
-          applied = undefined;
+          noteLoadedSession(forked.loaded);
           sessionUsage = undefined;
           threadState = {
             providerThread,

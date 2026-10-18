@@ -176,6 +176,11 @@ describe("DroidAdapterV2 compaction", () => {
           "droid.update_session_settings",
           "droid.add_user_message",
         ]);
+        assert.strictEqual(
+          requestsOf(fake, "droid.update_session_settings").at(-1)?.params["reasoningEffort"],
+          "high",
+          "the frame after the switch carries the computed effort",
+        );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -330,6 +335,11 @@ describe("DroidAdapterV2 compaction", () => {
         sessionId: "stored-session",
         loadAllMessages: true,
       });
+      assert.strictEqual(
+        requestsTo(next, "droid.update_session_settings")[0]?.params["reasoningEffort"],
+        "high",
+        "the one frame after the load carries the computed effort",
+      );
       const message = requestsTo(next, "droid.add_user_message")[0]?.params;
       assert.strictEqual(message?.["text"], "What was the marker?");
       assert.strictEqual(message?.["messageId"], messageIdFor(3));

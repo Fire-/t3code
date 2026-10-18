@@ -257,6 +257,47 @@ describe("DroidAdapterV2 rollback", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    it.effect(
+      "[VAL-HIST-012] the frame after the rewind carries the thread's last selection with the catalog default effort, and the next turn on it sends nothing",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid({
+            availableModels: [
+              {
+                id: MODEL,
+                modelId: MODEL,
+                supportedReasoningEfforts: ["low", "medium", "high"],
+                defaultReasoningEffort: "medium",
+              },
+              {
+                id: "gpt-5-codex",
+                modelId: "gpt-5-codex",
+                supportedReasoningEfforts: ["low", "medium", "high"],
+                defaultReasoningEffort: "low",
+              },
+            ],
+          });
+          const opened = yield* openRuntime(fake, { runtimeMode: "auto" });
+          const thread = yield* ensure(opened, { runtimeMode: "auto" });
+          const codex = { runtimeMode: "auto", model: "gpt-5-codex", effort: undefined } as const;
+          yield* runTurn(opened, fake, thread, { runOrdinal: 1, runtimeMode: "auto" });
+          yield* runTurn(opened, fake, thread, { runOrdinal: 2, ...codex });
+          const turns = providerTurnsOf(opened.all);
+
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+          assert.deepStrictEqual(requestsOf(fake, "droid.update_session_settings").at(-1)?.params, {
+            interactionMode: "auto",
+            autonomyLevel: "medium",
+            modelId: "gpt-5-codex",
+            reasoningEffort: "low",
+          });
+
+          const before = methodsOf(fake).length;
+          yield* runTurn(opened, fake, snapshot.providerThread, { runOrdinal: 3, ...codex });
+          assert.deepStrictEqual(methodsOf(fake).slice(before), ["droid.add_user_message"]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect("rolling back to the latest turn discards nothing and sends no frame", () =>
       Effect.gen(function* () {
         const fake = yield* makeFakeDroid();

@@ -7,12 +7,15 @@ import {
 } from "@t3tools/contracts";
 
 import {
+  droidHoldsSettings,
   droidModelCatalog,
+  droidReasoningEfforts,
   droidSessionSettings,
   droidSettingsParams,
-  sameDroidSessionSettings,
+  withDroidReport,
   type DroidModelInfo,
 } from "./sessionSettings.ts";
+import { buildDroidModelsFromListModels } from "./status.ts";
 
 const DEFAULT_MODEL = DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("droid")];
 
@@ -34,24 +37,14 @@ const settingsFor = (
   });
 
 const LISTED: ReadonlyArray<DroidModelInfo> = [
-  {
-    id: "auto",
-    router: true,
-    supportedReasoningEfforts: ["none"],
-    defaultReasoningEffort: "none",
-  },
+  { id: "auto", router: true, efforts: [], defaultEffort: undefined },
   {
     id: "claude-opus-5-5",
     router: false,
-    supportedReasoningEfforts: ["low", "medium", "high"],
-    defaultReasoningEffort: "medium",
+    efforts: ["low", "medium", "high"],
+    defaultEffort: "medium",
   },
-  {
-    id: "plain-model",
-    router: false,
-    supportedReasoningEfforts: [],
-    defaultReasoningEffort: undefined,
-  },
+  { id: "plain-model", router: false, efforts: [], defaultEffort: undefined },
 ];
 
 describe("real model ids [VAL-HIST-012]", () => {
@@ -90,162 +83,242 @@ describe("the router model [VAL-HIST-012]", () => {
     );
     assert.strictEqual(settingsFor(selected("router-x", "high")).reasoningEffort, "high");
   });
+});
 
-  it("[VAL-HIST-012] leaving the router sends the chosen effort, else the model's default effort", () => {
-    const previous = settingsFor(selected("auto"), { models: LISTED });
+describe("the effort sent to Droid [VAL-HIST-012]", () => {
+  it("[VAL-HIST-012] an explicit effort wins over the model's catalog default", () => {
     assert.strictEqual(
-      settingsFor(selected("claude-opus-5-5", "high"), { models: LISTED, previous })
-        .reasoningEffort,
+      settingsFor(selected("claude-opus-5-5", "high"), { models: LISTED }).reasoningEffort,
       "high",
     );
+  });
+
+  it("[VAL-HIST-012] without an explicit effort it is the model's catalog default", () => {
     assert.strictEqual(
-      settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous }).reasoningEffort,
+      settingsFor(selected("claude-opus-5-5"), { models: LISTED }).reasoningEffort,
       "medium",
     );
   });
 
-  it("[VAL-HIST-012] no default effort is invented when the target lists none or the list is unknown", () => {
-    const previous = settingsFor(selected("auto"));
+  it("[VAL-HIST-012] a model that lists no efforts, the router, and an unknown list send none", () => {
     assert.strictEqual(
-      settingsFor(selected("plain-model"), { models: LISTED, previous }).reasoningEffort,
+      settingsFor(selected("plain-model"), { models: LISTED }).reasoningEffort,
       undefined,
     );
     assert.strictEqual(
-      settingsFor(selected("claude-opus-5-5"), { previous }).reasoningEffort,
+      settingsFor(selected("auto"), { models: LISTED }).reasoningEffort,
       undefined,
     );
-  });
-
-  it("[VAL-HIST-012] a model that follows another model with no chosen effort carries no default effort", () => {
-    const previous = settingsFor(selected("plain-model", "low"), { models: LISTED });
+    assert.strictEqual(settingsFor(selected("claude-opus-5-5")).reasoningEffort, undefined);
     assert.strictEqual(
-      settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous }).reasoningEffort,
-      undefined,
-    );
-  });
-});
-
-describe("the restored default effort stays while the selection does [VAL-HIST-012]", () => {
-  const restored = () =>
-    settingsFor(selected("claude-opus-5-5"), {
-      models: LISTED,
-      previous: settingsFor(selected("auto"), { models: LISTED }),
-    });
-
-  it("[VAL-HIST-012] an identical selection computes the same settings, so no frame follows", () => {
-    const first = restored();
-    assert.strictEqual(first.reasoningEffort, "medium");
-    const next = settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: first });
-    assert.strictEqual(next.reasoningEffort, "medium");
-    assert.isTrue(sameDroidSessionSettings(first, next));
-  });
-
-  it("[VAL-HIST-012] spec mode and the implement turn after it carry the restored effort", () => {
-    const first = restored();
-    const spec = settingsFor(selected("claude-opus-5-5"), {
-      models: LISTED,
-      previous: first,
-      interactionMode: "plan",
-    });
-    assert.deepStrictEqual(droidSettingsParams(spec), {
-      interactionMode: "spec",
-      autonomyLevel: "off",
-      modelId: "claude-opus-5-5",
-      reasoningEffort: "medium",
-      specModeModelId: "claude-opus-5-5",
-      specModeReasoningEffort: "medium",
-    });
-    const implement = settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: spec });
-    assert.strictEqual(implement.reasoningEffort, "medium");
-    assert.strictEqual(implement.interactionMode, "auto");
-  });
-
-  it("[VAL-HIST-012] a chosen effort replaces it, and a later turn without one does not bring it back", () => {
-    const chosen = settingsFor(selected("claude-opus-5-5", "high"), {
-      models: LISTED,
-      previous: restored(),
-    });
-    assert.strictEqual(chosen.reasoningEffort, "high");
-    assert.strictEqual(
-      settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: chosen })
-        .reasoningEffort,
+      settingsFor(selected("not-listed"), { models: LISTED }).reasoningEffort,
       undefined,
     );
   });
 
-  it("[VAL-HIST-012] another model does not inherit it", () => {
-    assert.strictEqual(
-      settingsFor(selected("plain-model"), { models: LISTED, previous: restored() })
-        .reasoningEffort,
-      undefined,
+  it("[VAL-HIST-012] the same selection always gives the same settings, whatever came before", () => {
+    const direct = settingsFor(selected("claude-opus-5-5"), { models: LISTED });
+    const again = settingsFor(selected("claude-opus-5-5"), { models: LISTED });
+    assert.deepStrictEqual(direct, again);
+    assert.deepStrictEqual(
+      Object.keys(direct).toSorted(),
+      ["autonomyLevel", "interactionMode", "modelId", "reasoningEffort", "router"],
+      "the settings hold no record of where the effort came from",
     );
   });
 
-  it("[VAL-HIST-012] a model that was never entered from the router stays without an effort", () => {
-    const fresh = settingsFor(selected("claude-opus-5-5"), { models: LISTED });
-    assert.strictEqual(fresh.reasoningEffort, undefined);
-    assert.strictEqual(
-      settingsFor(selected("claude-opus-5-5"), { models: LISTED, previous: fresh }).reasoningEffort,
-      undefined,
-    );
-  });
-});
-
-describe("where the effort came from [VAL-HIST-012]", () => {
-  const restored = () =>
-    settingsFor(selected("claude-opus-5-5"), {
-      models: LISTED,
-      previous: settingsFor(selected("auto"), { models: LISTED }),
-    });
-
-  it("[VAL-HIST-012] an explicit effort equal to the model's default is not read as restored", () => {
-    const explicit = settingsFor(selected("claude-opus-5-5", "medium"), { models: LISTED });
-    assert.strictEqual(explicit.reasoningEffort, "medium");
-    const dropped = settingsFor(selected("claude-opus-5-5"), {
-      models: LISTED,
-      previous: explicit,
-    });
-    assert.strictEqual(dropped.reasoningEffort, undefined);
-    assert.isFalse(sameDroidSessionSettings(explicit, dropped));
-  });
-
-  it("[VAL-HIST-012] selecting the restored default explicitly changes nothing on the wire but takes ownership of it", () => {
-    const first = restored();
-    const explicit = settingsFor(selected("claude-opus-5-5", "medium"), {
-      models: LISTED,
-      previous: first,
-    });
-    assert.isTrue(sameDroidSessionSettings(first, explicit));
-    const dropped = settingsFor(selected("claude-opus-5-5"), {
-      models: LISTED,
-      previous: explicit,
-    });
-    assert.strictEqual(dropped.reasoningEffort, undefined);
-    assert.isFalse(sameDroidSessionSettings(explicit, dropped));
-  });
-
-  it("[VAL-HIST-012] the restored effort survives a return to the same model through the router only", () => {
-    const viaRouter = settingsFor(selected("claude-opus-5-5"), {
-      models: LISTED,
-      previous: settingsFor(selected("auto"), { models: LISTED, previous: restored() }),
-    });
-    assert.strictEqual(viaRouter.reasoningEffort, "medium");
-    const viaModel = settingsFor(selected("claude-opus-5-5"), {
-      models: LISTED,
-      previous: settingsFor(selected("plain-model"), { models: LISTED, previous: restored() }),
-    });
-    assert.strictEqual(viaModel.reasoningEffort, undefined);
-  });
-
-  it("[VAL-HIST-012] the origin of the effort never reaches the wire", () => {
-    for (const settings of [restored(), settingsFor(selected("claude-opus-5-5", "medium"))]) {
-      assert.deepStrictEqual(droidSettingsParams(settings), {
-        interactionMode: "auto",
+  it("[VAL-HIST-012] spec mode carries the same effort in both effort fields", () => {
+    assert.deepStrictEqual(
+      droidSettingsParams(
+        settingsFor(selected("claude-opus-5-5"), { models: LISTED, interactionMode: "plan" }),
+      ),
+      {
+        interactionMode: "spec",
         autonomyLevel: "off",
         modelId: "claude-opus-5-5",
         reasoningEffort: "medium",
-      });
+        specModeModelId: "claude-opus-5-5",
+        specModeReasoningEffort: "medium",
+      },
+    );
+    assert.deepStrictEqual(
+      droidSettingsParams(
+        settingsFor(selected("claude-opus-5-5", "high"), {
+          models: LISTED,
+          interactionMode: "plan",
+        }),
+      ),
+      {
+        interactionMode: "spec",
+        autonomyLevel: "off",
+        modelId: "claude-opus-5-5",
+        reasoningEffort: "high",
+        specModeModelId: "claude-opus-5-5",
+        specModeReasoningEffort: "high",
+      },
+    );
+  });
+});
+
+describe("the default effort rule is shared with the picker [VAL-HIST-012]", () => {
+  const entries: ReadonlyArray<Record<string, unknown>> = [
+    {
+      id: "listed",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+      defaultReasoningEffort: "high",
+    },
+    { id: "unlisted", supportedReasoningEfforts: ["off", "high"], defaultReasoningEffort: "ultra" },
+    { id: "absent", supportedReasoningEfforts: ["xhigh", "max"] },
+    { id: "mixed", supportedReasoningEfforts: ["low", 7, "high"], defaultReasoningEffort: 7 },
+    { id: "empty", supportedReasoningEfforts: [] },
+    { id: "none-listed" },
+    {
+      id: "auto",
+      kind: "router",
+      supportedReasoningEfforts: ["none"],
+      defaultReasoningEffort: "none",
+    },
+  ];
+
+  it("[VAL-HIST-012] the picker's default effort is the adapter's default effort for every entry", () => {
+    const catalog = droidModelCatalog({ availableModels: entries });
+    const pickerModels = buildDroidModelsFromListModels({ models: entries });
+    assert.strictEqual(catalog?.length, entries.length);
+    for (const info of catalog ?? []) {
+      const descriptor = pickerModels.find((model) => model.slug === info.id)?.capabilities
+        ?.optionDescriptors?.[0];
+      const pickerDefault = descriptor?.type === "select" ? descriptor.currentValue : undefined;
+      assert.strictEqual(pickerDefault, info.defaultEffort, `default effort of ${info.id}`);
     }
+  });
+
+  it("[VAL-HIST-012] the default is the entry's own when it lists it, else the first listed effort", () => {
+    assert.deepStrictEqual(
+      droidReasoningEfforts({
+        supportedReasoningEfforts: ["low", "medium", "high"],
+        defaultReasoningEffort: "high",
+      }),
+      { efforts: ["low", "medium", "high"], defaultEffort: "high" },
+    );
+    assert.strictEqual(
+      droidReasoningEfforts({
+        supportedReasoningEfforts: ["off", "high"],
+        defaultReasoningEffort: "ultra",
+      }).defaultEffort,
+      "off",
+    );
+  });
+
+  it("[VAL-HIST-012] the router, a missing list, and an empty list offer no effort", () => {
+    const none = { efforts: [], defaultEffort: undefined };
+    assert.deepStrictEqual(
+      droidReasoningEfforts({ kind: "router", supportedReasoningEfforts: ["none"] }),
+      none,
+    );
+    assert.deepStrictEqual(droidReasoningEfforts({}), none);
+    assert.deepStrictEqual(droidReasoningEfforts({ supportedReasoningEfforts: [] }), none);
+  });
+});
+
+describe("what Droid is known to hold [VAL-HIST-011]", () => {
+  const held = droidSettingsParams(settingsFor(selected("claude-opus-5-5", "high")));
+
+  it("[VAL-HIST-011] settings Droid already holds need no frame", () => {
+    assert.isTrue(droidHoldsSettings(held, settingsFor(selected("claude-opus-5-5", "high"))));
+  });
+
+  it("[VAL-HIST-011] a different model, effort, autonomy, or interaction mode needs a frame", () => {
+    const base = { models: LISTED };
+    assert.isFalse(droidHoldsSettings(held, settingsFor(selected("plain-model"), base)));
+    assert.isFalse(droidHoldsSettings(held, settingsFor(selected("claude-opus-5-5", "low"), base)));
+    assert.isFalse(
+      droidHoldsSettings(
+        held,
+        settingsFor(selected("claude-opus-5-5", "high"), { runtimeMode: "full-access" }),
+      ),
+    );
+    assert.isFalse(
+      droidHoldsSettings(
+        held,
+        settingsFor(selected("claude-opus-5-5", "high"), { interactionMode: "plan" }),
+      ),
+    );
+  });
+
+  it("[VAL-HIST-011] a cleared effort needs a frame carrying the catalog default, none when held", () => {
+    const cleared = settingsFor(selected("claude-opus-5-5"), { models: LISTED });
+    assert.strictEqual(cleared.reasoningEffort, "medium");
+    assert.isFalse(droidHoldsSettings(held, cleared));
+    assert.isTrue(
+      droidHoldsSettings(
+        droidSettingsParams(settingsFor(selected("claude-opus-5-5", "medium"))),
+        cleared,
+      ),
+    );
+  });
+
+  it("[VAL-HIST-011] nothing known needs a frame, and so does a changed spec model or effort", () => {
+    assert.isFalse(droidHoldsSettings({}, settingsFor(selected("claude-opus-5-5", "high"))));
+    const spec = settingsFor(selected("claude-opus-5-5", "high"), { interactionMode: "plan" });
+    const heldSpec = droidSettingsParams(spec);
+    assert.isTrue(droidHoldsSettings(heldSpec, spec));
+    assert.isFalse(
+      droidHoldsSettings({ ...heldSpec, specModeReasoningEffort: "low" }, spec),
+      "Droid swapped the spec effort",
+    );
+    assert.isFalse(
+      droidHoldsSettings({ ...heldSpec, specModeModelId: "gpt-5-codex" }, spec),
+      "Droid swapped the spec model",
+    );
+  });
+
+  it("[VAL-HIST-011] the spec fields only matter in spec mode", () => {
+    const auto = settingsFor(selected("claude-opus-5-5", "high"));
+    assert.isTrue(
+      droidHoldsSettings({ ...droidSettingsParams(auto), specModeModelId: "elsewhere" }, auto),
+    );
+  });
+
+  it("[VAL-HIST-011] an effort Droid fills in where t3 sends none is not a difference", () => {
+    const router = settingsFor(selected("auto"), { models: LISTED });
+    assert.isTrue(
+      droidHoldsSettings({ ...droidSettingsParams(router), reasoningEffort: "medium" }, router),
+    );
+    const plain = settingsFor(selected("plain-model"), { models: LISTED });
+    assert.isTrue(
+      droidHoldsSettings({ ...droidSettingsParams(plain), reasoningEffort: "medium" }, plain),
+    );
+  });
+
+  it("[VAL-HIST-011] a report overlays the fields it carries and keeps the rest", () => {
+    const next = withDroidReport(
+      held,
+      { autonomyLevel: "low", reasoningEffort: "medium", compactionThresholdCheckEnabled: true },
+      { interactionMode: true },
+    );
+    assert.deepStrictEqual(next, { ...held, autonomyLevel: "low", reasoningEffort: "medium" });
+  });
+
+  it("[VAL-HIST-011] a report reads strings only, and a report that is not an object changes nothing", () => {
+    assert.deepStrictEqual(
+      withDroidReport(held, { modelId: 7, reasoningEffort: null }, { interactionMode: true }),
+      held,
+    );
+    assert.strictEqual(withDroidReport(held, undefined, { interactionMode: true }), held);
+    assert.strictEqual(withDroidReport(held, "settings", { interactionMode: true }), held);
+  });
+
+  it("[VAL-HIST-011] only a response moves the interaction mode, never a notification", () => {
+    const report = { interactionMode: "spec", autonomyLevel: "high" };
+    assert.deepStrictEqual(withDroidReport(held, report, { interactionMode: false }), {
+      ...held,
+      autonomyLevel: "high",
+    });
+    assert.deepStrictEqual(withDroidReport(held, report, { interactionMode: true }), {
+      ...held,
+      interactionMode: "spec",
+      autonomyLevel: "high",
+    });
   });
 });
 
@@ -272,24 +345,9 @@ describe("droidModelCatalog", () => {
         ],
       }),
       [
-        {
-          id: "auto",
-          router: true,
-          supportedReasoningEfforts: ["none"],
-          defaultReasoningEffort: "none",
-        },
-        {
-          id: "claude-opus-5-5",
-          router: false,
-          supportedReasoningEfforts: ["low", "high"],
-          defaultReasoningEffort: "high",
-        },
-        {
-          id: "bare",
-          router: false,
-          supportedReasoningEfforts: [],
-          defaultReasoningEffort: undefined,
-        },
+        { id: "auto", router: true, efforts: [], defaultEffort: undefined },
+        { id: "claude-opus-5-5", router: false, efforts: ["low", "high"], defaultEffort: "high" },
+        { id: "bare", router: false, efforts: [], defaultEffort: undefined },
       ],
     );
   });

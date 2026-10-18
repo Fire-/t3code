@@ -168,6 +168,29 @@ export function droidResponseTo(
   return entry?.type === "runtime_exit" ? undefined : field(entry?.frame, "result");
 }
 
+/**
+ * The one frame after a `load_session` asks for the effort the thread's selection computes. These
+ * fixtures choose no effort, so it is the model's catalog default from the list that load reported.
+ */
+export function assertDroidFrameCarriesCatalogEffort(
+  transcript: ProviderReplayTranscript,
+  load: DroidRecordedRequest,
+  settings: DroidRecordedRequest,
+) {
+  const modelId = field(settings.params, "modelId");
+  const listed = field(droidResponseTo(transcript, load), "availableModels");
+  const entry = Array.isArray(listed)
+    ? listed.find((model) => field(model, "id") === modelId)
+    : undefined;
+  const catalogDefault = field(entry, "defaultReasoningEffort");
+  assert.isString(catalogDefault, "the load reports the model's default effort");
+  assert.equal(
+    field(settings.params, "reasoningEffort"),
+    catalogDefault,
+    "the frame after the load carries the model's catalog default effort",
+  );
+}
+
 /** The session id Droid returned for the one `initialize_session` of a recording. */
 export function droidInitializedSessionId(transcript: ProviderReplayTranscript): string {
   const initializes = droidRequests(transcript, "initialize_session");

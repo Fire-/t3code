@@ -795,7 +795,11 @@ describe("DroidAdapterV2", () => {
         yield* fake.current().emit(
           {
             type: "settings_updated",
-            settings: { ...FAKE_DROID_DEFAULT_SETTINGS, autonomyLevel: "low" },
+            settings: {
+              ...FAKE_DROID_DEFAULT_SETTINGS,
+              reasoningEffort: "high",
+              autonomyLevel: "low",
+            },
           },
           null,
         );
@@ -827,9 +831,13 @@ describe("DroidAdapterV2", () => {
           const opened = yield* openRuntime(fake);
           const thread = yield* ensure(opened);
           yield* runTurn(opened, fake, thread);
-          yield* fake
-            .current()
-            .emit({ type: "settings_updated", settings: { ...FAKE_DROID_DEFAULT_SETTINGS } }, null);
+          yield* fake.current().emit(
+            {
+              type: "settings_updated",
+              settings: { ...FAKE_DROID_DEFAULT_SETTINGS, reasoningEffort: "high" },
+            },
+            null,
+          );
           yield* fake.current().settle;
           yield* runTurn(opened, fake, thread, { runOrdinal: 2 });
           assert.deepStrictEqual(requestsOf(fake, "droid.update_session_settings"), []);

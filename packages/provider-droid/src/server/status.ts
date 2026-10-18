@@ -37,6 +37,7 @@ import {
 } from "@t3tools/provider-core/server/maintenanceResolver";
 
 import { makeDroidRpcRuntime } from "./rpc.ts";
+import { droidReasoningEfforts } from "./sessionSettings.ts";
 
 export const DROID_PRESENTATION = {
   displayName: "Droid",
@@ -101,17 +102,8 @@ function pricingLabel(entry: ListedModel): string | undefined {
 }
 
 function reasoningCapabilities(entry: ListedModel): ModelCapabilities {
-  // The router picks its own effort, so there is nothing for the user to choose.
-  if (entry.kind === "router" || !Array.isArray(entry.supportedReasoningEfforts)) {
-    return EMPTY_CAPABILITIES;
-  }
-  const efforts = entry.supportedReasoningEfforts.filter(Predicate.isString);
+  const { efforts, defaultEffort } = droidReasoningEfforts(entry);
   if (efforts.length === 0) return EMPTY_CAPABILITIES;
-  const defaultEffort =
-    Predicate.isString(entry.defaultReasoningEffort) &&
-    efforts.includes(entry.defaultReasoningEffort)
-      ? entry.defaultReasoningEffort
-      : efforts[0];
   return createModelCapabilities({
     optionDescriptors: [
       buildSelectOptionDescriptor({

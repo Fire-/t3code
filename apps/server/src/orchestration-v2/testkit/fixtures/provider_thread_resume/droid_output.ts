@@ -11,6 +11,7 @@ import {
   PROVIDER_THREAD_RESUME_SECOND_PROMPT,
 } from "../shared.ts";
 import {
+  assertDroidFrameCarriesCatalogEffort,
   assertDroidSessionThread,
   assertDroidTurnIdentity,
   droidInitializedSessionId,
@@ -80,6 +81,7 @@ export function assertDroidProviderThreadResumeOutput(
   assert.isBelow(settings!.index, sends[1]!.index);
   assert.equal(field(settings!.params, "interactionMode"), "auto");
   assert.isString(field(settings!.params, "autonomyLevel"));
+  assertDroidFrameCarriesCatalogEffort(transcript, loads[0]!, settings!);
 
   assertBaseProjection({
     result,
