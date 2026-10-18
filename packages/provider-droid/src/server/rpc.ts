@@ -204,6 +204,12 @@ export class DroidRpcRuntime extends Context.Service<
      * exit, then SIGTERM and SIGKILL to the process group. Removes the settings file.
      */
     readonly close: Effect.Effect<DroidRpcExit>;
+    /**
+     * Stops the process without asking it: SIGTERM, then SIGKILL after the grace, to the
+     * process group. Returns once the process is gone. Like `close`, it ends `events` instead of
+     * failing it, so the death reads as deliberate.
+     */
+    readonly kill: Effect.Effect<DroidRpcExit>;
   }
 >()("@t3tools/provider-droid/server/rpc/DroidRpcRuntime") {}
 
@@ -796,6 +802,15 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     return yield* Deferred.await(exited);
   });
 
+  const kill = Effect.gen(function* () {
+    yield* Ref.set(closing, true);
+    yield* terminate("transport_error", "Droid was killed");
+    // An exit that terminated the runtime first is still finishing it.
+    yield* Deferred.await(terminated);
+    yield* removeSettings;
+    return yield* Deferred.await(exited);
+  });
+
   return DroidRpcRuntime.of({
     events: Stream.fromQueue(events),
     request,
@@ -806,5 +821,6 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     stderrTail: readStderrTail,
     awaitExit: Deferred.await(exited),
     close,
+    kill,
   });
 });

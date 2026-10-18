@@ -18,6 +18,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -467,6 +468,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       let sessionUsage: DroidTokenCounts | undefined;
       let closing = false;
       let ended = false;
+      /** A stop killed the process on purpose: its exit ends the session without failing anything. */
+      let stopRequested = false;
+      /** Resolved once the event stream has ended and the session has published how. */
+      const eventsEnded = yield* Deferred.make<void>();
       /** Keyed by the runtime request id; an entry exists exactly while Droid waits on the request. */
       const pendingRequests = new Map<string, PendingDroidRequest>();
 
@@ -1067,37 +1072,40 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       const handleEnd = (cause: Cause.Cause<unknown> | undefined) =>
-        permit.withPermits(1)(
-          Effect.gen(function* () {
-            ended = true;
-            const state = threadState;
-            const turn = state?.activeTurn ?? null;
-            if (state !== null && turn !== null) {
-              yield* finishTurn(
-                state,
-                turn,
-                processExitOutcome(closing, "Droid process exited unexpectedly."),
-              );
-            }
-            if (cause !== undefined && !closing) {
-              yield* logWarning(`Droid process ended: ${Cause.pretty(cause)}`);
-            }
-            if (closing) {
-              yield* updateProviderSession("stopped", null);
-              yield* Queue.end(events);
-            } else {
-              yield* updateProviderSession("error", "Droid process exited unexpectedly.");
-              yield* Queue.fail(
-                events,
-                new ProviderAdapter.ProviderAdapterEventStreamError({
-                  driver: DROID_PROVIDER,
-                  providerSessionId: input.providerSessionId,
-                  cause,
-                }),
-              );
-            }
-          }),
-        );
+        permit
+          .withPermits(1)(
+            Effect.gen(function* () {
+              ended = true;
+              const state = threadState;
+              const turn = state?.activeTurn ?? null;
+              if (state !== null && turn !== null) {
+                yield* finishTurn(
+                  state,
+                  turn,
+                  processExitOutcome(closing, "Droid process exited unexpectedly."),
+                );
+              }
+              const deliberate = closing || stopRequested;
+              if (cause !== undefined && !deliberate) {
+                yield* logWarning(`Droid process ended: ${Cause.pretty(cause)}`);
+              }
+              if (deliberate) {
+                yield* updateProviderSession("stopped", null);
+                yield* Queue.end(events);
+              } else {
+                yield* updateProviderSession("error", "Droid process exited unexpectedly.");
+                yield* Queue.fail(
+                  events,
+                  new ProviderAdapter.ProviderAdapterEventStreamError({
+                    driver: DROID_PROVIDER,
+                    providerSessionId: input.providerSessionId,
+                    cause,
+                  }),
+                );
+              }
+            }),
+          )
+          .pipe(Effect.ensuring(Deferred.succeed(eventsEnded, undefined)));
 
       yield* rpc.events.pipe(
         Stream.runForEach((event) =>
@@ -1391,6 +1399,33 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }).pipe(permit.withPermits(1));
       });
 
+      /**
+       * Droid does not stop a compaction. It answers `interrupt_session` at once, goes on
+       * compacting, and queues the next message behind it. Killing the process is the only stop,
+       * and the stored session is still the one from before the compaction, so the next turn
+       * loads it on a new process.
+       */
+      const stopCompaction = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+      ) {
+        const killed = yield* permit.withPermits(1)(
+          Effect.gen(function* () {
+            if (state.activeTurn !== turn) return false;
+            stopRequested = true;
+            // Nothing more is sent to a process on its way out.
+            ended = true;
+            yield* finishTurn(state, turn, { kind: "interrupted", disposition: "reusable" });
+            // Still under the permit, so the end of the event stream is handled after the turn
+            // settled and cannot report it as a process exit.
+            yield* Effect.uninterruptible(rpc.kill);
+            return true;
+          }),
+        );
+        // The next turn opens a new session once this one has published that it stopped.
+        if (killed) yield* Deferred.await(eventsEnded);
+      });
+
       const interruptTurn = Effect.fnUntraced(function* (
         interruptInput: ProviderAdapter.ProviderAdapterV2InterruptInput,
       ) {
@@ -1403,6 +1438,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         ) {
           return yield* protocolError(`Droid turn ${interruptInput.providerTurnId} is not active`);
         }
+        if (turn.compaction !== undefined) return yield* stopCompaction(state, turn);
         // Under the event permit so a notification being mapped cannot overwrite the flag with
         // the state it read before it.
         const markInterruptRequested = (interruptRequested: boolean) =>
@@ -1413,16 +1449,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           );
         // Set before the request: Droid's cancel answers can arrive before the reply does.
         yield* markInterruptRequested(true);
-        const stop = request("droid.interrupt_session", {});
-        yield* turn.compaction === undefined
-          ? stop.pipe(Effect.tapError(() => markInterruptRequested(false)))
-          : // No native turn runs during a compaction, so Droid may have nothing to stop; the
-            // t3 turn ends either way.
-            stop.pipe(
-              Effect.catch((error) =>
-                logDebug(`Droid did not stop the compaction: ${describeFailure(error)}`),
-              ),
-            );
+        yield* request("droid.interrupt_session", {}).pipe(
+          Effect.tapError(() => markInterruptRequested(false)),
+        );
         yield* permit.withPermits(1)(
           Effect.gen(function* () {
             if (state.activeTurn !== turn) return;
@@ -1709,8 +1738,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       /**
-       * Waits for Droid's answer to `compact_session`, then settles the compaction turn. A stop or
-       * an exit that came first has settled it already, and the late answer changes nothing.
+       * Waits for Droid's answer to `compact_session`, then settles the compaction turn. A stop (a
+       * kill) or an exit that came first has settled it already, and the request's failure then
+       * changes nothing.
        */
       const settleCompaction = Effect.fnUntraced(function* (
         state: DroidThreadState,

@@ -16,10 +16,17 @@ import {
   THREAD_ROLLBACK_SECOND_PROMPT,
   type OrchestratorReplayFixture,
 } from "../src/orchestration-v2/testkit/fixtures/shared.ts";
-import { droidCompactionLeadSteps } from "../src/orchestration-v2/testkit/fixtures/droid_compaction/input.ts";
+import {
+  DROID_COMPACTION_FILLER_PROMPTS,
+  DROID_COMPACTION_MARKER,
+  DROID_COMPACTION_RECALL_PROMPT,
+  DROID_COMPACTION_STORE_PROMPT,
+  droidCompactionLeadSteps,
+} from "../src/orchestration-v2/testkit/fixtures/droid_compaction/input.ts";
 import { DROID_ASSISTANT_REPLIES_PROMPT } from "../src/orchestration-v2/testkit/fixtures/thread_rollback/droid_input.ts";
 import {
   adapterReplyTo,
+  assertDroidSessionThread,
   DROID_FILE_WRITE_TOOLS,
   DROID_WRITE_TOOLS,
   droidExitSpecModeRequests,
@@ -248,53 +255,110 @@ const threadStartRewindProbe: OrchestratorReplayFixture = {
   ],
 };
 
+const COMPACTION_SEEDED_PROMPTS = [
+  DROID_COMPACTION_STORE_PROMPT,
+  ...DROID_COMPACTION_FILLER_PROMPTS,
+] as const;
+
+function messageText(message: unknown): string {
+  const content = field(message, "content");
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => field(part, "text"))
+    .filter((text) => typeof text === "string")
+    .join("");
+}
+
 /**
- * Stops a compaction as soon as it runs. The adapter ends a stopped compaction turn at once, so
- * the recording shows whether Droid stops compacting and when it answers `compact_session`
- * relative to the next turn's frames.
+ * Kills the Droid process group while `compact_session` is unanswered, then resumes the same
+ * session on a new process. Droid ignores `interrupt_session` during a compaction, so a kill is
+ * the only stop; the recording shows what the kill leaves on disk: a session that loads with its
+ * pre-compaction history (no summary, no partial compaction) and answers the next turn.
  */
-function assertCompactionStop(
+function assertCompactionStopKill(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
 ) {
+  const sessionId = droidInitializedSessionId(transcript);
   const compactions = droidRequests(transcript, "compact_session");
   assert.lengthOf(compactions, 1);
-  const stops = droidRequests(transcript, "interrupt_session").filter(
-    (request) => request.index > compactions[0]!.index,
-  );
-  assert.lengthOf(stops, 1, "the stop reaches Droid after it was asked to compact");
-  const sends = droidRequests(transcript, "add_user_message");
-  assert.lengthOf(sends, 4, "three turns before the compaction and one after the stop");
+  const compactIndex = compactions[0]!.index;
+  const [firstStart, secondStart, ...otherStarts] = droidProcessStartIndexes(transcript);
+  assert.isDefined(firstStart);
+  assert.isDefined(secondStart);
+  assert.lengthOf(otherStarts, 0, "the kill ends one process and the next turn starts one more");
+  assert.isAbove(compactIndex, firstStart!);
+  assert.isBelow(compactIndex, secondStart!);
 
-  // Droid answers the stop at once but keeps compacting: `compact_session` is answered only after
-  // the next message was sent and acknowledged, and that message's own frames come after it. The
-  // stopped compaction turn is already over by then, so the late answer must settle nothing.
-  const stopAnswer = droidResponseTo(transcript, stops[0]!);
-  assert.isDefined(stopAnswer);
-  const answerIndex = transcript.entries.findIndex(
-    (entry, index) =>
-      index > compactions[0]!.index &&
-      entry.type === "emit_inbound" &&
-      field(entry.frame, "type") === "response" &&
-      field(entry.frame, "id") === compactions[0]!.id,
+  const beforeKill = transcript.entries.slice(compactIndex + 1, secondStart);
+  assert.isFalse(
+    beforeKill.some(
+      (entry) =>
+        entry.type === "emit_inbound" &&
+        field(entry.frame, "type") === "response" &&
+        field(entry.frame, "id") === compactions[0]!.id,
+    ),
+    "the kill lands while compact_session is unanswered",
   );
-  assert.isAbove(answerIndex, sends[3]!.index, "the compaction is answered after the stop");
-  const sendAnswerIndex = transcript.entries.findIndex(
-    (entry, index) =>
-      index > sends[3]!.index &&
-      entry.type === "emit_inbound" &&
-      field(entry.frame, "type") === "response" &&
-      field(entry.frame, "id") === sends[3]!.id,
+  assert.lengthOf(droidNotifications(transcript, "session_compacted"), 0, "no compaction finished");
+  assert.lengthOf(
+    droidRequests(transcript).filter(
+      (request) =>
+        request.index > compactIndex &&
+        request.index < secondStart! &&
+        (request.method === "droid.interrupt_session" || request.method === "droid.close_session"),
+    ),
+    0,
+    "a kill sends Droid nothing",
   );
-  assert.isBelow(sendAnswerIndex, answerIndex, "Droid accepted the next message first");
-  const firstFrameOfNextTurn = droidNotifications(transcript, "create_message").find(
-    ({ index }) => index > sends[3]!.index,
+
+  const loads = droidRequests(transcript, "load_session");
+  assert.lengthOf(loads, 1, "the next turn resumes the session once");
+  assert.isAbove(loads[0]!.index, secondStart!);
+  assert.equal(field(loads[0]!.params, "sessionId"), sessionId);
+  const loaded = droidResponseTo(transcript, loads[0]!);
+  const session = field(loaded, "session");
+  assert.isDefined(session, "load_session succeeds on the killed session");
+  assert.isFalse(
+    transcript.entries.some(
+      (entry, index) =>
+        index > secondStart! &&
+        entry.type === "emit_inbound" &&
+        field(entry.frame, "error") !== undefined,
+    ),
+    "the resumed process reports no error",
   );
-  assert.isAbove(
-    firstFrameOfNextTurn!.index,
-    answerIndex,
-    "the next turn runs after the compaction",
+
+  assert.isFalse(field(loaded, "hasOlderMessages"));
+  const messages = field(session, "messages");
+  assert.isTrue(Array.isArray(messages));
+  const visible = (messages as ReadonlyArray<unknown>).filter(
+    (message) => !field(message, "visibility"),
   );
+  const hidden = (messages as ReadonlyArray<unknown>).filter((message) =>
+    field(message, "visibility"),
+  );
+  assert.isTrue(
+    hidden.every((message) => String(field(message, "id")).startsWith("context-message:")),
+    "no summary or other hidden message was written",
+  );
+  assert.deepEqual(
+    visible.map((message) => field(message, "role")),
+    ["user", "assistant", "user", "assistant", "user", "assistant"],
+    "every seeded message is still in the history",
+  );
+  assert.deepEqual(
+    visible.filter((message) => field(message, "role") === "user").map(messageText),
+    [...COMPACTION_SEEDED_PROMPTS],
+  );
+  assert.include(messageText(visible[1]), DROID_COMPACTION_MARKER);
+
+  const sends = droidRequests(transcript, "add_user_message");
+  assert.deepEqual(
+    sends.map((send) => field(send.params, "text")),
+    [...COMPACTION_SEEDED_PROMPTS, DROID_COMPACTION_RECALL_PROMPT],
+  );
+  assert.isAbove(sends[3]!.index, loads[0]!.index);
 
   assertBaseProjection({
     result,
@@ -304,33 +368,34 @@ function assertCompactionStop(
   });
   const projection = projectionFor(result, transcript.scenario);
   assertSemanticProjectionIntegrity(projection);
-  const compactionItems = projection.turnItems.filter((item) => item.type === "compaction");
   assert.deepEqual(
-    compactionItems.map((item) => item.status),
+    projection.turnItems.filter((item) => item.type === "compaction").map((item) => item.status),
     ["cancelled"],
   );
-  assert.equal(
+  assertDroidSessionThread(projection, sessionId);
+  assert.include(
     projection.turnItems.findLast((item) => item.type === "assistant_message")?.text,
-    "after the stopped compaction",
+    DROID_COMPACTION_MARKER,
+    "the resumed session recalls the marker",
   );
 }
 
-const compactionStopProbe: OrchestratorReplayFixture = {
-  name: "compaction_stop",
+const compactionStopKillProbe: OrchestratorReplayFixture = {
+  name: "compaction_stop_kill",
   buildInput: () => ({
     steps: [
       ...droidCompactionLeadSteps(),
       { type: "message", text: "/compact" },
       { type: "interrupt", targetRunIndex: 4, waitForTurnItemType: "compaction" },
-      { type: "message", text: "Respond with exactly: after the stopped compaction" },
+      { type: "message", text: DROID_COMPACTION_RECALL_PROMPT },
     ],
   }),
   providers: [
     {
       driver: ProviderDriverKind.make("droid"),
-      transcriptFile: new URL(`file://${PROBE_DIRECTORY}/compaction_stop.ndjson`),
+      transcriptFile: new URL(`file://${PROBE_DIRECTORY}/compaction_stop_kill.ndjson`),
       modelSelection: DROID_MODEL_SELECTION,
-      assertOutput: assertCompactionStop,
+      assertOutput: assertCompactionStopKill,
     },
   ],
 };
@@ -339,5 +404,5 @@ export const DROID_PROBE_FIXTURES: ReadonlyArray<OrchestratorReplayFixture> = [
   exitSpecModeProbe("off"),
   exitSpecModeProbe("high"),
   threadStartRewindProbe,
-  compactionStopProbe,
+  compactionStopKillProbe,
 ];

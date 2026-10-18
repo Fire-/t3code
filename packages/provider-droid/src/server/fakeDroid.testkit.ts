@@ -14,11 +14,14 @@ import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { vi } from "vite-plus/test";
 
 import { DROID_PROTOCOL_VERSION } from "./protocol.ts";
 
 /** Outside the valid PID range, so cleanup of a fake process can never signal a real one. */
-const FAKE_PID = 999_999_999;
+const FAKE_PID_BASE = 999_999_000;
+
+const noSuchProcess = () => Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
 
 const decodeFrame = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
@@ -68,6 +71,13 @@ export interface FakeDroidRequest {
 }
 
 export interface FakeDroidProcess {
+  /** The pid the process reports; no real process has it. */
+  readonly pid: number;
+  /**
+   * The signals that reached the process group through `FakeDroid.deliverGroupSignals`, in
+   * order, probes excluded. Any signal ends the process, as it ends a Droid that does not trap it.
+   */
+  readonly signals: () => ReadonlyArray<string>;
   /** Everything the adapter wrote to stdin, in order. */
   readonly frames: () => ReadonlyArray<FakeDroidFrame>;
   readonly requests: () => ReadonlyArray<FakeDroidRequest>;
@@ -97,6 +107,12 @@ export interface FakeDroid {
   readonly sessions: Map<string, FakeDroidSession>;
   readonly processes: () => ReadonlyArray<FakeDroidProcess>;
   readonly current: () => FakeDroidProcess;
+  /**
+   * While the scope is open, `process.kill(-pid, signal)` aimed at a fake process reaches it
+   * instead of the OS: a signal ends it, and a probe (signal 0) fails once it is gone. Any other
+   * pid goes to the real `process.kill`.
+   */
+  readonly deliverGroupSignals: Effect.Effect<void, never, Scope.Scope>;
 }
 
 export const FAKE_DROID_DEFAULT_SETTINGS: FakeDroidSettings = {
@@ -142,6 +158,7 @@ const makeFakeProcess = Effect.fnUntraced(function* (
   store: Map<string, FakeDroidSession>,
   nextSessionId: () => string,
   options: FakeDroidOptions,
+  pid: number,
 ) {
   const scope = yield* Scope.Scope;
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
@@ -153,6 +170,8 @@ const makeFakeProcess = Effect.fnUntraced(function* (
   const answered = new Map<string, Deferred.Deferred<void>>();
   let settleCount = 0;
   let sessionId: string | undefined;
+  let alive = true;
+  const signals: Array<string> = [];
 
   const send = (value: unknown) => Queue.offer(stdout, encoder.encode(`${encodeLine(value)}\n`));
   const emit = (notification: Record<string, unknown>, scopedTo?: string | null) => {
@@ -165,11 +184,22 @@ const makeFakeProcess = Effect.fnUntraced(function* (
       }),
     );
   };
-  const exit = (code = 0) =>
-    Queue.end(stdout).pipe(
-      Effect.andThen(Deferred.succeed(exitCode, ChildProcessSpawner.ExitCode(code))),
-      Effect.asVoid,
-    );
+  const exitNow = (code: number) => {
+    alive = false;
+    Queue.endUnsafe(stdout);
+    Deferred.doneUnsafe(exitCode, Effect.succeed(ChildProcessSpawner.ExitCode(code)));
+  };
+  const exit = (code = 0) => Effect.sync(() => exitNow(code));
+
+  /** A signal to the group, as `process.kill(-pid, signal)` delivers it. */
+  const deliver = (signal: string | number | undefined) => {
+    if (signal === 0) {
+      if (!alive) throw noSuchProcess();
+      return;
+    }
+    signals.push(String(signal));
+    exitNow(signal === "SIGKILL" ? 137 : 143);
+  };
 
   const respond = (id: string, reply: FakeDroidReply) => {
     if (reply === "silent") return Effect.void;
@@ -376,7 +406,7 @@ const makeFakeProcess = Effect.fnUntraced(function* (
   ).pipe(Effect.forkIn(scope));
 
   const handleProcess = ChildProcessSpawner.makeHandle({
-    pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+    pid: ChildProcessSpawner.ProcessId(pid),
     exitCode: Deferred.await(exitCode),
     isRunning: Effect.map(Deferred.isDone(exitCode), (done) => !done),
     kill: () => Effect.void,
@@ -397,6 +427,8 @@ const makeFakeProcess = Effect.fnUntraced(function* (
   });
 
   const process: FakeDroidProcess = {
+    pid,
+    signals: () => signals,
     frames: () => frames,
     requests: () =>
       frames.flatMap((frame) =>
@@ -435,23 +467,37 @@ const makeFakeProcess = Effect.fnUntraced(function* (
       send(envelope({ type: "request", id, method, params })).pipe(Effect.asVoid),
     exit,
   };
-  return { handle: handleProcess, process };
+  return { handle: handleProcess, process, deliver };
 });
 
 export const makeFakeDroid = (options: FakeDroidOptions = {}) =>
   Effect.sync(() => {
     const sessions = new Map<string, FakeDroidSession>(Object.entries(options.sessions ?? {}));
     const processes: Array<FakeDroidProcess> = [];
+    const deliveries = new Map<number, (signal: string | number | undefined) => void>();
     let sessionCounter = 0;
     const nextSessionId = () => `droid-session-${++sessionCounter}`;
     const spawner = ChildProcessSpawner.make(() =>
-      makeFakeProcess(sessions, nextSessionId, options).pipe(
-        Effect.map(({ handle, process }) => {
+      makeFakeProcess(sessions, nextSessionId, options, FAKE_PID_BASE + processes.length).pipe(
+        Effect.map(({ handle, process, deliver }) => {
           processes.push(process);
+          deliveries.set(process.pid, deliver);
           return handle;
         }),
       ),
     );
+    const deliverGroupSignals = Effect.acquireRelease(
+      Effect.sync(() => {
+        const real = process.kill.bind(process);
+        return vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+          const deliver = deliveries.get(-pid);
+          if (deliver === undefined) return real(pid, signal);
+          deliver(signal);
+          return true;
+        });
+      }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    ).pipe(Effect.asVoid);
     const fake: FakeDroid = {
       spawner,
       sessions,
@@ -461,6 +507,7 @@ export const makeFakeDroid = (options: FakeDroidOptions = {}) =>
         if (latest === undefined) throw new Error("the fake droid was never spawned");
         return latest;
       },
+      deliverGroupSignals,
     };
     return fake;
   });

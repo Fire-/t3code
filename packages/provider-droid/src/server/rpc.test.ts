@@ -1656,6 +1656,57 @@ it.layer(NodeServices.layer)("DroidRpcRuntime", (it) => {
       }),
   );
 
+  it.effect(
+    "[VAL-HIST-017] kill signals the process group once, ends the event stream instead of failing it, and rejects later requests as closed",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const calls = yield* recordProcessKill((seen) =>
+          seen.some((call) => call.signal === "SIGTERM"),
+        );
+        const { fake, runtime } = yield* startFakeRuntime();
+        const ended = yield* Stream.runDrain(runtime.events).pipe(Effect.exit, Effect.forkChild);
+        const killing = yield* runtime.kill.pipe(Effect.forkChild);
+        yield* yieldSome;
+        yield* fake.exit(143);
+
+        const exit = yield* Fiber.join(killing);
+        assert.strictEqual(exit.code, 143);
+        assert.deepStrictEqual(
+          calls.filter((call) => call.signal !== 0).map((call) => call.signal),
+          ["SIGTERM"],
+        );
+        assert.isTrue(calls.every((call) => call.pid === -FAKE_PID));
+        assert.isTrue(Exit.isSuccess(yield* Fiber.join(ended)));
+        const error = yield* runtime.request("droid.list_models").pipe(Effect.asVoid, Effect.flip);
+        if (error._tag !== "DroidRpcTerminatedError") return assert.fail(error._tag);
+        assert.strictEqual(error.reason, "closed");
+        assert.deepStrictEqual(yield* runtime.kill, exit, "a second kill changes nothing");
+      }),
+  );
+
+  it.effect(
+    "[VAL-HIST-017] kill escalates to SIGKILL for a Droid that ignores SIGTERM and leaves nothing running",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const { mock, runtime } = yield* startMockRuntime(
+          { DROID_MOCK_STUBBORN: "1" },
+          { grace: { terminate: "100 millis" } },
+        );
+        yield* runtime.request("droid.list_models");
+        const pgid = spawnedPid(yield* mock.readLog);
+        yield* Effect.addFinalizer(() => killGroupIfStillThere(pgid));
+        const ended = yield* Stream.runDrain(runtime.events).pipe(Effect.exit, Effect.forkChild);
+
+        const exit = yield* runtime.kill;
+
+        assert.deepStrictEqual(exit, { code: null, signal: "SIGKILL" });
+        assert.strictEqual(probeCode(-pgid), "ESRCH");
+        assert.isTrue(Exit.isSuccess(yield* Fiber.join(ended)));
+      }).pipe(live),
+  );
+
   it.effect("[VAL-RPC-014] FACTORY_API_KEY passed in options.env reaches the session process", () =>
     Effect.gen(function* () {
       yield* stubEnv("FACTORY_API_KEY", undefined);

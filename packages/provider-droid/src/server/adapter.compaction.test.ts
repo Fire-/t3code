@@ -1,15 +1,18 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 import {
   compactTurn,
+  completed,
   ensure,
   isTerminal,
   layerTest,
+  messageIdFor,
   methodsOf,
   openRuntime,
   providerThreadUpdates,
@@ -23,8 +26,14 @@ import {
   terminals,
   openItems,
   type Events,
+  type OpenRuntime,
 } from "./adapterHarness.testkit.ts";
-import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid } from "./fakeDroid.testkit.ts";
+import {
+  FAKE_DROID_DEFAULT_SETTINGS,
+  makeFakeDroid,
+  type FakeDroid,
+  type FakeDroidProcess,
+} from "./fakeDroid.testkit.ts";
 
 const isTurnStartError = Schema.is(ProviderAdapter.ProviderAdapterTurnStartError);
 
@@ -216,40 +225,232 @@ describe("DroidAdapterV2 compaction", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect(
-    "[VAL-HIST-009] stopping a compaction ends the turn interrupted and cancels its item; Droid's late answer changes nothing",
-    () =>
-      Effect.gen(function* () {
-        const fake = yield* makeFakeDroid({
-          sessions: withSession,
-          overrides: { "droid.compact_session": () => "silent" },
-        });
-        const opened = yield* openRuntime(fake);
-        const thread = yield* resume(opened, "stored-session");
-        const compacting = yield* compactTurn(opened.runtime, thread, { runOrdinal: 2 }).pipe(
-          Effect.forkScoped,
-        );
-        const running = yield* opened.takeEvent(
-          (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
-        );
-        const providerTurnId =
-          running.type === "turn_item.updated" ? running.turnItem.providerTurnId : undefined;
-        assert.isDefined(providerTurnId);
-
-        yield* opened.runtime.interruptTurn({
+  describe("stopping a compaction", () => {
+    /**
+     * Droid answers `interrupt_session` during a compaction and carries on, so the only stop is
+     * to kill the process. `compact_session` stays unanswered, as it does while Droid summarizes.
+     */
+    const compacting = Effect.gen(function* () {
+      const fake = yield* makeFakeDroid({
+        sessions: withSession,
+        overrides: { "droid.compact_session": () => "silent" },
+      });
+      yield* fake.deliverGroupSignals;
+      const opened = yield* openRuntime(fake);
+      const thread = yield* resume(opened, "stored-session");
+      yield* compactTurn(opened.runtime, thread, { runOrdinal: 2 });
+      const published = yield* opened.takeEvent((event) => event.type === "provider_turn.updated");
+      if (published.type !== "provider_turn.updated") return assert.fail("no provider turn");
+      const stop = (options: { readonly requestRuntimeRestart?: boolean } = {}) =>
+        opened.runtime.interruptTurn({
           providerThread: thread,
-          providerTurnId: providerTurnId as never,
+          providerTurnId: published.providerTurn.id,
+          ...options,
         });
-        const terminal = yield* opened.takeEvent(isTerminal);
+      return { fake, opened, process: fake.current(), stop };
+    });
 
-        assert.strictEqual(terminal.type === "turn.terminal" ? terminal.status : "", "interrupted");
-        assert.deepStrictEqual(
-          itemsOfType(opened.all, "compaction").map((item) => item.status),
-          ["running", "cancelled"],
+    const requestsTo = (process: FakeDroidProcess, method: string) =>
+      process.requests().filter((request) => request.method === method);
+
+    /** What the session manager does once the stopped session ends: a new session and process. */
+    const nextTurnOnNewProcess = Effect.fnUntraced(function* (
+      fake: FakeDroid,
+      stopped: OpenRuntime,
+    ) {
+      yield* Deferred.await(stopped.streamEnded);
+      const nativeId = refIds(providerThreadUpdates(stopped.all)).at(-1);
+      assert.strictEqual(nativeId, "stored-session");
+      const reopened = yield* openRuntime(fake);
+      const thread = yield* resume(reopened, "stored-session");
+      yield* startTurn(reopened.runtime, thread, { runOrdinal: 3, text: "What was the marker?" });
+      return fake.current();
+    });
+
+    const assertKilledAndInterrupted = (
+      opened: OpenRuntime,
+      process: FakeDroidProcess,
+      streamExit: Exit.Exit<void, unknown>,
+    ) => {
+      assert.isTrue(
+        Exit.isSuccess(streamExit),
+        "the kill ends the event stream; it does not fail it",
+      );
+      assert.deepStrictEqual(process.signals(), ["SIGTERM"]);
+      assert.deepStrictEqual(requestsTo(process, "droid.interrupt_session"), []);
+      assert.strictEqual(
+        process.methods().at(-1),
+        "droid.compact_session",
+        "nothing follows the kill",
+      );
+
+      const all = terminals(opened.all);
+      assert.strictEqual(all.length, 1, "exactly one terminal");
+      assert.strictEqual(all[0]?.status, "interrupted");
+      assert.isNull(all[0]?.failure);
+      assert.strictEqual(
+        all[0]?.threadDisposition,
+        "reusable",
+        "a deliberate kill does not break the thread",
+      );
+      assert.deepStrictEqual(
+        itemsOfType(opened.all, "compaction").map((item) => item.status),
+        ["running", "cancelled"],
+      );
+      assert.deepStrictEqual(openItems(opened.all), []);
+      assert.strictEqual(
+        providerTurnsOf(opened.all).find((turn) => turn.ordinal === 2)?.status,
+        "interrupted",
+      );
+
+      const statuses = sessionStatuses(opened.all);
+      assert.strictEqual(statuses.at(-1), "stopped");
+      assert.notInclude(statuses, "error", "the exit is the stop, not an unexpected exit");
+      assert.strictEqual(providerThreadUpdates(opened.all).at(-1)?.status, "idle");
+      const stoppedAt = opened.all.findIndex(
+        (event) =>
+          event.type === "provider_session.updated" && event.providerSession.status === "stopped",
+      );
+      assert.isBelow(
+        opened.all.findIndex(isTerminal),
+        stoppedAt,
+        "the turn ends before the session reports stopped",
+      );
+    };
+
+    const assertResumedOnNewProcess = (previous: FakeDroidProcess, next: FakeDroidProcess) => {
+      assert.notStrictEqual(next.pid, previous.pid);
+      assert.deepStrictEqual(next.signals(), []);
+      assert.deepStrictEqual(next.methods(), [
+        "droid.load_session",
+        "droid.update_session_settings",
+        "droid.add_user_message",
+      ]);
+      assert.deepStrictEqual(requestsTo(next, "droid.load_session")[0]?.params, {
+        sessionId: "stored-session",
+        loadAllMessages: true,
+      });
+      const message = requestsTo(next, "droid.add_user_message")[0]?.params;
+      assert.strictEqual(message?.["text"], "What was the marker?");
+      assert.strictEqual(message?.["messageId"], messageIdFor(3));
+    };
+
+    it.effect(
+      "[VAL-HIST-017] a stop kills the Droid process group, ends the turn interrupted with its item cancelled and one terminal, and does not break the thread",
+      () =>
+        Effect.gen(function* () {
+          const { opened, process, stop } = yield* compacting;
+
+          yield* stop();
+          assert.deepStrictEqual(process.signals(), ["SIGTERM"], "the stop returns after the kill");
+          const streamExit = yield* Deferred.await(opened.streamEnded);
+
+          assertKilledAndInterrupted(opened, process, streamExit);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-017] the next turn after a stop starts a new Droid process that loads the same session before it delivers the message",
+      () =>
+        Effect.gen(function* () {
+          const { fake, opened, process, stop } = yield* compacting;
+
+          yield* stop();
+          const next = yield* nextTurnOnNewProcess(fake, opened);
+
+          assert.lengthOf(fake.processes(), 2);
+          assertResumedOnNewProcess(process, next);
+          assert.strictEqual(
+            terminals(opened.all).length,
+            1,
+            "the new process adds nothing to the stopped session",
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-017] a restart-mode send during a compaction kills the process once, then resumes the same session on a new process",
+      () =>
+        Effect.gen(function* () {
+          const { fake, opened, process, stop } = yield* compacting;
+
+          yield* stop({ requestRuntimeRestart: true });
+          const streamExit = yield* Deferred.await(opened.streamEnded);
+          assertKilledAndInterrupted(opened, process, streamExit);
+
+          const next = yield* nextTurnOnNewProcess(fake, opened);
+          assertResumedOnNewProcess(process, next);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-017] a stop after Droid answered the compaction is refused and kills nothing",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid({ sessions: withSession });
+          yield* fake.deliverGroupSignals;
+          const opened = yield* openRuntime(fake);
+          const thread = yield* resume(opened, "stored-session");
+          yield* compactTurn(opened.runtime, thread, { runOrdinal: 2 });
+          const published = yield* opened.takeEvent(
+            (event) => event.type === "provider_turn.updated",
+          );
+          if (published.type !== "provider_turn.updated") return assert.fail("no provider turn");
+          yield* opened.takeEvent(isTerminal);
+
+          const error = yield* opened.runtime
+            .interruptTurn({ providerThread: thread, providerTurnId: published.providerTurn.id })
+            .pipe(Effect.flip);
+
+          assert.include(JSON.stringify(error), "ProviderAdapterInterruptError");
+          assert.deepStrictEqual(fake.current().signals(), []);
+          assert.strictEqual(terminals(opened.all).length, 1);
+          assert.isFalse(Deferred.isDoneUnsafe(opened.streamEnded), "the session stays up");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    describe("outside a compaction", () => {
+      for (const options of [{}, { requestRuntimeRestart: true }]) {
+        it.effect(
+          `[VAL-HIST-017] a stop of an ordinary turn sends interrupt_session and does not kill the process (${JSON.stringify(options)})`,
+          () =>
+            Effect.gen(function* () {
+              const fake = yield* makeFakeDroid();
+              yield* fake.deliverGroupSignals;
+              const opened = yield* openRuntime(fake);
+              const thread = yield* ensure(opened);
+              yield* startTurn(opened.runtime, thread);
+              const turn = yield* opened.takeEvent(
+                (event) => event.type === "provider_turn.updated",
+              );
+              if (turn.type !== "provider_turn.updated") return assert.fail("no provider turn");
+              const process = fake.current();
+
+              yield* opened.runtime.interruptTurn({
+                providerThread: thread,
+                providerTurnId: turn.providerTurn.id,
+                ...options,
+              });
+              yield* process.emit(completed(1, "cancelled"));
+              const terminal = yield* opened.takeEvent(isTerminal);
+
+              assert.deepStrictEqual(
+                requestsTo(process, "droid.interrupt_session").map((request) => request.params),
+                [{}],
+              );
+              assert.deepStrictEqual(process.signals(), []);
+              assert.isTrue(
+                terminal.type === "turn.terminal" &&
+                  terminal.status === "interrupted" &&
+                  terminal.threadDisposition === "reusable",
+              );
+              assert.strictEqual(sessionStatuses(opened.all).at(-1), "ready");
+              assert.isFalse(Deferred.isDoneUnsafe(opened.streamEnded), "the session stays up");
+            }).pipe(Effect.scoped, Effect.provide(layerTest)),
         );
-        yield* Fiber.interrupt(compacting);
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
+      }
+    });
+  });
 
   it.effect(
     "[VAL-HIST-009] a Droid that exits mid-compaction fails the turn and its item once",
@@ -270,6 +471,10 @@ describe("DroidAdapterV2 compaction", () => {
         const terminal = yield* opened.takeEvent(isTerminal);
 
         assert.strictEqual(terminal.type === "turn.terminal" ? terminal.status : "", "failed");
+        assert.strictEqual(
+          terminal.type === "turn.terminal" ? terminal.threadDisposition : "",
+          "broken",
+        );
         assert.strictEqual(terminals(opened.all).length, 1);
         assert.deepStrictEqual(
           itemsOfType(opened.all, "compaction").map((item) => item.status),
