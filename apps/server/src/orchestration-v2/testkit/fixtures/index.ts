@@ -39,6 +39,8 @@ import { assertClaudeResultIsErrorOutput } from "./claude_result_is_error/output
 import { grokAutoBlockedCommandInput } from "./grok_auto_blocked_command/input.ts";
 import { droidCompactionInput } from "./droid_compaction/input.ts";
 import { assertDroidCompactionOutput } from "./droid_compaction/droid_output.ts";
+import { droidBackgroundSubagentInput } from "./droid_background_subagent/input.ts";
+import { assertDroidBackgroundSubagentOutput } from "./droid_background_subagent/droid_output.ts";
 import { assertGrokAutoBlockedCommandOutput } from "./grok_auto_blocked_command/output.ts";
 import { grokBackgroundBashInput } from "./grok_background_bash/input.ts";
 import { assertGrokBackgroundBashOutput } from "./grok_background_bash/output.ts";
@@ -142,6 +144,8 @@ import { assertSubagentOutput } from "./subagent/codex_output.ts";
 import { assertClaudeSubagentOutput } from "./subagent/claude_output.ts";
 import { subagentInput } from "./subagent/input.ts";
 import { assertCursorSubagentOutput } from "./subagent/cursor_output.ts";
+import { droidSubagentInput } from "./subagent/droid_input.ts";
+import { assertDroidSubagentOutput } from "./subagent/droid_output.ts";
 import { assertSubagentContinueOutput } from "./subagent_continue/codex_output.ts";
 import { subagentContinueInput } from "./subagent_continue/input.ts";
 import { assertSubagentV2Output } from "./subagent_v2/codex_output.ts";
@@ -881,6 +885,13 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertCursorSubagentOutput,
       },
+      {
+        driver: ProviderDriverKind.make("droid"),
+        buildInput: droidSubagentInput,
+        transcriptFile: new URL("./subagent/droid_transcript.ndjson", import.meta.url),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidSubagentOutput,
+      },
     ],
   },
   {
@@ -1344,6 +1355,22 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./droid_compaction/droid_transcript.ndjson", import.meta.url),
         modelSelection: DROID_MODEL_SELECTION,
         assertOutput: assertDroidCompactionOutput,
+      },
+    ],
+  },
+  {
+    name: "droid_background_subagent",
+    buildInput: droidBackgroundSubagentInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("droid"),
+        transcriptFile: new URL(
+          "./droid_background_subagent/droid_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: DROID_MODEL_SELECTION,
+        runContinuationWorker: true,
+        assertOutput: assertDroidBackgroundSubagentOutput,
       },
     ],
   },

@@ -23,6 +23,11 @@ import {
   DROID_COMPACTION_STORE_PROMPT,
   droidCompactionLeadSteps,
 } from "../src/orchestration-v2/testkit/fixtures/droid_compaction/input.ts";
+import {
+  DROID_BACKGROUND_SUBAGENT_ROOT_REPLY,
+  DROID_BACKGROUND_SUBAGENT_WAKE_REPLY,
+  droidBackgroundSubagentInput,
+} from "../src/orchestration-v2/testkit/fixtures/droid_background_subagent/input.ts";
 import { DROID_ASSISTANT_REPLIES_PROMPT } from "../src/orchestration-v2/testkit/fixtures/thread_rollback/droid_input.ts";
 import {
   adapterReplyTo,
@@ -400,9 +405,171 @@ const compactionStopKillProbe: OrchestratorReplayFixture = {
   ],
 };
 
+const WAKE_ROLLBACK_EXTRA_REPLY = "EXTRA_DONE";
+const WAKE_ROLLBACK_EXTRA_PROMPT = `Reply exactly ${WAKE_ROLLBACK_EXTRA_REPLY} and stop. Do not call any tool.`;
+
+/**
+ * Rolls a thread back across its wake turn: a background Task, the continuation turn Droid starts
+ * when the task reports, one more user turn, then a rollback to the checkpoint before the wake
+ * turn. The adapter rewinds to the wake turn's own ref (`task-completion:<id>`), so the recording
+ * shows whether Droid keeps a message under that id and what a rewind to it leaves. Either answer
+ * is a valid recording.
+ */
+function assertWakeRollback(
+  result: OrchestratorV2ScenarioResult,
+  transcript: ProviderReplayTranscript,
+) {
+  const sessionId = droidInitializedSessionId(transcript);
+  const sends = droidRequests(transcript, "add_user_message");
+  assert.lengthOf(sends, 3, "the Task turn, the extra turn, then the question after the rollback");
+  const reports = droidNotifications(transcript, "create_message").filter(({ notification }) =>
+    String(field(field(notification, "message"), "id")).startsWith("task-completion:"),
+  );
+  assert.lengthOf(reports, 1, "Droid reports the finished task once");
+  const wakeId = String(field(field(reports[0]!.notification, "message"), "id"));
+
+  const rewinds = droidRequests(transcript, "execute_rewind");
+  assert.lengthOf(rewinds, 1, "the rollback rewinds once");
+  const [rewind] = rewinds;
+  assert.equal(field(rewind!.params, "sessionId"), sessionId);
+  assert.equal(
+    field(rewind!.params, "messageId"),
+    wakeId,
+    "the wake turn is rewound by its task-completion id",
+  );
+
+  const answer = droidResponseTo(transcript, rewind!);
+  const rewoundSessionId = field(answer, "newSessionId");
+  if (typeof rewoundSessionId !== "string") return;
+
+  const loads = droidRequests(transcript, "load_session").filter(
+    (request) => request.index > rewind!.index,
+  );
+  assert.lengthOf(loads, 1, "an accepted rewind loads the session it returned");
+  assert.equal(field(loads[0]!.params, "sessionId"), rewoundSessionId);
+  const messages = field(field(droidResponseTo(transcript, loads[0]!), "session"), "messages");
+  assert.isTrue(Array.isArray(messages));
+  // The user's own prompt names the wake reply, so only the assistant's messages are read.
+  const assistantText = (messages as ReadonlyArray<unknown>)
+    .filter((message) => field(message, "role") === "assistant")
+    .map(messageText)
+    .join("\n");
+  assert.include(assistantText, DROID_BACKGROUND_SUBAGENT_ROOT_REPLY);
+  assert.notInclude(assistantText, DROID_BACKGROUND_SUBAGENT_WAKE_REPLY);
+  assert.notInclude(assistantText, WAKE_ROLLBACK_EXTRA_REPLY);
+  assert.isFalse(
+    droidMessageIdsOf(messages).includes(wakeId),
+    "the rewound history no longer holds the wake message",
+  );
+
+  assertBaseProjection({
+    result,
+    transcript,
+    runCount: 4,
+    runStatuses: ["completed", "rolled_back", "rolled_back", "completed"],
+  });
+  assertSemanticProjectionIntegrity(projectionFor(result, transcript.scenario));
+}
+
+function droidMessageIdsOf(messages: unknown): ReadonlyArray<string> {
+  return Array.isArray(messages)
+    ? messages.flatMap((message) => {
+        const id = field(message, "id");
+        return typeof id === "string" ? [id] : [];
+      })
+    : [];
+}
+
+const wakeRollbackProbe: OrchestratorReplayFixture = {
+  name: "wake_rollback",
+  buildInput: () => ({
+    steps: [
+      ...droidBackgroundSubagentInput().steps,
+      { type: "message", text: WAKE_ROLLBACK_EXTRA_PROMPT },
+      { type: "rollback", checkpointScopeSuffix: "root", checkpointSuffix: "1" },
+      { type: "message", text: DROID_ASSISTANT_REPLIES_PROMPT },
+    ],
+  }),
+  providers: [
+    {
+      driver: ProviderDriverKind.make("droid"),
+      transcriptFile: new URL(`file://${PROBE_DIRECTORY}/wake_rollback.ndjson`),
+      modelSelection: DROID_MODEL_SELECTION,
+      runContinuationWorker: true,
+      assertOutput: assertWakeRollback,
+    },
+  ],
+};
+
+/**
+ * Forks from the turn before a wake turn. The adapter cuts the copy at the first later turn the
+ * source's `load_session` lists, so the recording shows whether that listing holds the
+ * `task-completion:<id>` message: if it does the copy ends before the wake turn, if it did not the
+ * cut would fall at the extra turn and the copy would keep the wake turn.
+ */
+function assertWakeFork(
+  result: OrchestratorV2ScenarioResult,
+  transcript: ProviderReplayTranscript,
+) {
+  const sends = droidRequests(transcript, "add_user_message");
+  assert.lengthOf(sends, 3, "the Task turn, the extra turn, then the question on the fork");
+  const reports = droidNotifications(transcript, "create_message").filter(({ notification }) =>
+    String(field(field(notification, "message"), "id")).startsWith("task-completion:"),
+  );
+  assert.lengthOf(reports, 1, "Droid reports the finished task once");
+  const wakeId = String(field(field(reports[0]!.notification, "message"), "id"));
+
+  const loads = droidRequests(transcript, "load_session");
+  const sourceMessages = field(
+    field(droidResponseTo(transcript, loads[0]!), "session"),
+    "messages",
+  );
+  const listsWake = droidMessageIdsOf(sourceMessages).includes(wakeId);
+  const rewinds = droidRequests(transcript, "execute_rewind");
+  assert.lengthOf(rewinds, 1, "the fork rewinds its copy once");
+  assert.equal(
+    field(rewinds[0]!.params, "messageId"),
+    listsWake ? wakeId : field(sends[1]!.params, "messageId"),
+    "the copy is cut at the first later turn the source's history lists",
+  );
+
+  const fork = [...result.projections.values()].find((projection) =>
+    projection.providerThreads.some((thread) => thread.forkedFrom != null),
+  );
+  assert.isDefined(fork);
+  assertSemanticProjectionIntegrity(fork!);
+  const answer = fork!.turnItems.findLast((item) => item.type === "assistant_message")?.text;
+  assert.include(answer, DROID_BACKGROUND_SUBAGENT_ROOT_REPLY);
+  assert.notInclude(answer, WAKE_ROLLBACK_EXTRA_REPLY);
+  if (listsWake) assert.notInclude(answer, DROID_BACKGROUND_SUBAGENT_WAKE_REPLY);
+}
+
+const wakeForkProbe: OrchestratorReplayFixture = {
+  name: "wake_fork",
+  buildInput: () => ({
+    steps: [
+      ...droidBackgroundSubagentInput().steps,
+      { type: "message", text: WAKE_ROLLBACK_EXTRA_PROMPT },
+      { type: "fork_thread", sourceRunIndex: 1 },
+      { type: "message", text: DROID_ASSISTANT_REPLIES_PROMPT },
+    ],
+  }),
+  providers: [
+    {
+      driver: ProviderDriverKind.make("droid"),
+      transcriptFile: new URL(`file://${PROBE_DIRECTORY}/wake_fork.ndjson`),
+      modelSelection: DROID_MODEL_SELECTION,
+      runContinuationWorker: true,
+      assertOutput: assertWakeFork,
+    },
+  ],
+};
+
 export const DROID_PROBE_FIXTURES: ReadonlyArray<OrchestratorReplayFixture> = [
   exitSpecModeProbe("off"),
   exitSpecModeProbe("high"),
   threadStartRewindProbe,
   compactionStopKillProbe,
+  wakeRollbackProbe,
+  wakeForkProbe,
 ];

@@ -64,12 +64,16 @@ const DROID_RECORDING_SCENARIOS: Readonly<Record<string, DroidRecordingScenario>
   thread_rollback_after_stop: { awaitPreviousExit: true },
   droid_compaction: {},
   thread_fork_native_prior_turn: {},
+  subagent: {},
+  droid_background_subagent: {},
   // Probes (`droidReplayProbes.ts`) record to /tmp, not to a fixture file. The exit_spec_mode
   // ones restart the process between their two turns, and so does the compaction stop (a kill).
   exit_spec_mode_off: { awaitPreviousExit: true },
   exit_spec_mode_high: { awaitPreviousExit: true },
   thread_start_rewind: {},
   compaction_stop_kill: { awaitPreviousExit: true },
+  wake_rollback: {},
+  wake_fork: {},
 };
 
 /** Model turns cost real credits, so only the model agreed for fixtures may record. */
@@ -326,7 +330,9 @@ const recordTranscript = (input: {
           name: `${fixture.name}/droid:record`,
           transcript: placeholder,
           commands: materialized.commands,
-          steps: materialized.steps,
+          // A replay gate holds a recorded frame until its run settled. Live, Droid and wall time
+          // pace themselves, so the gate steps drop and the steps after them wait instead.
+          steps: materialized.steps.filter((step) => step.type !== "release_replay_gate"),
           projectionThreadIds: materialized.projectionThreadIds,
           runtimePolicyOverride: { ...variant.runtimePolicyOverride, cwd: paths.workspace },
         },

@@ -17,12 +17,21 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ProviderAdapterDriverCreateError } from "@t3tools/provider-core/server/adapterDriver";
+import type { ProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import type { OrchestratorV2ProviderReplayHarness } from "../testkit/ProviderReplayHarness.ts";
 import { DROID_PROVIDER, DroidAdapterV2Driver } from "@t3tools/provider-droid/server";
 
 export const DROID_RPC_REPLAY_PROTOCOL = "droid.stream-jsonrpc";
 const DROID_REPLAY_ANY = "<any>";
+
+/**
+ * Label of Droid's idle report of a finished background task (`task-completion:<id>`). Replay
+ * emits a recorded frame the moment the cursor reaches it, so a fixture holds this one with a
+ * replay gate until the orchestrator has settled the run that ended just before it, as it would
+ * have in real time.
+ */
+export const DROID_TASK_COMPLETION_LABEL = "notification:create_message:task-completion";
 
 const DroidRpcReplayTranscript = Schema.Struct({
   provider: Schema.Literal(DROID_PROVIDER),
@@ -238,9 +247,14 @@ class DroidReplayController {
   /** Recorded message id to the one the adapter chose; Droid's later frames and history echo it. */
   private readonly messageIds = new Map<string, string>();
   private readonly transcript: DroidRpcReplayTranscript;
+  private readonly replayGate: ProviderReplayGate | undefined;
+  private gateWaiting = false;
+  /** Cursor of the held frame once its gate opened, so the same frame is not held again. */
+  private gateOpenedAt = -1;
 
-  constructor(transcript: DroidRpcReplayTranscript) {
+  constructor(transcript: DroidRpcReplayTranscript, replayGate?: ProviderReplayGate) {
     this.transcript = transcript;
+    this.replayGate = replayGate;
   }
 
   spawn(
@@ -366,6 +380,7 @@ class DroidReplayController {
       if (entry?.type !== "emit_inbound") return emitted;
       const process = this.processes[entryProcess(entry) - 1];
       if (process === undefined) return emitted;
+      if (this.holdAtGate(entry)) return emitted;
       this.cursor += 1;
       emitted = true;
       if (!process.open) continue;
@@ -379,6 +394,28 @@ class DroidReplayController {
       Queue.offerUnsafe(process.stdout, new TextEncoder().encode(`${encodeJsonLine(rebound)}\n`));
     }
     return emitted;
+  }
+
+  /**
+   * Whether the frame at the cursor waits for its replay gate. A label no scenario gates resolves
+   * at once, so the frame goes out a tick later and nothing else changes.
+   */
+  private holdAtGate(entry: ProviderReplayEntryType): boolean {
+    const gate = this.replayGate;
+    if (gate === undefined || entry.type === "runtime_exit") return false;
+    if (entry.label !== DROID_TASK_COMPLETION_LABEL || this.gateOpenedAt === this.cursor) {
+      return false;
+    }
+    if (!this.gateWaiting) {
+      this.gateWaiting = true;
+      const heldAt = this.cursor;
+      void gate.beforeEmit(entry.label).then(() => {
+        this.gateWaiting = false;
+        this.gateOpenedAt = heldAt;
+        this.advance();
+      });
+    }
+    return true;
   }
 
   private fail(cause: unknown): void {
@@ -463,20 +500,28 @@ export const DroidOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness
           }),
       ),
     ),
-  makeProviderAdapterRegistryLayer: (transcript) =>
+  makeProviderAdapterRegistryLayer: (transcript, options) =>
     layer({
       scenario: transcript.scenario,
       binaryPath: "droid",
       spawner: Layer.effect(
         ChildProcessSpawner.ChildProcessSpawner,
         Effect.gen(function* () {
-          const controller = new DroidReplayController(transcript);
+          const controller = new DroidReplayController(transcript, options?.replayGate);
           yield* Effect.addFinalizer(() => Effect.sync(() => controller.assertComplete()));
           return makeDroidReplaySpawner(controller);
         }),
       ),
     }),
 };
+
+function isTaskCompletionReport(notification: unknown): boolean {
+  if (!isRecord(notification) || notification.type !== "create_message") return false;
+  const message = notification.message;
+  return (
+    isRecord(message) && typeof message.id === "string" && message.id.startsWith("task-completion:")
+  );
+}
 
 /** The label a recorded frame gets: what it is, and for a response, which request it answers. */
 function recordLabel(
@@ -505,6 +550,7 @@ function recordLabel(
     const notificationType = isRecord(type) ? type.type : undefined;
     base =
       typeof notificationType === "string" ? `notification:${notificationType}` : "notification";
+    if (isTaskCompletionReport(type)) base = DROID_TASK_COMPLETION_LABEL;
   } else if (typeof frame.type === "string") {
     base = frame.type;
   }

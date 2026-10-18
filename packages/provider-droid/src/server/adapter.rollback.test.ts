@@ -38,6 +38,7 @@ import {
   startTurn,
   terminals,
   THREAD_ID,
+  wakeCompleted,
   wakeMessage,
   type OpenRuntime,
   type TurnOptions,
@@ -130,6 +131,53 @@ const turnsOn = Effect.fnUntraced(function* (fake: FakeDroid, count: number) {
       text: `prompt ${runOrdinal}`,
     });
   }
+  return { opened, thread, turns: providerTurnsOf(opened.all) };
+});
+
+const WAKE_ID = "4e5d6c7b";
+const WAKE_MESSAGE_ID = `task-completion:${WAKE_ID}`;
+
+/**
+ * Turn 1, the continuation turn Droid starts when a background task ends (turn 2), then a user
+ * turn (turn 3). A live `load_session` showed Droid keeps the report in the stored history, under
+ * the same `task-completion:<id>` id, as an `llm_only` message between the turns it separates. The
+ * fake does not record what Droid starts on its own, so it is given the message there.
+ */
+const turnsAcrossAWake = Effect.fnUntraced(function* (fake: FakeDroid) {
+  const { offers, continuationRequests } = yield* makeOfferQueue();
+  const opened = yield* openRuntime(fake, { runtimeMode: "auto", continuationRequests });
+  const thread = yield* ensure(opened, { runtimeMode: "auto" });
+  yield* runTurn(opened, fake, thread, { runOrdinal: 1, runtimeMode: "auto", text: "prompt 1" });
+
+  const process = fake.current();
+  yield* process.emit(wakeMessage(WAKE_ID));
+  yield* process.settle;
+  yield* Queue.take(offers);
+  yield* startTurn(opened.runtime, thread, {
+    runOrdinal: 2,
+    continuation: true,
+    runtimeMode: "auto",
+  });
+  yield* process.emit(wakeCompleted(WAKE_ID));
+  yield* opened.takeEvent(isTerminal);
+
+  const sessionId = String(process.sessionId());
+  const stored = fake.sessions.get(sessionId);
+  if (stored === undefined) return assert.fail("the fake holds no session");
+  fake.sessions.set(sessionId, {
+    ...stored,
+    messages: [
+      ...stored.messages,
+      {
+        id: WAKE_MESSAGE_ID,
+        role: "user",
+        visibility: "llm_only",
+        content: [{ type: "text", text: "Background task completed." }],
+      },
+    ],
+  });
+
+  yield* runTurn(opened, fake, thread, { runOrdinal: 3, runtimeMode: "auto", text: "prompt 3" });
   return { opened, thread, turns: providerTurnsOf(opened.all) };
 });
 
@@ -468,6 +516,89 @@ describe("DroidAdapterV2 rollback", () => {
           assert.strictEqual(
             methodsOf(fake).filter((m) => m === "droid.initialize_session").length,
             1,
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("across a wake turn", () => {
+    it.effect(
+      "[VAL-HIST-002] rolling back to the turn before a wake turn rewinds to the wake's task-completion message and drops the wake and what followed",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const { opened, thread, turns } = yield* turnsAcrossAWake(fake);
+          const originalId = thread.nativeThreadRef?.nativeId;
+          assert.deepStrictEqual(
+            turns.map((turn) => [turn.ordinal, turn.nativeTurnRef?.strength]),
+            [
+              [1, "strong"],
+              [2, "strong"],
+              [3, "strong"],
+            ],
+          );
+          assert.strictEqual(turns[1]?.nativeTurnRef?.nativeId, WAKE_MESSAGE_ID);
+
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+
+          assert.deepStrictEqual(requestsOf(fake, "droid.execute_rewind")[0]?.params, {
+            sessionId: originalId,
+            messageId: WAKE_MESSAGE_ID,
+            filesToRestore: [],
+            filesToDelete: [],
+            forkTitle: REWIND_TITLE,
+          });
+          const newId = snapshot.providerThread.nativeThreadRef?.nativeId;
+          assert.notStrictEqual(newId, originalId);
+          assert.deepStrictEqual(messageIdsOf(fake, newId), [messageIdFor(1)]);
+          assert.deepStrictEqual(
+            messageIdsOf(fake, originalId),
+            [messageIdFor(1), WAKE_MESSAGE_ID, messageIdFor(3)],
+            "the source session keeps the wake and the turn after it",
+          );
+          assert.deepStrictEqual(
+            snapshot.messages.map((message) => [message.role, message.text]),
+            [["user", "prompt 1"]],
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-002] rolling back to a wake turn keeps its message and rewinds to the user turn after it",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const { opened, thread, turns } = yield* turnsAcrossAWake(fake);
+
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 2));
+
+          assert.strictEqual(
+            requestsOf(fake, "droid.execute_rewind")[0]?.params["messageId"],
+            messageIdFor(3),
+          );
+          assert.deepStrictEqual(
+            messageIdsOf(fake, snapshot.providerThread.nativeThreadRef?.nativeId),
+            [messageIdFor(1), WAKE_MESSAGE_ID],
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-003] rolling back to the thread start rewinds to the first turn, not the wake that came later",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const { opened, thread, turns } = yield* turnsAcrossAWake(fake);
+
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToStart(thread, turns));
+
+          assert.strictEqual(
+            requestsOf(fake, "droid.execute_rewind")[0]?.params["messageId"],
+            messageIdFor(1),
+          );
+          assert.deepStrictEqual(
+            messageIdsOf(fake, snapshot.providerThread.nativeThreadRef?.nativeId),
+            [],
           );
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );

@@ -293,6 +293,91 @@ describe("DroidAdapterV2 fork", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  describe("across a wake turn", () => {
+    const WAKE_MESSAGE_ID = "task-completion:7a6b5c4d";
+
+    // The report Droid keeps between the turn that launched the task and the next user message,
+    // and the reply of the turn Droid starts for it.
+    const wakeSource = () =>
+      makeFakeDroid({
+        sessions: {
+          [SOURCE_ID]: {
+            settings: FAKE_DROID_DEFAULT_SETTINGS,
+            messages: [
+              { id: "u1", role: "user", content: text("first question") },
+              { id: "a1", role: "assistant", content: text("first answer") },
+              {
+                id: WAKE_MESSAGE_ID,
+                role: "user",
+                visibility: "llm_only",
+                content: text("Background task completed."),
+              },
+              { id: "a-wake", role: "assistant", content: text("the task is done") },
+              { id: "u2", role: "user", content: text("second question") },
+              { id: "a2", role: "assistant", content: text("second answer") },
+            ],
+          },
+        },
+      });
+
+    const wakeTurns = Effect.fnUntraced(function* () {
+      const source = yield* makeProviderThread(SOURCE_ID);
+      const turns = ["u1", WAKE_MESSAGE_ID, "u2"].map((nativeId, index) =>
+        turnFor(source, index + 1, nativeId),
+      );
+      return { source, turns };
+    });
+
+    it.effect(
+      "[VAL-HIST-015] a fork from the turn before a wake turn is rewound at the wake's task-completion message",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* wakeSource();
+          const opened = yield* openRuntime(fake);
+          const { source, turns } = yield* wakeTurns();
+
+          const forked = yield* opened.runtime.forkThread(
+            forkInput(source, { turns, target: turns[0]?.id }),
+          );
+
+          assert.strictEqual(
+            requestsOf(fake, "droid.execute_rewind")[0]?.params["messageId"],
+            WAKE_MESSAGE_ID,
+          );
+          assert.deepStrictEqual(messageIdsOf(fake, forked.nativeThreadRef?.nativeId), [
+            "u1",
+            "a1",
+          ]);
+          assert.strictEqual(messageIdsOf(fake, SOURCE_ID).length, 6, "the source is unchanged");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-015] a fork from a wake turn keeps the report and its reply and is rewound at the next user message",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* wakeSource();
+          const opened = yield* openRuntime(fake);
+          const { source, turns } = yield* wakeTurns();
+
+          const forked = yield* opened.runtime.forkThread(
+            forkInput(source, { turns, target: turns[1]?.id }),
+          );
+
+          assert.strictEqual(
+            requestsOf(fake, "droid.execute_rewind")[0]?.params["messageId"],
+            "u2",
+          );
+          assert.deepStrictEqual(messageIdsOf(fake, forked.nativeThreadRef?.nativeId), [
+            "u1",
+            "a1",
+            WAKE_MESSAGE_ID,
+            "a-wake",
+          ]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
   it.effect(
     "[VAL-HIST-015] a mixed input: other provider threads' turns and rolled-back turns are ignored, counting turns as the input arrives",
     () =>
