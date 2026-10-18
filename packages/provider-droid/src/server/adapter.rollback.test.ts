@@ -1,0 +1,904 @@
+import { assert, describe, it } from "@effect/vitest";
+import {
+  CheckpointId,
+  NodeId,
+  ProviderInstanceId,
+  ServerSettings,
+  type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+
+import { DROID_PROVIDER, DroidAdapterV2Driver } from "./adapter.ts";
+import {
+  completed,
+  DROID_INSTANCE_ID,
+  ensure,
+  isTerminal,
+  layerTest,
+  makeProviderThread,
+  messageIdFor,
+  methodsOf,
+  MODEL,
+  openRuntime,
+  policy,
+  PROVIDER_THREAD_ID,
+  requestsOf,
+  runTurn,
+  selection,
+  startTurn,
+  terminals,
+  THREAD_ID,
+  type OpenRuntime,
+  type TurnOptions,
+} from "./adapterHarness.testkit.ts";
+import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid, type FakeDroid } from "./fakeDroid.testkit.ts";
+
+const isRollbackError = Schema.is(ProviderAdapter.ProviderAdapterRollbackThreadError);
+const isTurnStartError = Schema.is(ProviderAdapter.ProviderAdapterTurnStartError);
+
+type Events = ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
+type RollbackInput = Parameters<
+  ProviderAdapter.ProviderAdapterV2SessionRuntime["rollbackThread"]
+>[0];
+
+const CHECKPOINT_ID = CheckpointId.make("checkpoint:droid-test:1");
+const REWIND_TITLE = "T3 Code rewind";
+
+const AUTO_SETTINGS = {
+  interactionMode: "auto",
+  autonomyLevel: "medium",
+  modelId: MODEL,
+  reasoningEffort: "high",
+};
+
+/** The latest published state of each provider turn, oldest first. */
+const providerTurnsOf = (events: Events): ReadonlyArray<OrchestrationV2ProviderTurn> => {
+  const latest = new Map<string, OrchestrationV2ProviderTurn>();
+  for (const event of events) {
+    if (event.type === "provider_turn.updated")
+      latest.set(event.providerTurn.id, event.providerTurn);
+  }
+  return [...latest.values()];
+};
+
+const providerThreadUpdates = (events: Events) =>
+  events.flatMap((event) =>
+    event.type === "provider_thread.updated" ? [event.providerThread] : [],
+  );
+
+const refIds = (threads: ReadonlyArray<OrchestrationV2ProviderThread>) =>
+  threads.map((thread) => thread.nativeThreadRef?.nativeId);
+
+const toTurn = (turns: ReadonlyArray<OrchestrationV2ProviderTurn>, ordinal: number) => {
+  const turn = turns.find((candidate) => candidate.ordinal === ordinal);
+  if (turn === undefined) return assert.fail(`no provider turn ${ordinal}`);
+  return turn;
+};
+
+const rollbackToTurn = (
+  providerThread: OrchestrationV2ProviderThread,
+  turns: ReadonlyArray<OrchestrationV2ProviderTurn>,
+  ordinal: number,
+): RollbackInput => ({
+  providerThread,
+  target: {
+    type: "provider_turn",
+    checkpointId: CHECKPOINT_ID,
+    appRunOrdinal: ordinal,
+    providerTurn: toTurn(turns, ordinal),
+  },
+  providerThreadTurns: turns,
+});
+
+const rollbackToStart = (
+  providerThread: OrchestrationV2ProviderThread,
+  turns: ReadonlyArray<OrchestrationV2ProviderTurn>,
+): RollbackInput => ({
+  providerThread,
+  target: { type: "thread_start", checkpointId: CHECKPOINT_ID, appRunOrdinal: 0 },
+  providerThreadTurns: turns,
+});
+
+const messageIdsOf = (fake: FakeDroid, sessionId: string | null | undefined) =>
+  (fake.sessions.get(String(sessionId))?.messages ?? []).map((message) =>
+    Schema.is(Schema.Struct({ id: Schema.String }))(message) ? message.id : undefined,
+  );
+
+const newRef = (nativeId: string) => ({
+  driver: DROID_PROVIDER,
+  nativeId,
+  strength: "strong" as const,
+});
+
+/** Turns of a stored session whose message ids are `u1` and `u2`, as the orchestrator would hold them. */
+const storedTurns = (
+  row: OrchestrationV2ProviderThread,
+): ReadonlyArray<OrchestrationV2ProviderTurn> =>
+  ["u1", "u2"].map((nativeId, index) => ({
+    id: `provider-turn:${nativeId}` as OrchestrationV2ProviderTurn["id"],
+    providerThreadId: row.id,
+    nodeId: NodeId.make("node:stored-turn"),
+    runAttemptId: null,
+    nativeTurnRef: { driver: DROID_PROVIDER, nativeId, strength: "strong" as const },
+    ordinal: index + 1,
+    status: "completed" as const,
+    startedAt: row.createdAt,
+    completedAt: row.createdAt,
+  }));
+
+/** Opens a runtime on `fake` and completes `count` turns in auto runtime mode. */
+const turnsOn = Effect.fnUntraced(function* (fake: FakeDroid, count: number) {
+  const opened = yield* openRuntime(fake, { runtimeMode: "auto" });
+  const thread = yield* ensure(opened, { runtimeMode: "auto" });
+  for (let runOrdinal = 1; runOrdinal <= count; runOrdinal += 1) {
+    yield* runTurn(opened, fake, thread, {
+      runOrdinal,
+      runtimeMode: "auto",
+      text: `prompt ${runOrdinal}`,
+    });
+  }
+  return { opened, thread, turns: providerTurnsOf(opened.all) };
+});
+
+const awaitRef = (opened: OpenRuntime, nativeId: string) =>
+  opened.takeEvent(
+    (event) =>
+      event.type === "provider_thread.updated" &&
+      event.providerThread.nativeThreadRef?.nativeId === nativeId,
+  );
+
+const PLAN_MARKDOWN = "Create `hello.txt` containing `hi`.";
+
+/** A plan turn: Droid writes the plan, asks to leave spec mode, and ends the turn. */
+const planTurn = Effect.fnUntraced(function* (
+  opened: OpenRuntime,
+  fake: FakeDroid,
+  providerThread: OrchestrationV2ProviderThread,
+  options: TurnOptions,
+) {
+  const runOrdinal = options.runOrdinal ?? 1;
+  yield* startTurn(opened.runtime, providerThread, { ...options, interactionMode: "plan" });
+  const process = fake.current();
+  const toolUseId = `tool-exit-${runOrdinal}`;
+  yield* process.emit({
+    type: "tool_call",
+    toolUse: {
+      type: "tool_use",
+      id: toolUseId,
+      name: "ExitSpecMode",
+      input: { plan: PLAN_MARKDOWN },
+    },
+  });
+  yield* process.emitInbound(`perm-exit-${runOrdinal}`, "droid.request_permission", {
+    toolUses: [
+      {
+        toolUse: {
+          type: "tool_use",
+          id: toolUseId,
+          name: "ExitSpecMode",
+          input: { plan: PLAN_MARKDOWN },
+        },
+        confirmationType: "exit_spec_mode",
+        details: { type: "exit_spec_mode", plan: PLAN_MARKDOWN },
+      },
+    ],
+    options: [{ label: "No, keep iterating on spec", value: "cancel" }],
+  });
+  yield* process.emit({
+    type: "tool_result",
+    toolUseId,
+    messageId: `exit-result-${runOrdinal}`,
+    content: "Error: Plan not approved - remaining in Spec Mode.",
+    isError: true,
+  });
+  yield* process.emit(completed(runOrdinal));
+  return yield* opened.takeEvent(isTerminal);
+});
+
+describe("DroidAdapterV2 rollback", () => {
+  describe("to a provider turn", () => {
+    it.effect(
+      "[VAL-HIST-002] rewinds before the first later turn, loads the new session, re-sends the settings, and returns a snapshot with the new ref",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const originalId = thread.nativeThreadRef?.nativeId;
+          assert.isDefined(originalId);
+
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+
+          const newId = snapshot.providerThread.nativeThreadRef?.nativeId;
+          assert.isDefined(newId);
+          assert.notStrictEqual(newId, originalId);
+          assert.deepStrictEqual(methodsOf(fake), [
+            "droid.initialize_session",
+            "droid.add_user_message",
+            "droid.add_user_message",
+            "droid.execute_rewind",
+            "droid.load_session",
+            "droid.update_session_settings",
+          ]);
+          assert.deepStrictEqual(requestsOf(fake, "droid.execute_rewind")[0]?.params, {
+            sessionId: originalId,
+            messageId: messageIdFor(2),
+            filesToRestore: [],
+            filesToDelete: [],
+            forkTitle: REWIND_TITLE,
+          });
+          assert.deepStrictEqual(requestsOf(fake, "droid.load_session")[0]?.params, {
+            sessionId: newId,
+            loadAllMessages: true,
+          });
+          assert.deepStrictEqual(
+            requestsOf(fake, "droid.update_session_settings")[0]?.params,
+            AUTO_SETTINGS,
+          );
+          assert.deepStrictEqual(messageIdsOf(fake, newId), [messageIdFor(1)]);
+          assert.deepStrictEqual(
+            messageIdsOf(fake, originalId),
+            [messageIdFor(1), messageIdFor(2)],
+            "the source session keeps both turns",
+          );
+
+          const updated = yield* awaitRef(opened, newId ?? "");
+          assert.isTrue(updated.type === "provider_thread.updated");
+          if (updated.type !== "provider_thread.updated") return;
+          assert.strictEqual(updated.providerThread.id, PROVIDER_THREAD_ID);
+          assert.deepStrictEqual(updated.providerThread.nativeThreadRef, newRef(newId ?? ""));
+          assert.strictEqual(snapshot.providerThread.id, PROVIDER_THREAD_ID);
+          assert.deepStrictEqual(snapshot.providerThread.nativeThreadRef, newRef(newId ?? ""));
+          assert.deepStrictEqual(
+            snapshot.messages.map((message) => [message.role, message.text]),
+            [["user", "prompt 1"]],
+          );
+          assert.deepStrictEqual(snapshot.providerTurns, []);
+          assert.deepStrictEqual(snapshot.runtimeRequests, []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-002] the next turn on the rewound thread sends only its message when nothing changed",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+          const before = methodsOf(fake).length;
+
+          yield* runTurn(opened, fake, snapshot.providerThread, {
+            runOrdinal: 3,
+            runtimeMode: "auto",
+          });
+          assert.deepStrictEqual(methodsOf(fake).slice(before), ["droid.add_user_message"]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("rolling back to the latest turn discards nothing and sends no frame", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const { opened, thread, turns } = yield* turnsOn(fake, 2);
+        const before = methodsOf(fake).length;
+        const updatesBefore = providerThreadUpdates(opened.all).length;
+
+        const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 2));
+
+        assert.deepStrictEqual(methodsOf(fake).length, before);
+        assert.deepStrictEqual(snapshot.providerThread.nativeThreadRef, thread.nativeThreadRef);
+        assert.strictEqual(providerThreadUpdates(opened.all).length, updatesBefore);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "rolls back a thread no turn has run on yet, from a process that holds no session",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid({
+            sessions: {
+              "stored-session": {
+                settings: FAKE_DROID_DEFAULT_SETTINGS,
+                messages: [
+                  { id: "u1", role: "user", content: [{ type: "text", text: "first" }] },
+                  { id: "u2", role: "user", content: [{ type: "text", text: "second" }] },
+                ],
+              },
+            },
+          });
+          const opened = yield* openRuntime(fake);
+          const row = yield* makeProviderThread("stored-session");
+          const turns = storedTurns(row);
+
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(row, turns, 1));
+
+          assert.deepStrictEqual(methodsOf(fake), [
+            "droid.execute_rewind",
+            "droid.load_session",
+            "droid.update_session_settings",
+          ]);
+          assert.strictEqual(
+            requestsOf(fake, "droid.execute_rewind")[0]?.params["sessionId"],
+            "stored-session",
+          );
+          assert.strictEqual(
+            requestsOf(fake, "droid.execute_rewind")[0]?.params["messageId"],
+            "u2",
+          );
+          assert.deepStrictEqual(
+            requestsOf(fake, "droid.update_session_settings")[0]?.params,
+            {
+              interactionMode: "auto",
+              autonomyLevel: "off",
+              modelId: MODEL,
+              reasoningEffort: "high",
+            },
+            "the settings come from the thread's open input when no turn ran in this process",
+          );
+          assert.notStrictEqual(
+            snapshot.providerThread.nativeThreadRef?.nativeId,
+            "stored-session",
+          );
+          assert.deepStrictEqual(
+            snapshot.messages.map((message) => message.text),
+            ["first"],
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("to the thread start", () => {
+    it.effect("[VAL-HIST-003] rewinds before the first turn and keeps the provider thread id", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const { opened, thread, turns } = yield* turnsOn(fake, 2);
+        const originalId = thread.nativeThreadRef?.nativeId;
+
+        const snapshot = yield* opened.runtime.rollbackThread(rollbackToStart(thread, turns));
+
+        const newId = snapshot.providerThread.nativeThreadRef?.nativeId;
+        assert.isDefined(newId);
+        assert.notStrictEqual(newId, originalId);
+        assert.deepStrictEqual(requestsOf(fake, "droid.execute_rewind")[0]?.params, {
+          sessionId: originalId,
+          messageId: messageIdFor(1),
+          filesToRestore: [],
+          filesToDelete: [],
+          forkTitle: REWIND_TITLE,
+        });
+        assert.deepStrictEqual(requestsOf(fake, "droid.load_session")[0]?.params, {
+          sessionId: newId,
+          loadAllMessages: true,
+        });
+        assert.deepStrictEqual(messageIdsOf(fake, newId), [], "no earlier turn survives");
+        assert.strictEqual(snapshot.providerThread.id, PROVIDER_THREAD_ID);
+        assert.deepStrictEqual(snapshot.messages, []);
+        const updated = yield* awaitRef(opened, newId ?? "");
+        assert.isTrue(
+          updated.type === "provider_thread.updated" &&
+            updated.providerThread.id === PROVIDER_THREAD_ID,
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-003] starts a fresh session when Droid refuses to rewind to the first message",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid({
+            overrides: {
+              "droid.execute_rewind": () => ({
+                error: { code: -32603, message: "Cannot rewind to the first message" },
+              }),
+            },
+          });
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const originalId = thread.nativeThreadRef?.nativeId;
+
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToStart(thread, turns));
+
+          assert.deepStrictEqual(methodsOf(fake).slice(3), [
+            "droid.execute_rewind",
+            "droid.initialize_session",
+          ]);
+          const newId = snapshot.providerThread.nativeThreadRef?.nativeId;
+          assert.isDefined(newId);
+          assert.notStrictEqual(newId, originalId);
+          assert.strictEqual(fake.current().sessionId(), newId);
+          assert.deepStrictEqual(messageIdsOf(fake, newId), []);
+          assert.strictEqual(snapshot.providerThread.id, PROVIDER_THREAD_ID);
+          assert.deepStrictEqual(requestsOf(fake, "droid.initialize_session")[1]?.params, {
+            machineId: "default",
+            cwd: requestsOf(fake, "droid.initialize_session")[0]?.params["cwd"],
+            ...AUTO_SETTINGS,
+          });
+
+          const before = methodsOf(fake).length;
+          yield* runTurn(opened, fake, snapshot.providerThread, {
+            runOrdinal: 3,
+            runtimeMode: "auto",
+          });
+          assert.deepStrictEqual(
+            methodsOf(fake).slice(before),
+            ["droid.add_user_message"],
+            "initialize_session carried the settings",
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "a refused rewind of a turn other than the first does not start a fresh session",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid({
+            overrides: {
+              "droid.execute_rewind": () => ({ error: { code: -32603, message: "boom" } }),
+            },
+          });
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const failure = yield* opened.runtime
+            .rollbackThread(rollbackToTurn(thread, turns, 1))
+            .pipe(Effect.flip);
+          assert.isTrue(isRollbackError(failure));
+          assert.strictEqual(
+            methodsOf(fake).filter((m) => m === "droid.initialize_session").length,
+            1,
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("refusals and failures", () => {
+    it.effect("is refused while a turn is active, before anything is sent", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const { opened, thread, turns } = yield* turnsOn(fake, 1);
+        yield* startTurn(opened.runtime, thread, { runOrdinal: 2, runtimeMode: "auto" });
+        const before = methodsOf(fake).length;
+
+        const failure = yield* opened.runtime
+          .rollbackThread(rollbackToStart(thread, turns))
+          .pipe(Effect.flip);
+
+        assert.isTrue(isRollbackError(failure));
+        assert.strictEqual(methodsOf(fake).length, before);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("is refused when the boundary turn has no strong native ref", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const { opened, thread, turns } = yield* turnsOn(fake, 2);
+        const weak = turns.map((turn) =>
+          turn.ordinal === 2
+            ? {
+                ...turn,
+                nativeTurnRef: {
+                  driver: DROID_PROVIDER,
+                  nativeId: "u2",
+                  strength: "weak" as const,
+                },
+              }
+            : turn,
+        );
+        const before = methodsOf(fake).length;
+        const failure = yield* opened.runtime
+          .rollbackThread(rollbackToTurn(thread, weak, 1))
+          .pipe(Effect.flip);
+        assert.isTrue(isRollbackError(failure));
+        assert.strictEqual(methodsOf(fake).length, before);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("is refused for a session this process does not host", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const { opened, turns } = yield* turnsOn(fake, 2);
+        const elsewhere = yield* makeProviderThread("some-other-session");
+        const before = methodsOf(fake).length;
+        const failure = yield* opened.runtime
+          .rollbackThread(rollbackToTurn(elsewhere, turns, 1))
+          .pipe(Effect.flip);
+        assert.isTrue(isRollbackError(failure));
+        assert.strictEqual(methodsOf(fake).length, before);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "a rewound session that fails to load leaves the thread on its session and emits no new ref",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid({
+            overrides: {
+              "droid.load_session": () => ({ error: { code: -32603, message: "cannot load" } }),
+            },
+          });
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const failure = yield* opened.runtime
+            .rollbackThread(rollbackToTurn(thread, turns, 1))
+            .pipe(Effect.flip);
+          assert.isTrue(isRollbackError(failure));
+
+          yield* runTurn(opened, fake, thread, { runOrdinal: 3, runtimeMode: "auto" });
+          assert.deepStrictEqual(
+            refIds(providerThreadUpdates(opened.all)).filter(
+              (id) => id !== thread.nativeThreadRef?.nativeId,
+            ),
+            [],
+          );
+          assert.strictEqual(terminals(opened.all).length, 3);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "a settings frame that fails after the rewind does not undo it, and the next turn sends the settings",
+      () =>
+        Effect.gen(function* () {
+          let settingsFrames = 0;
+          const fake = yield* makeFakeDroid({
+            overrides: {
+              "droid.update_session_settings": () =>
+                (settingsFrames += 1) === 1
+                  ? { error: { code: -32603, message: "settings unavailable" } }
+                  : undefined,
+            },
+          });
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+          assert.notStrictEqual(
+            snapshot.providerThread.nativeThreadRef?.nativeId,
+            thread.nativeThreadRef?.nativeId,
+          );
+
+          const before = methodsOf(fake).length;
+          yield* runTurn(opened, fake, snapshot.providerThread, {
+            runOrdinal: 3,
+            runtimeMode: "auto",
+          });
+          assert.deepStrictEqual(methodsOf(fake).slice(before), [
+            "droid.update_session_settings",
+            "droid.add_user_message",
+          ]);
+          assert.strictEqual(settingsFrames, 2);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("session switches only move forward", () => {
+    it.effect(
+      "[VAL-HIST-008] late events from the retired session never move the ref back, and one provider thread id spans every update",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const retiredId = thread.nativeThreadRef?.nativeId;
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+          const newId = snapshot.providerThread.nativeThreadRef?.nativeId ?? "";
+
+          yield* startTurn(opened.runtime, snapshot.providerThread, {
+            runOrdinal: 3,
+            runtimeMode: "auto",
+          });
+          const process = fake.current();
+          // The retired session reports on turn 3 as well: neither its usage nor its completion
+          // may reach the thread that now lives on the new session.
+          yield* process.emit(
+            { ...completed(3), tokenUsage: { inputTokens: 999, outputTokens: 1 } },
+            retiredId,
+          );
+          yield* process.settle;
+          assert.deepStrictEqual(
+            terminals(opened.all).length,
+            2,
+            "the late completion ends nothing",
+          );
+
+          yield* process.emit(completed(3), newId);
+          yield* opened.takeEvent(isTerminal);
+
+          const updates = providerThreadUpdates(opened.all);
+          const afterSwitch = updates.slice(refIds(updates).indexOf(newId));
+          assert.deepStrictEqual(
+            [...new Set(refIds(afterSwitch))],
+            [newId],
+            "no update after the switch names the retired session",
+          );
+          assert.deepStrictEqual(
+            [...new Set(updates.map((update) => update.id))],
+            [PROVIDER_THREAD_ID],
+          );
+          assert.strictEqual(terminals(opened.all).length, 3);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-008] a turn built on the pre-rollback row is refused and publishes nothing under the old ref",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const { opened, thread, turns } = yield* turnsOn(fake, 2);
+          const retiredId = thread.nativeThreadRef?.nativeId;
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+          const newId = snapshot.providerThread.nativeThreadRef?.nativeId ?? "";
+          yield* awaitRef(opened, newId);
+          const updatesBefore = providerThreadUpdates(opened.all).length;
+
+          const failure = yield* startTurn(opened.runtime, thread, {
+            runOrdinal: 3,
+            runtimeMode: "auto",
+          }).pipe(Effect.flip);
+
+          assert.isTrue(isTurnStartError(failure));
+          assert.strictEqual(providerThreadUpdates(opened.all).length, updatesBefore);
+          assert.notInclude(refIds(providerThreadUpdates(opened.all)).slice(-1), retiredId);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("restart after a session-id change", () => {
+    const SAVED_BLOCK = {
+      driver: "droid",
+      enabled: true,
+      config: { binaryPath: "droid", customModels: [] },
+    };
+
+    const adapterFromSavedBlock = Effect.fnUntraced(function* (fake: FakeDroid) {
+      const settings = yield* Schema.decodeEffect(ServerSettings)({
+        providerInstances: { droid: SAVED_BLOCK },
+      });
+      const saved = settings.providerInstances[ProviderInstanceId.make("droid")];
+      if (saved === undefined || !Predicate.isObject(saved.config)) {
+        return assert.fail("the saved droid block did not decode");
+      }
+      const config = yield* Schema.decodeEffect(DroidAdapterV2Driver.configSchema)({
+        enabled: saved.enabled,
+        ...saved.config,
+      });
+      return yield* DroidAdapterV2Driver.create({
+        instanceId: DROID_INSTANCE_ID,
+        displayName: undefined,
+        accentColor: undefined,
+        enabled: saved.enabled ?? false,
+        environment: [],
+        config,
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner),
+        Effect.provideService(HostProcess.Environment, {}),
+      );
+    });
+
+    it.effect(
+      "[VAL-HIST-007][VAL-CROSS-001] from the saved block: two turns, one rolled back, close and reopen, and the next turn loads the rewound id, re-sends mode and autonomy, and completes",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const adapter = yield* adapterFromSavedBlock(fake);
+          const sessionA = yield* Scope.make();
+          const first = yield* openRuntime(fake, {
+            adapter,
+            runtimeMode: "auto",
+            sessionScope: sessionA,
+          });
+          const thread = yield* ensure(first, { runtimeMode: "auto" });
+          const originalId = thread.nativeThreadRef?.nativeId;
+          for (const runOrdinal of [1, 2]) {
+            yield* runTurn(first, fake, thread, { runOrdinal, runtimeMode: "auto" });
+          }
+          const snapshot = yield* first.runtime.rollbackThread(
+            rollbackToTurn(thread, providerTurnsOf(first.all), 1),
+          );
+          const rewoundId = snapshot.providerThread.nativeThreadRef?.nativeId;
+          assert.isDefined(rewoundId);
+          assert.notStrictEqual(rewoundId, originalId);
+
+          // What the orchestrator persists is the last `provider_thread.updated` of the thread.
+          yield* awaitRef(first, rewoundId ?? "");
+          const persisted = providerThreadUpdates(first.all).at(-1);
+          assert.strictEqual(persisted?.nativeThreadRef?.nativeId, rewoundId);
+          yield* Scope.close(sessionA, Exit.void);
+
+          const second = yield* openRuntime(fake, { adapter, runtimeMode: "auto" });
+          const restarted = fake.current();
+          assert.notStrictEqual(restarted, undefined);
+          const resumed = yield* second.runtime.resumeThread({
+            providerThread: persisted ?? thread,
+            threadId: THREAD_ID,
+            modelSelection: selection("high"),
+            runtimePolicy: policy("auto"),
+          });
+          assert.strictEqual(resumed.id, PROVIDER_THREAD_ID);
+          assert.strictEqual(resumed.nativeThreadRef?.nativeId, rewoundId);
+
+          yield* runTurn(second, fake, resumed, { runOrdinal: 3, runtimeMode: "auto" });
+
+          assert.deepStrictEqual(
+            restarted.requests().map((request) => request.method),
+            ["droid.load_session", "droid.update_session_settings", "droid.add_user_message"],
+          );
+          assert.deepStrictEqual(restarted.requests()[0]?.params, {
+            sessionId: rewoundId,
+            loadAllMessages: true,
+          });
+          assert.notInclude(
+            restarted
+              .requests()
+              .map((request) => JSON.stringify(request.params))
+              .join(),
+            originalId ?? "",
+            "the restarted process never names the original session",
+          );
+          assert.deepStrictEqual(restarted.requests()[1]?.params, AUTO_SETTINGS);
+          const terminal = terminals(second.all).at(-1);
+          assert.strictEqual(terminal?.status, "completed");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-HIST-007] a rollback asked of a fresh process still resumes the newest id after the next restart",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid({
+            sessions: {
+              "stored-session": {
+                settings: FAKE_DROID_DEFAULT_SETTINGS,
+                messages: [
+                  { id: "u1", role: "user", content: [{ type: "text", text: "first" }] },
+                  { id: "u2", role: "user", content: [{ type: "text", text: "second" }] },
+                ],
+              },
+            },
+          });
+          const first = yield* openRuntime(fake);
+          const row = yield* makeProviderThread("stored-session");
+          const snapshot = yield* first.runtime.rollbackThread(
+            rollbackToTurn(row, storedTurns(row), 1),
+          );
+          const rewoundId = snapshot.providerThread.nativeThreadRef?.nativeId;
+
+          const second = yield* openRuntime(fake);
+          yield* second.runtime.resumeThread({ providerThread: snapshot.providerThread });
+          assert.deepStrictEqual(requestsOf(fake, "droid.load_session").at(-1)?.params, {
+            sessionId: rewoundId,
+            loadAllMessages: true,
+          });
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("plan, implement, roll back", () => {
+    it.effect(
+      "[VAL-CROSS-002] after rolling back the implement turn, the plan turn stays a target and the next plan turn sends spec mode again",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const opened = yield* openRuntime(fake, { runtimeMode: "auto" });
+          const thread = yield* ensure(opened, { runtimeMode: "auto" });
+
+          yield* planTurn(opened, fake, thread, { runOrdinal: 1, runtimeMode: "auto" });
+          assert.isTrue(
+            opened.all.some(
+              (event) =>
+                event.type === "turn_item.updated" && event.turnItem.type === "proposed_plan",
+            ),
+            "the plan turn produced a proposed_plan",
+          );
+          yield* runTurn(opened, fake, thread, {
+            runOrdinal: 2,
+            runtimeMode: "auto",
+            interactionMode: "default",
+          });
+          assert.deepStrictEqual(
+            requestsOf(fake, "droid.update_session_settings").map(
+              (request) => request.params["interactionMode"],
+            ),
+            ["spec", "auto"],
+            "implementing switches Droid back to auto mode",
+          );
+          const implementSettings = requestsOf(fake, "droid.update_session_settings")[1]?.params;
+          assert.strictEqual(implementSettings?.["autonomyLevel"], "medium");
+
+          const turns = providerTurnsOf(opened.all);
+          const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(thread, turns, 1));
+          assert.strictEqual(
+            requestsOf(fake, "droid.execute_rewind")[0]?.params["messageId"],
+            messageIdFor(2),
+            "the plan turn stays; the implement turn is the one rewound",
+          );
+          assert.deepStrictEqual(
+            toTurn(turns, 1).nativeTurnRef?.nativeId,
+            messageIdFor(1),
+            "the plan turn is still a rollback target",
+          );
+
+          const before = methodsOf(fake).length;
+          yield* planTurn(opened, fake, snapshot.providerThread, {
+            runOrdinal: 3,
+            runtimeMode: "auto",
+          });
+          const sentAfter = requestsOf(fake, "droid.update_session_settings")
+            .slice(2)
+            .map((request) => request.params);
+          assert.strictEqual(
+            sentAfter.at(-1)?.["interactionMode"],
+            "spec",
+            "the plan turn sends spec mode again; the adapter does not assume the rewound session kept it",
+          );
+          assert.strictEqual(sentAfter.at(-1)?.["specModeModelId"], MODEL);
+          assert.strictEqual(methodsOf(fake).at(-1), "droid.add_user_message");
+          assert.isAbove(methodsOf(fake).length, before);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("injected context", () => {
+    it.effect(
+      "[VAL-TURN-021] the snapshot of a rewound session omits context-* and system-reminder messages, in events and frames alike",
+      () =>
+        Effect.gen(function* () {
+          const CONTEXT_TEXT = "SYNTHETIC-PRIVATE-CONTEXT-0e51-never-visible";
+          const REMINDER_TEXT = "SYNTHETIC-SYSTEM-REMINDER-77ad-never-visible";
+          const LLM_ONLY_TEXT = "SYNTHETIC-LLM-ONLY-c3f0-never-visible";
+          const text = (value: string) => [{ type: "text", text: value }];
+          const fake = yield* makeFakeDroid({
+            sessions: {
+              "stored-session": {
+                settings: FAKE_DROID_DEFAULT_SETTINGS,
+                messages: [
+                  {
+                    id: "context-0b1c",
+                    role: "user",
+                    visibility: "llm_only",
+                    content: text(CONTEXT_TEXT),
+                  },
+                  { id: "u1", role: "user", content: text("first") },
+                  {
+                    id: "__internal__system-reminder__91",
+                    role: "user",
+                    visibility: "llm_only",
+                    content: text(REMINDER_TEXT),
+                  },
+                  { id: "a1", role: "assistant", content: text("one") },
+                  { id: "v1", role: "user", visibility: "llm_only", content: text(LLM_ONLY_TEXT) },
+                  { id: "u2", role: "user", content: text("second") },
+                  { id: "a2", role: "assistant", content: text("two") },
+                ],
+              },
+            },
+          });
+          const opened = yield* openRuntime(fake);
+          const row = yield* makeProviderThread("stored-session");
+          const resumed = yield* opened.runtime.resumeThread({ providerThread: row });
+
+          const snapshot = yield* opened.runtime.rollbackThread(
+            rollbackToTurn(resumed, storedTurns(row), 1),
+          );
+          const rewoundId = snapshot.providerThread.nativeThreadRef?.nativeId ?? "";
+          yield* awaitRef(opened, rewoundId);
+          const read = yield* opened.runtime.readThreadSnapshot({
+            providerThread: snapshot.providerThread,
+          });
+
+          assert.deepStrictEqual(
+            snapshot.messages.map((message) => message.text),
+            ["first", "one"],
+          );
+          assert.deepStrictEqual(
+            read.messages.map((message) => message.text),
+            ["first", "one"],
+            "the history read after the rewind reuses the same filter",
+          );
+          const visible = JSON.stringify({ events: opened.all, snapshot, read });
+          for (const secret of [CONTEXT_TEXT, REMINDER_TEXT, LLM_ONLY_TEXT]) {
+            assert.notInclude(visible, secret);
+          }
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+});

@@ -44,7 +44,7 @@ export const DROID_PRESENTATION = {
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"],
   reportsContextWindow: true,
   requiresNewThreadForModelChange: false,
-  supportsConversationRollback: false,
+  supportsConversationRollback: true,
 } as const;
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;

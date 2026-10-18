@@ -255,6 +255,54 @@ const makeFakeProcess = Effect.fnUntraced(function* (
         yield* respond(id, { result: {} });
         return;
       }
+      case "droid.add_user_message": {
+        const session = sessionId === undefined ? undefined : store.get(sessionId);
+        if (sessionId !== undefined && session !== undefined) {
+          store.set(sessionId, {
+            settings: session.settings,
+            messages: [
+              ...session.messages,
+              {
+                id: params["messageId"],
+                role: "user",
+                content: [{ type: "text", text: params["text"] }],
+                createdAt: 1_700_000_000_000,
+              },
+            ],
+          });
+        }
+        yield* respond(id, { result: {} });
+        return;
+      }
+      case "droid.execute_rewind": {
+        const source = Predicate.isString(params["sessionId"])
+          ? store.get(params["sessionId"])
+          : undefined;
+        const index =
+          source?.messages.findIndex(
+            (message) => asRecord(message)["id"] === params["messageId"],
+          ) ?? -1;
+        if (source === undefined || index < 0) {
+          yield* respond(id, { error: { code: -32603, message: "Message not found" } });
+          return;
+        }
+        // Like Droid, the rewind forks a new session and leaves the process on the one it holds.
+        const created = nextSessionId();
+        store.set(created, {
+          settings: source.settings,
+          messages: source.messages.slice(0, index),
+        });
+        yield* respond(id, {
+          result: {
+            newSessionId: created,
+            restoredCount: 0,
+            deletedCount: 0,
+            failedRestoreCount: 0,
+            failedDeleteCount: 0,
+          },
+        });
+        return;
+      }
       case "droid.close_session":
         yield* respond(id, { result: {} });
         yield* exit(0);

@@ -1,6 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
 
-import { droidHistoryTurns, droidRewindMessageId, type DroidHistoryTurn } from "./history.ts";
+import {
+  droidHistoryTurns,
+  droidRewindMessageId,
+  droidRollbackMessageId,
+  type DroidHistoryTurn,
+} from "./history.ts";
 
 const text = (value: string) => [{ type: "text", text: value }];
 
@@ -221,6 +226,81 @@ describe("droidRewindMessageId", () => {
     );
     assert.strictEqual(
       droidRewindMessageId(turns, { type: "provider_turn", messageId: "unknown" }),
+      undefined,
+    );
+  });
+});
+
+describe("droidRollbackMessageId", () => {
+  const ref = (nativeId: string | null, strength: "strong" | "weak" = "strong") => ({
+    driver: "droid" as never,
+    nativeId,
+    strength,
+  });
+  const turn = (ordinal: number, nativeId: string | null, strength?: "strong" | "weak") => ({
+    ordinal,
+    nativeTurnRef: nativeId === null && strength === undefined ? null : ref(nativeId, strength),
+  });
+  const turns = [turn(3, "u3"), turn(1, "u1"), turn(2, "u2")];
+
+  it("[VAL-HIST-002] rolling back to a turn rewinds to the earliest turn after it, whatever the list order", () => {
+    assert.strictEqual(
+      droidRollbackMessageId({
+        target: { type: "provider_turn", providerTurn: { ordinal: 1 } },
+        providerThreadTurns: turns,
+      }),
+      "u2",
+    );
+    assert.strictEqual(
+      droidRollbackMessageId({
+        target: { type: "provider_turn", providerTurn: { ordinal: 2 } },
+        providerThreadTurns: turns,
+      }),
+      "u3",
+    );
+  });
+
+  it("[VAL-HIST-003] rolling back to the thread start rewinds to the first turn", () => {
+    assert.strictEqual(
+      droidRollbackMessageId({ target: { type: "thread_start" }, providerThreadTurns: turns }),
+      "u1",
+    );
+  });
+
+  it("has nothing to discard when no turn follows the target", () => {
+    assert.strictEqual(
+      droidRollbackMessageId({
+        target: { type: "provider_turn", providerTurn: { ordinal: 3 } },
+        providerThreadTurns: turns,
+      }),
+      null,
+    );
+    assert.strictEqual(
+      droidRollbackMessageId({ target: { type: "thread_start" }, providerThreadTurns: [] }),
+      null,
+    );
+  });
+
+  it("skips later turns that never captured a native ref and refuses a weak or blank one", () => {
+    assert.strictEqual(
+      droidRollbackMessageId({
+        target: { type: "provider_turn", providerTurn: { ordinal: 1 } },
+        providerThreadTurns: [turn(1, "u1"), turn(2, null), turn(3, "u3")],
+      }),
+      "u3",
+    );
+    assert.strictEqual(
+      droidRollbackMessageId({
+        target: { type: "provider_turn", providerTurn: { ordinal: 1 } },
+        providerThreadTurns: [turn(1, "u1"), turn(2, "u2", "weak")],
+      }),
+      undefined,
+    );
+    assert.strictEqual(
+      droidRollbackMessageId({
+        target: { type: "provider_turn", providerTurn: { ordinal: 1 } },
+        providerThreadTurns: [turn(1, "u1"), turn(2, null, "strong")],
+      }),
       undefined,
     );
   });

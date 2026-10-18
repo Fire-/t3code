@@ -57,7 +57,11 @@ import {
   type DroidMapperState,
   type DroidNotification,
 } from "./events.ts";
-import { visibleDroidHistory, type DroidHistoryMessage } from "./history.ts";
+import {
+  droidRollbackMessageId,
+  visibleDroidHistory,
+  type DroidHistoryMessage,
+} from "./history.ts";
 import {
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
@@ -102,7 +106,7 @@ const DroidProviderCapabilitiesV2 = {
   threads: {
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
-    canRollbackThread: false,
+    canRollbackThread: true,
     canForkThread: false,
     canForkFromTurn: false,
     canForkFromSubagentThread: false,
@@ -170,8 +174,8 @@ const DroidProviderCapabilitiesV2 = {
   checkpointing: {
     appCanCheckpointFilesystem: true,
     supportsNestedCheckpointScopes: false,
-    providerCanRollbackConversation: false,
-    providerRollbackReturnsSnapshot: false,
+    providerCanRollbackConversation: true,
+    providerRollbackReturnsSnapshot: true,
     providerCanReadConversationSnapshot: true,
   },
   identity: {
@@ -239,6 +243,9 @@ interface DroidThreadState {
 }
 
 const MAX_ERROR_MESSAGE_CHARS = 1_000;
+
+/** Droid names the session a rewind forks after this. */
+const DROID_REWIND_TITLE = "T3 Code rewind";
 
 const field = (value: unknown, key: string): unknown =>
   Predicate.isObject(value) ? value[key] : undefined;
@@ -1067,6 +1074,77 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const settingsFrame = (settings: DroidSessionSettings) =>
         request("droid.update_session_settings", droidSettingsParams(settings));
 
+      /** Opens a new Droid session carrying `settings` and makes it the thread's session. */
+      const startSession = Effect.fnUntraced(function* (
+        settings: DroidSessionSettings,
+        row: OrchestrationV2ProviderThread | undefined,
+        appThreadId: OrchestrationV2ProviderThread["appThreadId"],
+      ) {
+        const result = yield* request("droid.initialize_session", {
+          machineId: "default",
+          cwd,
+          ...droidSettingsParams(settings),
+        });
+        const sessionId = field(result, "sessionId");
+        if (!Predicate.isString(sessionId) || sessionId.length === 0) {
+          return yield* protocolError("initialize_session returned no sessionId");
+        }
+        const at = yield* DateTime.now;
+        const providerThread = bindThread(sessionId, row, appThreadId, at);
+        const state: DroidThreadState = {
+          providerThread,
+          activeTurn: null,
+          history: [],
+          latestPlan: undefined,
+        };
+        applied = settings;
+        sessionUsage = DROID_ZERO_COUNTS;
+        threadState = state;
+        yield* emit({
+          type: "provider_thread.updated",
+          driver: DROID_PROVIDER,
+          providerThread,
+        });
+        return state;
+      });
+
+      /**
+       * Loads a stored session and makes it the thread's session. The thread keeps its provider
+       * thread id and takes `nativeId` as its ref, so this is how a resume and a rewind both land.
+       * The state is replaced only once the load has succeeded.
+       */
+      const adoptSession = Effect.fnUntraced(function* (
+        nativeId: string,
+        row: OrchestrationV2ProviderThread,
+        appThreadId: OrchestrationV2ProviderThread["appThreadId"],
+      ) {
+        const result = yield* request("droid.load_session", {
+          sessionId: nativeId,
+          loadAllMessages: true,
+        }).pipe(
+          Effect.tapError((error) =>
+            logWarning(`Droid could not load session ${nativeId}: ${describeFailure(error)}`),
+          ),
+        );
+        const at = yield* DateTime.now;
+        const providerThread = bindThread(nativeId, row, appThreadId, at);
+        const state: DroidThreadState = {
+          providerThread,
+          activeTurn: null,
+          history: visibleDroidHistory(field(field(result, "session"), "messages")),
+          latestPlan: undefined,
+        };
+        applied = undefined;
+        sessionUsage = undefined;
+        threadState = state;
+        yield* emit({
+          type: "provider_thread.updated",
+          driver: DROID_PROVIDER,
+          providerThread,
+        });
+        return state;
+      });
+
       const ensureThread = Effect.fnUntraced(function* (
         threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
       ) {
@@ -1081,31 +1159,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           interactionMode: threadInput.runtimePolicy.interactionMode,
           modelSelection: threadInput.modelSelection,
         });
-        const result = yield* request("droid.initialize_session", {
-          machineId: "default",
-          cwd,
-          ...droidSettingsParams(settings),
-        });
-        const sessionId = field(result, "sessionId");
-        if (!Predicate.isString(sessionId) || sessionId.length === 0) {
-          return yield* protocolError("initialize_session returned no sessionId");
-        }
-        const at = yield* DateTime.now;
-        const providerThread = bindThread(
-          sessionId,
+        const state = yield* startSession(
+          settings,
           threadInput.existingProviderThread,
           threadInput.threadId,
-          at,
         );
-        applied = settings;
-        sessionUsage = DROID_ZERO_COUNTS;
-        threadState = { providerThread, activeTurn: null, history: [], latestPlan: undefined };
-        yield* emit({
-          type: "provider_thread.updated",
-          driver: DROID_PROVIDER,
-          providerThread,
-        });
-        return providerThread;
+        return state.providerThread;
       });
 
       const resumeThread = Effect.fnUntraced(function* (
@@ -1124,29 +1183,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         threadState = null;
         applied = undefined;
-        const result = yield* request("droid.load_session", {
-          sessionId: nativeId,
-          loadAllMessages: true,
-        }).pipe(
-          Effect.tapError((error) =>
-            logWarning(`Droid could not load session ${nativeId}: ${describeFailure(error)}`),
-          ),
-        );
-        const at = yield* DateTime.now;
-        const providerThread = bindThread(nativeId, row, appThreadId, at);
-        sessionUsage = undefined;
-        threadState = {
-          providerThread,
-          activeTurn: null,
-          history: visibleDroidHistory(field(field(result, "session"), "messages")),
-          latestPlan: undefined,
-        };
-        yield* emit({
-          type: "provider_thread.updated",
-          driver: DROID_PROVIDER,
-          providerThread,
-        });
-        return providerThread;
+        const state = yield* adoptSession(nativeId, row, appThreadId);
+        return state.providerThread;
       });
 
       const resolvePromptPayload = Effect.fnUntraced(function* (
@@ -1415,17 +1453,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         yield* settleRequest(pending, status, outcome);
       });
 
-      const readThreadSnapshot = Effect.fnUntraced(function* (
-        snapshotInput: ProviderAdapter.ProviderAdapterV2ReadThreadSnapshotInput,
-      ) {
-        const state = threadState;
-        const wantedNativeId = snapshotInput.providerThread.nativeThreadRef?.nativeId;
-        if (state === null || wantedNativeId == null || boundNativeId() !== wantedNativeId) {
-          return yield* protocolError(
-            "Droid snapshot requested for a thread this session does not host",
-          );
-        }
+      const threadSnapshot = (
+        state: DroidThreadState,
+      ): ProviderAdapter.ProviderAdapterV2ThreadSnapshot => {
         const threadId = state.providerThread.appThreadId ?? input.threadId;
+        const nativeId = state.providerThread.nativeThreadRef?.nativeId ?? "";
         const messages = state.history.map((message, index): OrchestrationV2ConversationMessage => {
           const at = Option.getOrElse(
             DateTime.make(message.createdAt ?? Number.NaN),
@@ -1434,7 +1466,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return {
             id: idAllocator.derive.messageFromProviderItem({
               driver: DROID_PROVIDER,
-              nativeItemId: `${wantedNativeId}:snapshot-message:${index}`,
+              nativeItemId: `${nativeId}:snapshot-message:${index}`,
             }),
             threadId,
             runId: null,
@@ -1455,6 +1487,134 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           messages,
           runtimeRequests: [],
         };
+      };
+
+      const readThreadSnapshot = Effect.fnUntraced(function* (
+        snapshotInput: ProviderAdapter.ProviderAdapterV2ReadThreadSnapshotInput,
+      ) {
+        const state = threadState;
+        const wantedNativeId = snapshotInput.providerThread.nativeThreadRef?.nativeId;
+        if (state === null || wantedNativeId == null || boundNativeId() !== wantedNativeId) {
+          return yield* protocolError(
+            "Droid snapshot requested for a thread this session does not host",
+          );
+        }
+        return threadSnapshot(state);
+      });
+
+      /**
+       * True while a wake is armed for the session: a background task whose completion would start
+       * a turn on its own, so rewinding under it would let that turn land on the wrong history.
+       * Nothing arms a wake yet; whatever does must answer here, and a rollback then refuses.
+       */
+      const wakePending = () => false;
+
+      /**
+       * Moves the thread to a new Droid session that ends just before the first message of the
+       * turn after the target. The rewind forks a session and leaves the process on the one it
+       * holds, so the new one is loaded before it takes any frame. The session id only ever
+       * moves forward: the old session keeps its history on Droid's side, and nothing here or in
+       * `handleEvent` looks at it again.
+       */
+      const rollbackThread = Effect.fnUntraced(function* (
+        rollbackInput: ProviderAdapter.ProviderAdapterV2RollbackThreadInput,
+      ) {
+        const row = rollbackInput.providerThread;
+        const sourceId = row.nativeThreadRef?.nativeId;
+        if (sourceId === undefined || sourceId === null) {
+          return yield* protocolError("The provider thread has no Droid session to roll back");
+        }
+        const messageId = droidRollbackMessageId({
+          target: rollbackInput.target,
+          providerThreadTurns: rollbackInput.providerThreadTurns.filter(
+            (turn) => turn.providerThreadId === row.id,
+          ),
+        });
+        if (messageId === undefined) {
+          return yield* protocolError(
+            "The Droid turn after the rollback target has no strong message id to rewind to",
+          );
+        }
+        const appThreadId = row.appThreadId ?? input.threadId;
+
+        // Under the event permit, like the start of a turn: no notification is mapped between
+        // the checks below and the swap of the session.
+        return yield* Effect.gen(function* () {
+          if (ended || closing) return yield* protocolError("The Droid process has exited");
+          const state = threadState;
+          if (state?.activeTurn != null) {
+            return yield* protocolError("Cannot roll back a Droid session while a turn is active");
+          }
+          if (wakePending()) {
+            return yield* protocolError("Cannot roll back a Droid session while a wake is pending");
+          }
+          if (state !== null && boundNativeId() !== sourceId) {
+            return yield* protocolError(
+              "Droid rollback requested for a thread this session does not host",
+            );
+          }
+          if (messageId === null) {
+            // No later turn reached Droid, so there is nothing to discard.
+            const hosted = state ?? (yield* adoptSession(sourceId, row, appThreadId));
+            return threadSnapshot(hosted);
+          }
+
+          const settings =
+            applied ??
+            droidSessionSettings({
+              runtimeMode: input.runtimePolicy.runtimeMode,
+              interactionMode: input.runtimePolicy.interactionMode,
+              modelSelection: input.modelSelection,
+            });
+          const rewind = request("droid.execute_rewind", {
+            sessionId: sourceId,
+            messageId,
+            filesToRestore: [],
+            filesToDelete: [],
+            forkTitle: DROID_REWIND_TITLE,
+          }).pipe(
+            Effect.flatMap((result) => {
+              const newSessionId = field(result, "newSessionId");
+              return Predicate.isString(newSessionId) && newSessionId.length > 0
+                ? Effect.succeed(newSessionId)
+                : Effect.fail(protocolError("execute_rewind returned no newSessionId"));
+            }),
+          );
+          // The cut falls before the first user message, which Droid may refuse to rewind to. The
+          // thread then moves to an empty session, the same state with nothing before it.
+          const rewoundId =
+            rollbackInput.target.type === "thread_start"
+              ? yield* rewind.pipe(
+                  Effect.catch((error) =>
+                    logWarning(
+                      `Droid could not rewind session ${sourceId} to its start (${describeFailure(error)}); starting a fresh session.`,
+                    ).pipe(Effect.as(undefined)),
+                  ),
+                )
+              : yield* rewind;
+          if (rewoundId === undefined) {
+            return threadSnapshot(yield* startSession(settings, row, appThreadId));
+          }
+
+          const rewound = yield* adoptSession(rewoundId, row, appThreadId);
+          // The rewound session's settings are not read back, so they are sent again. A failed
+          // frame leaves `applied` unknown and the next turn sends them.
+          applied = settings;
+          yield* settingsFrame(settings).pipe(
+            Effect.catch((error) =>
+              Effect.sync(() => {
+                applied = undefined;
+              }).pipe(
+                Effect.andThen(
+                  logWarning(
+                    `Droid did not take the settings of the rewound session: ${describeFailure(error)}`,
+                  ),
+                ),
+              ),
+            ),
+          );
+          return threadSnapshot(rewound);
+        }).pipe(permit.withPermits(1));
       });
 
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
@@ -1552,12 +1712,16 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             ),
           ),
         rollbackThread: (rollbackInput) =>
-          Effect.fail(
-            new ProviderAdapter.ProviderAdapterRollbackThreadError({
-              driver: DROID_PROVIDER,
-              providerThreadId: rollbackInput.providerThread.id,
-              cause: protocolError("Droid does not support rolling back a thread yet"),
-            }),
+          rollbackThread(rollbackInput).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                  driver: DROID_PROVIDER,
+                  providerThreadId: rollbackInput.providerThread.id,
+                  checkpointId: rollbackInput.target.checkpointId,
+                  cause,
+                }),
+            ),
           ),
         forkThread: (forkInput) =>
           Effect.fail(

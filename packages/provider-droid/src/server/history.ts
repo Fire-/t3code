@@ -5,8 +5,12 @@
  * event, an item, or a snapshot, so it is dropped here and never copied.
  *
  * Two readings of the same list: the visible messages (`visibleDroidHistory`), and the turns t3
- * saw (`droidHistoryTurns`), which is what a rollback needs to find a rewind point.
+ * saw (`droidHistoryTurns`, with `droidRewindMessageId` to pick a rewind point in them). A rollback
+ * t3 asks for does not read the stored list: the provider turns t3 recorded already carry the
+ * message ids (`droidRollbackMessageId`), and a steer Droid ran as a native turn of its own stays
+ * with the t3 turn it belongs to.
  */
+import type { OrchestrationV2ProviderRef } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 
 import { DROID_TASK_COMPLETION_ID_PREFIX, droidMessageText } from "./protocol.ts";
@@ -93,6 +97,31 @@ export function droidHistoryTurns(messages: unknown): ReadonlyArray<DroidHistory
     if (reminderByParent.get(messageId)?.includes(FOLDED_STEER_REMINDER)) return [];
     return [{ messageId, text }];
   });
+}
+
+/**
+ * The Droid message a t3 rollback rewinds to, read from the provider turns t3 recorded: each one
+ * keeps the id of the user message that began it as its `nativeTurnRef`. The boundary is the
+ * earliest turn after the target, so a steer folded into the target turn (it sits before the next
+ * turn's message) stays with the target. Returns `null` when no turn follows the target (nothing
+ * to discard) and `undefined` when that turn has no strong ref to rewind to.
+ */
+export function droidRollbackMessageId(input: {
+  readonly target:
+    | { readonly type: "thread_start" }
+    | { readonly type: "provider_turn"; readonly providerTurn: { readonly ordinal: number } };
+  readonly providerThreadTurns: ReadonlyArray<{
+    readonly ordinal: number;
+    readonly nativeTurnRef: OrchestrationV2ProviderRef | null;
+  }>;
+}): string | null | undefined {
+  const boundaryOrdinal =
+    input.target.type === "thread_start" ? 0 : input.target.providerTurn.ordinal;
+  const ref = input.providerThreadTurns
+    .filter((turn) => turn.ordinal > boundaryOrdinal && turn.nativeTurnRef !== null)
+    .toSorted((a, b) => a.ordinal - b.ordinal)[0]?.nativeTurnRef;
+  if (ref === undefined || ref === null) return null;
+  return ref.strength === "strong" && ref.nativeId !== null ? ref.nativeId : undefined;
 }
 
 export type DroidRollbackTarget =

@@ -110,6 +110,8 @@ export interface OpenOptions {
   readonly effort?: string | undefined;
   readonly authSignal?: DroidAuthSignalService;
   readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  /** Replaces the adapter `makeAdapter` would build, for a test that builds it another way. */
+  readonly adapter?: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly binaryPath?: string;
   /** Closing it closes the session while the test keeps collecting the events it publishes. */
   readonly sessionScope?: Scope.Closeable;
@@ -121,7 +123,8 @@ export const openRuntime = Effect.fnUntraced(function* (
 ) {
   const spawner = options.spawner ?? fake?.spawner;
   assert.isDefined(spawner);
-  const adapter = yield* makeAdapter(spawner!, options.authSignal, options.binaryPath);
+  const adapter =
+    options.adapter ?? (yield* makeAdapter(spawner!, options.authSignal, options.binaryPath));
   const open = adapter.openSession({
     threadId: THREAD_ID,
     providerSessionId: SESSION_ID,
