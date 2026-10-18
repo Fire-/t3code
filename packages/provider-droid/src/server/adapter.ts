@@ -17,6 +17,7 @@ import {
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -34,6 +35,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import {
   ProviderAdapterDriverCreateError,
@@ -71,6 +73,7 @@ import {
   boundDroidToolOutput,
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
+  droidTaskCompletionMessageId,
   droidTaskCompletionOf,
   type DroidTaskCompletion,
   type DroidTokenCounts,
@@ -218,7 +221,19 @@ export interface DroidAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: DroidSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /** Where a continuation Droid starts on its own is offered; without it such a turn is dropped. */
+  readonly continuationRequests?: {
+    readonly offer: (
+      request: ProviderContinuationRequests.ProviderContinuationRequest,
+    ) => Effect.Effect<void>;
+  };
 }
+
+/** A turn that hears nothing from Droid for this long is over: Droid is hung or has lost its way. */
+const INACTIVITY_LIMIT_MILLIS = 10 * 60 * 1000;
+
+/** How long the interrupt that precedes a watchdog kill may take. */
+const WATCHDOG_INTERRUPT_TIMEOUT = "2 seconds";
 
 type TurnDisposition = "reusable" | "broken";
 
@@ -236,8 +251,17 @@ interface ActiveDroidTurn {
   mapper: DroidMapperState;
   /** The latest `error` notification's text: Droid sends the reason before the failing completion. */
   errorMessage: string | undefined;
+  /**
+   * The native turn whose completion this turn waits for: the one its message started, or the wake
+   * it took over. A compaction has none.
+   */
+  readonly nativeTurnId: string | undefined;
   /** Droid completed the native turn this t3 turn started. */
   nativeSettled: boolean;
+  /** When Droid last sent anything during this turn, or t3 last answered it. */
+  lastActivityMs: number;
+  /** Completes when the turn ends, so the watchdog stops waiting on it. */
+  readonly finished: Deferred.Deferred<void>;
   /**
    * Steers Droid accepted but has not echoed yet, by message id with the text sent. Droid queues
    * a steer behind the running native turn, so it may only start after that turn's completion:
@@ -278,6 +302,25 @@ interface DroidThreadState {
    * derived from the running background ones, so the two cannot disagree.
    */
   readonly subagents: Map<string, DroidSubagent>;
+}
+
+type DroidRequestEvent = Extract<DroidRpcEvent, { readonly _tag: "Request" }>;
+
+/** What Droid sent while a wake waited for its turn, kept in the order it came. */
+type WakeEntry =
+  | { readonly kind: "notification"; readonly notification: DroidNotification }
+  | { readonly kind: "request"; readonly event: DroidRequestEvent };
+
+/**
+ * A native turn Droid started by itself (a background task's report) while no t3 turn ran. Its
+ * events wait here until the orchestrator starts the turn that owns them.
+ */
+interface DroidWake {
+  readonly state: DroidThreadState;
+  readonly nativeTurnId: string;
+  readonly entries: Array<WakeEntry>;
+  /** Droid has already completed the wake's native turn. */
+  finished: boolean;
 }
 
 const backgroundSubagentsOf = (state: DroidThreadState) =>
@@ -438,6 +481,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
   const authSignal = yield* DroidAuthSignal;
   const hostEnvironment = yield* HostProcess.Environment;
   const processEnvironment = definedDroidEnvironment(options.environment);
+  const { continuationRequests } = options;
   const redactor = makeRedactor(
     processEnvironment["FACTORY_API_KEY"] ?? hostEnvironment["FACTORY_API_KEY"],
   );
@@ -523,6 +567,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       let ended = false;
       /** A stop killed the process on purpose: its exit ends the session without failing anything. */
       let stopRequested = false;
+      /** Why a stop that killed the process was needed, when it was more than a user's Stop. */
+      let stopReason: string | null = null;
+      /** The turn Droid started on its own, held until the orchestrator starts the turn for it. */
+      let pendingWake: DroidWake | null = null;
       /** Resolved once the event stream has ended and the session has published how. */
       const eventsEnded = yield* Deferred.make<void>();
       /** Keyed by the runtime request id; an entry exists exactly while Droid waits on the request. */
@@ -854,6 +902,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       ) {
         if (state.activeTurn !== turn) return;
         state.activeTurn = null;
+        yield* Deferred.succeed(turn.finished, undefined);
         // Before the terminal: no request may outlive the turn it belongs to.
         yield* cancelOpenRequests(!ended);
         if (turn.compaction !== undefined) {
@@ -1089,6 +1138,110 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         return true;
       });
 
+      const wakeIsCurrent = (wake: DroidWake) =>
+        pendingWake === wake && threadState === wake.state && !ended && !closing;
+
+      /**
+       * Kills the process a wake waits on, for a wake nobody will take: Droid would go on working
+       * with nothing watching it. Runs under the event permit, so the end of the event stream is
+       * handled after the wake is gone. Returns whether it killed.
+       */
+      const killWake = Effect.fnUntraced(function* (wake: DroidWake) {
+        if (!wakeIsCurrent(wake)) return false;
+        pendingWake = null;
+        stopRequested = true;
+        // Nothing more is sent to a process on its way out.
+        ended = true;
+        yield* Effect.uninterruptible(rpc.kill);
+        return true;
+      });
+
+      /**
+       * Stops the pending wake, if there is one, and returns once the session has published that
+       * it stopped. The next turn opens a new session on a new process.
+       */
+      const stopPendingWake = Effect.fnUntraced(function* (only?: DroidWake) {
+        const killed = yield* permit.withPermits(1)(
+          Effect.suspend(() => {
+            const wake = pendingWake;
+            return wake === null || (only !== undefined && wake !== only)
+              ? Effect.succeed(false)
+              : killWake(wake);
+          }),
+        );
+        if (killed) yield* Deferred.await(eventsEnded);
+      });
+
+      /**
+       * A native turn Droid starts on its own, once a background task has reported, has no t3 turn
+       * to land in. The orchestrator is offered one; the events wait here until it starts it.
+       */
+      const armWake = Effect.fnUntraced(function* (state: DroidThreadState, nativeTurnId: string) {
+        const appThreadId = state.providerThread.appThreadId;
+        if (
+          continuationRequests === undefined ||
+          appThreadId == null ||
+          ended ||
+          closing ||
+          stopRequested
+        ) {
+          return yield* logDebug(
+            `Dropping the turn ${nativeTurnId} Droid started outside a turn: nothing can continue the thread with it.`,
+          );
+        }
+        const wake: DroidWake = { state, nativeTurnId, entries: [], finished: false };
+        pendingWake = wake;
+        yield* updateProviderSession("running", null);
+        yield* continuationRequests.offer({
+          threadId: appThreadId,
+          providerThreadId: state.providerThread.id,
+          driver: DROID_PROVIDER,
+          detail: null,
+          delivery: "adapter_buffered",
+          dispatchIfCurrent: (dispatch) =>
+            permit.withPermits(1)(
+              Effect.suspend(() =>
+                wakeIsCurrent(wake)
+                  ? dispatch.pipe(
+                      Effect.asSome,
+                      Effect.tapError(() => killWake(wake)),
+                    )
+                  : Effect.succeedNone,
+              ),
+            ),
+          clearIfCurrent: () => stopPendingWake(wake),
+        });
+      });
+
+      /**
+       * Activity while no turn runs. A report's turn is the one thing Droid may start by itself, so
+       * it becomes a wake and what follows it joins it; anything else belongs to no turn and goes.
+       */
+      const handleIdleNotification = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        notification: DroidNotification,
+      ) {
+        const wake = pendingWake;
+        if (wake !== null) {
+          wake.entries.push({ kind: "notification", notification });
+          if (
+            notification.type === "agent_turn_completed" &&
+            notification["turnId"] === wake.nativeTurnId
+          ) {
+            wake.finished = true;
+            yield* updateProviderSession("ready", null);
+          }
+          return;
+        }
+        const wakeId = droidTaskCompletionMessageId(notification);
+        if (wakeId !== undefined) return yield* armWake(state, wakeId);
+        // Droid flips its working state on its own account all the time; that is not activity.
+        if (notification.type === "droid_working_state_changed") return;
+        yield* logDebug(
+          `Dropping a Droid ${notification.type} notification that arrived outside a turn.`,
+        );
+      });
+
       const handleNotification = Effect.fnUntraced(function* (notification: DroidNotification) {
         const state = threadState;
         if (state === null) return;
@@ -1110,9 +1263,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           // Droid reports a finished background task as a message of its own, and does so while
           // idle as well: the task ended whether or not a turn is open to take the report.
           const completion = droidTaskCompletionOf(notification);
-          if (completion !== undefined) return yield* settleBackgroundTask(state, completion);
+          if (completion !== undefined) {
+            yield* settleBackgroundTask(state, completion);
+            // A turn that is open takes the report into itself.
+            if (turn !== null) return;
+          }
         }
-        if (turn === null) return;
+        if (turn === null) return yield* handleIdleNotification(state, notification);
         if (notification.type === "error") {
           const message = field(notification, "message");
           if (Predicate.isString(message) && message.trim().length > 0) {
@@ -1122,7 +1279,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         if (notification.type === "agent_turn_completed") {
           const nativeTurnId = notification["turnId"];
-          if (nativeTurnId === turn.turnInput.message.messageId && !turn.nativeSettled) {
+          if (
+            turn.nativeTurnId !== undefined &&
+            nativeTurnId === turn.nativeTurnId &&
+            !turn.nativeSettled
+          ) {
             turn.nativeSettled = true;
           } else if (
             !Predicate.isString(nativeTurnId) ||
@@ -1228,20 +1389,27 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         const state = threadState;
         const turn = state?.activeTurn ?? null;
         const reply = (result: unknown) => rpc.respond(event.id, result).pipe(Effect.ignore);
+        // A request the wake raises is shown by the turn that takes the wake, and Droid waits for it.
+        const holdForWake = () => {
+          if (turn !== null || pendingWake === null) return false;
+          pendingWake.entries.push({ kind: "request", event });
+          return true;
+        };
         switch (event.method) {
           case "droid.pick_options":
             // No t3 surface offers a list pick, so Droid is told it was declined.
             return yield* reply(DROID_PICK_OPTIONS_CANCELLED);
           case "droid.ask_user": {
             const request = droidUserInputRequest(event.params);
-            if (state === null || turn === null || request.native.length === 0) {
-              return yield* reply(DROID_ASK_USER_CANCELLED);
-            }
+            if (request.native.length === 0) return yield* reply(DROID_ASK_USER_CANCELLED);
+            if (holdForWake()) return;
+            if (state === null || turn === null) return yield* reply(DROID_ASK_USER_CANCELLED);
             return yield* openRequest(state, turn, event.id, { type: "user_input", request });
           }
           case "droid.request_permission": {
             const request = droidApprovalRequest(event.params);
             if (request.confirmationType === DROID_EXIT_SPEC_MODE) {
+              if (holdForWake()) return;
               return yield* answerExitSpecMode(state, turn, event.id, request, event.params);
             }
             if (request.confirmationType === "ask_user") {
@@ -1251,6 +1419,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               );
               return yield* reply({ selectedOption: DROID_CANCEL_OPTION });
             }
+            if (holdForWake()) return;
             if (state === null || turn === null) {
               yield* logDebug("Cancelling a Droid permission request that arrived outside a turn.");
               return yield* reply({ selectedOption: request.cancelOptionId });
@@ -1261,6 +1430,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       const handleEvent = Effect.fnUntraced(function* (event: DroidRpcEvent) {
+        // Anything Droid sends, of whatever session, shows it is alive.
+        const active = threadState?.activeTurn;
+        if (active != null) active.lastActivityMs = yield* Clock.currentTimeMillis;
         if (event._tag === "Request") return yield* handleInbound(event);
         const bound = boundNativeId();
         if (bound === undefined || (event.sessionId !== undefined && event.sessionId !== bound)) {
@@ -1274,6 +1446,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           .withPermits(1)(
             Effect.gen(function* () {
               ended = true;
+              // Whatever the wake held died with the process, and its offer is no longer current.
+              pendingWake = null;
               const state = threadState;
               const turn = state?.activeTurn ?? null;
               if (state !== null && turn !== null) {
@@ -1293,7 +1467,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
                 yield* logWarning(`Droid process ended: ${Cause.pretty(cause)}`);
               }
               if (deliberate) {
-                yield* updateProviderSession("stopped", null);
+                yield* updateProviderSession("stopped", stopReason);
                 yield* Queue.end(events);
               } else {
                 yield* updateProviderSession("error", "Droid process exited unexpectedly.");
@@ -1467,6 +1641,19 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         if (threadState?.activeTurn != null) {
           return yield* protocolError("Cannot start a Droid session while a turn is active");
         }
+        if (pendingWake !== null) {
+          // The thread the wake belongs to is the one being asked for, so there is nothing to replace.
+          const waiting = pendingWake.state;
+          if (
+            waiting === threadState &&
+            waiting.providerThread.appThreadId === threadInput.threadId &&
+            (threadInput.existingProviderThread === undefined ||
+              threadInput.existingProviderThread.nativeThreadRef?.nativeId === boundNativeId())
+          ) {
+            return waiting.providerThread;
+          }
+          return yield* protocolError("Cannot start a Droid session while a wake is pending");
+        }
         if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = null;
         known = {};
@@ -1492,6 +1679,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         if (current !== null && boundNativeId() === nativeId) return current.providerThread;
         if (current?.activeTurn != null) {
           return yield* protocolError("Cannot resume a Droid session while a turn is active");
+        }
+        if (pendingWake !== null) {
+          return yield* protocolError("Cannot resume a Droid session while a wake is pending");
         }
         if (current !== null) yield* retireBackground(current, "interrupted");
         threadState = null;
@@ -1526,6 +1716,105 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         };
       });
 
+      /**
+       * Hands a taken wake's events to the turn that now owns it, as if they had just arrived. The
+       * turn may end part-way (a finished wake), and what follows then is idle activity again.
+       */
+      const replayWake = Effect.fnUntraced(function* (wake: DroidWake) {
+        pendingWake = null;
+        for (const entry of wake.entries) {
+          yield* (
+            entry.kind === "notification"
+              ? handleNotification(entry.notification)
+              : handleInbound(entry.event)
+          ).pipe(
+            Effect.catchCauseIf(
+              (cause) => !Cause.hasInterruptsOnly(cause),
+              (cause) => logWarning(`Droid event handling failed: ${Cause.pretty(cause)}`),
+            ),
+          );
+        }
+      });
+
+      /** Droid may be quiet while it runs a tool or a subagent, or while t3 owes it an answer. */
+      const awaitsQuietWork = (state: DroidThreadState, turn: ActiveDroidTurn) =>
+        pendingRequests.size > 0 ||
+        [...turn.mapper.tools.values()].some((tool) => !tool.completed) ||
+        [...state.subagents.values()].some(
+          (subagent) =>
+            !subagent.background &&
+            (subagent.status === "pending" || subagent.status === "running") &&
+            subagent.providerTurnId === turn.providerTurn.id,
+        );
+
+      /**
+       * Ends a turn Droid has gone silent on: the turn fails, the thread is broken, and the
+       * process is interrupted and killed so it cannot go on unwatched. Returns false when the
+       * turn turned out not to be due after all, which it can be once the permit is won.
+       */
+      const expireTurn = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+      ) {
+        return yield* permit.withPermits(1)(
+          Effect.gen(function* () {
+            if (state.activeTurn !== turn || ended || closing) return true;
+            const now = yield* Clock.currentTimeMillis;
+            if (
+              awaitsQuietWork(state, turn) ||
+              now - turn.lastActivityMs < INACTIVITY_LIMIT_MILLIS
+            ) {
+              return false;
+            }
+            const message = "Droid stopped responding, so the turn was ended.";
+            yield* logWarning(
+              `${message} It had been silent for ${Math.round((now - turn.lastActivityMs) / 60_000)} minutes.`,
+            );
+            stopRequested = true;
+            stopReason = message;
+            // The terminal goes out first: the process end that follows the kill finds no turn.
+            yield* settleTurn(state, turn, {
+              kind: "failed",
+              failure: makeProviderFailure({
+                message,
+                class: "transport_error",
+                code: "inactivity_timeout",
+                retryable: false,
+              }),
+              disposition: "broken",
+            });
+            yield* rpc
+              .request("droid.interrupt_session", {}, { timeout: WATCHDOG_INTERRUPT_TIMEOUT })
+              .pipe(Effect.ignore);
+            yield* Effect.uninterruptible(rpc.kill);
+            return true;
+          }),
+        );
+      });
+
+      /**
+       * One timer per turn, set for the moment the turn would have been silent for the whole
+       * limit. Droid's events and t3's answers only move that moment, so the timer re-arms to the
+       * new one when it wakes early and never runs more than once per quiet window.
+       */
+      const watchTurn = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+      ) {
+        while (state.activeTurn === turn) {
+          const now = yield* Clock.currentTimeMillis;
+          const wait = awaitsQuietWork(state, turn)
+            ? INACTIVITY_LIMIT_MILLIS
+            : turn.lastActivityMs + INACTIVITY_LIMIT_MILLIS - now;
+          if (wait > 0) {
+            const finished = yield* Deferred.await(turn.finished).pipe(Effect.timeoutOption(wait));
+            if (Option.isSome(finished)) return;
+          } else if (yield* expireTurn(state, turn)) {
+            return;
+          }
+        }
+      });
+
       const startTurn = Effect.fnUntraced(function* (
         turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
       ) {
@@ -1544,16 +1833,25 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return yield* protocolError("Droid turn requested for a different native session");
         }
 
+        // The turn the orchestrator starts for what Droid began on its own sends nothing: Droid
+        // is already running it, or has run it, and the user said nothing.
+        const continuation =
+          turnInput.message.createdBy === "agent" &&
+          turnInput.message.creationSource === "provider";
+
         // One frame covers runtime mode, interaction mode, model, and effort, and goes out only
         // when it would change something Droid is known to hold. The runtime mode stays the source
         // of truth for autonomy, so a level Droid raised on its own is sent back here.
-        const desired = desiredSettings(turnInput.runtimePolicy, turnInput.modelSelection);
-        if (settingsOwed || !droidHoldsSettings(known, desired)) yield* sendSettings(desired);
+        const desired = continuation
+          ? undefined
+          : desiredSettings(turnInput.runtimePolicy, turnInput.modelSelection);
+        if (desired !== undefined && (settingsOwed || !droidHoldsSettings(known, desired))) {
+          yield* sendSettings(desired);
+        }
 
-        const payload = yield* resolvePromptPayload(
-          turnInput.message.text,
-          turnInput.message.attachments,
-        );
+        const payload = continuation
+          ? undefined
+          : yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments);
         const messageId = String(turnInput.message.messageId);
 
         yield* Effect.gen(function* () {
@@ -1567,6 +1865,19 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           ) {
             return yield* protocolError("Droid turn ownership changed before it could start");
           }
+          const wake = pendingWake?.state === state ? pendingWake : null;
+          if (wake !== null && state.providerThread.appThreadId !== turnInput.threadId) {
+            return yield* protocolError("Droid wake belongs to a different app thread");
+          }
+          // A user's message that arrives while Droid still runs the wake queues behind it, the way
+          // a steer does, so the turn waits for the wake and then for the message.
+          const behindWake = payload !== undefined && wake !== null && !wake.finished;
+          // The native turn that ends this one, and the id its provider turn goes by.
+          const nativeTurnId =
+            wake !== null && (continuation || behindWake) ? wake.nativeTurnId : messageId;
+          const providerNativeId = continuation
+            ? (wake?.nativeTurnId ?? `continuation:${messageId}`)
+            : messageId;
           const startedAt = yield* DateTime.now;
           state.providerThread = {
             ...turnInput.providerThread,
@@ -1575,12 +1886,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           const providerTurn: OrchestrationV2ProviderTurn = {
             id: idAllocator.derive.providerTurn({
               driver: DROID_PROVIDER,
-              nativeTurnId: messageId,
+              nativeTurnId: providerNativeId,
             }),
             providerThreadId: turnInput.providerThread.id,
             nodeId: turnInput.rootNodeId,
             runAttemptId: turnInput.attemptId,
-            nativeTurnRef: droidRef(messageId),
+            nativeTurnRef: continuation && wake === null ? null : droidRef(providerNativeId),
             ordinal: turnInput.providerTurnOrdinal,
             status: "running",
             startedAt,
@@ -1593,29 +1904,37 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               firstItemOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
               sessionUsage,
               contextUsage: state.providerThread.contextUsage ?? undefined,
-              requestedModelId: desired.router ? undefined : desired.modelId,
+              requestedModelId:
+                desired === undefined || desired.router ? undefined : desired.modelId,
             }),
             errorMessage: undefined,
+            nativeTurnId,
             nativeSettled: false,
+            lastActivityMs: yield* Clock.currentTimeMillis,
+            finished: yield* Deferred.make<void>(),
             queuedSteers: new Map(),
             awaitingNative: new Set(),
             compaction: undefined,
           };
           // Installed before the request so nothing Droid sends right after the ack is lost.
           state.activeTurn = turn;
-          yield* request("droid.add_user_message", {
-            text: payload.text,
-            messageId,
-            ...(payload.images.length === 0 ? {} : { images: payload.images }),
-          }).pipe(
-            Effect.onExit((exit) =>
-              Exit.isFailure(exit)
-                ? Effect.sync(() => {
-                    if (state.activeTurn === turn) state.activeTurn = null;
-                  })
-                : Effect.void,
-            ),
-          );
+          if (payload !== undefined) {
+            if (behindWake) turn.queuedSteers.set(messageId, payload.text);
+            yield* request("droid.add_user_message", {
+              text: payload.text,
+              messageId,
+              ...(behindWake ? { queuePlacement: "end_of_turn" } : {}),
+              ...(payload.images.length === 0 ? {} : { images: payload.images }),
+            }).pipe(
+              Effect.onExit((exit) =>
+                Exit.isFailure(exit)
+                  ? Effect.sync(() => {
+                      if (state.activeTurn === turn) state.activeTurn = null;
+                    })
+                  : Effect.void,
+              ),
+            );
+          }
           yield* emit({
             type: "provider_turn.updated",
             driver: DROID_PROVIDER,
@@ -1627,7 +1946,14 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
             lastRunOrdinal: turnInput.runOrdinal,
           });
-          yield* updateProviderSession("running", null, desired.modelId);
+          yield* updateProviderSession("running", null, desired?.modelId);
+          if (wake !== null) {
+            yield* replayWake(wake);
+          } else if (continuation) {
+            // The wake this continuation was for is gone, and with it the work it stood for.
+            yield* settleTurn(state, turn, { kind: "completed", disposition: "reusable" });
+          }
+          if (state.activeTurn === turn) yield* watchTurn(state, turn).pipe(Effect.forkIn(scope));
         }).pipe(permit.withPermits(1));
       });
 
@@ -1647,6 +1973,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             stopRequested = true;
             // Nothing more is sent to a process on its way out.
             ended = true;
+            // The kill is a process exit: a wake held for the process goes with it.
+            pendingWake = null;
             yield* finishTurn(state, turn, { kind: "interrupted", disposition: "reusable" });
             // Still under the permit, so the end of the event stream is handled after the turn
             // settled and cannot report it as a process exit.
@@ -1663,6 +1991,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       ) {
         const state = threadState;
         const turn = state?.activeTurn ?? null;
+        // Every user Stop asks for a runtime restart, and may arrive after the turn it names has
+        // settled. If Droid is meanwhile running a wake nobody owns, the Stop is meant for that
+        // too: the process dies with it, as Pi's does. Otherwise it has nothing left to stop.
+        if (turn === null && interruptInput.requestRuntimeRestart === true) {
+          return yield* stopPendingWake();
+        }
         if (
           state === null ||
           turn === null ||
@@ -1777,6 +2111,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         yield* rpc.respond(pending.inboundId, reply);
         pendingRequests.delete(key);
+        // Droid has been waiting on t3 and now has the answer: its silence counts from here.
+        pending.turn.lastActivityMs = yield* Clock.currentTimeMillis;
         if (kind.type === "permission" && (decision === "decline" || decision === "cancel")) {
           // Droid reports the declined tool as an error result; that is a refusal, not a failure.
           pending.turn.mapper = {
@@ -1847,11 +2183,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       };
 
       /**
-       * True while a wake is armed for the session: a background task whose completion would start
-       * a turn on its own, so rewinding under it would let that turn land on the wrong history.
-       * Nothing arms a wake yet; whatever does must answer here, and a rollback then refuses.
+       * True while Droid holds a turn it started on its own that no t3 turn owns yet. Rewinding or
+       * forking under it would let that turn land on the wrong history, so both refuse.
        */
-      const wakePending = () => false;
+      const wakePending = () => pendingWake !== null;
 
       /**
        * Moves the thread to a new Droid session that ends just before the first message of the
@@ -2090,7 +2425,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             mapper: { ...opened, nextItemOrdinal: compaction.ordinal + 1 },
             errorMessage: undefined,
             // No native turn runs, so none owes a completion.
+            nativeTurnId: undefined,
             nativeSettled: true,
+            lastActivityMs: yield* Clock.currentTimeMillis,
+            finished: yield* Deferred.make<void>(),
             queuedSteers: new Map(),
             awaitingNative: new Set(),
             compaction,
@@ -2116,9 +2454,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               startedAt,
             ),
           );
+          // A wake that was waiting for a turn lands in this one, as it does in Pi's.
+          if (pendingWake?.state === state) yield* replayWake(pendingWake);
           return compacting;
         }).pipe(permit.withPermits(1));
 
+        yield* watchTurn(state, turn).pipe(Effect.forkIn(scope));
         yield* settleCompaction(state, turn).pipe(Effect.forkIn(scope));
       });
 
@@ -2248,15 +2589,18 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         },
         events: Stream.fromQueue(events),
         backgroundTasksEndWithProcess: true,
+        // A wake counts: Droid has work of its own under way for the thread that no turn owns yet.
         hasPendingBackgroundWork: Effect.sync(
-          () => threadState !== null && backgroundSubagentsOf(threadState).length > 0,
+          () =>
+            pendingWake !== null ||
+            (threadState !== null && backgroundSubagentsOf(threadState).length > 0),
         ),
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(
             () =>
               threadState !== null &&
               threadState.providerThread.id === providerThread.id &&
-              backgroundSubagentsOf(threadState).length > 0,
+              (pendingWake !== null || backgroundSubagentsOf(threadState).length > 0),
           ),
         ensureThread: (threadInput) =>
           ensureThread(threadInput).pipe(
@@ -2404,6 +2748,7 @@ export const DroidAdapterV2Driver: ProviderAdapterDriver<DroidSettings, DroidAda
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        continuationRequests: yield* ProviderContinuationRequests.ProviderContinuationRequests,
       });
     },
     (effect, input) =>

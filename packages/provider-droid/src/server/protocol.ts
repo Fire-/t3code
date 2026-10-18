@@ -352,6 +352,19 @@ export function parseDroidTaskCompletion(text: string): DroidTaskCompletion | un
 }
 
 /**
+ * The id of the `create_message` Droid opens a turn of its own with when a background task ends,
+ * whatever the text says: the native turn that follows carries this id as its `turnId`.
+ */
+export function droidTaskCompletionMessageId(
+  notification: Readonly<Record<string, unknown>>,
+): string | undefined {
+  const message = notification["message"];
+  if (!Predicate.isObject(message)) return undefined;
+  const id = asString(message["id"]);
+  return id !== undefined && id.startsWith(DROID_TASK_COMPLETION_ID_PREFIX) ? id : undefined;
+}
+
+/**
  * The completion a `create_message` notification carries, when it is Droid's background-task
  * message: its id has the `task-completion:` prefix and its text follows the CLI's template. The
  * live role is `system`; a stored one reads as `user`, so the role is not checked.
@@ -360,9 +373,9 @@ export function droidTaskCompletionOf(
   notification: Readonly<Record<string, unknown>>,
 ): DroidTaskCompletion | undefined {
   const message = notification["message"];
-  if (!Predicate.isObject(message)) return undefined;
-  const id = asString(message["id"]);
-  if (id === undefined || !id.startsWith(DROID_TASK_COMPLETION_ID_PREFIX)) return undefined;
+  if (!Predicate.isObject(message) || droidTaskCompletionMessageId(notification) === undefined) {
+    return undefined;
+  }
   return parseDroidTaskCompletion(droidMessageText(message["content"]));
 }
 

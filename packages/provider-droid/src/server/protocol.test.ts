@@ -15,6 +15,7 @@ import {
   droidAskUserQuestionsFromParams,
   droidEditDiffCounts,
   droidMessageText,
+  droidTaskCompletionMessageId,
   droidTaskCompletionOf,
   droidTaskResultReport,
   droidTokenCounts,
@@ -336,6 +337,16 @@ describe("background task completion", () => {
       droidTaskCompletionOf(message("task-completion:abc", "system", "not a report")),
     );
     assert.isUndefined(droidTaskCompletionOf({}));
+  });
+
+  it("names the turn Droid opens for a task report by the message id alone, whatever the text", () => {
+    assert.strictEqual(
+      droidTaskCompletionMessageId(message("task-completion:abc", "system", "not a report")),
+      "task-completion:abc",
+    );
+    assert.isUndefined(droidTaskCompletionMessageId(message("a-user-message", "system", "x")));
+    assert.isUndefined(droidTaskCompletionMessageId({ message: "task-completion:abc" }));
+    assert.isUndefined(droidTaskCompletionMessageId({}));
   });
 
   it("reads a completed report and drops the trailing instructions to the model", () => {

@@ -36,12 +36,18 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
-import { DROID_PROVIDER, DroidAdapterV2Driver, makeDroidAdapterV2 } from "./adapter.ts";
+import {
+  DROID_PROVIDER,
+  DroidAdapterV2Driver,
+  makeDroidAdapterV2,
+  type DroidAdapterV2Options,
+} from "./adapter.ts";
 import { DroidAuthSignal, type DroidAuthSignalService } from "./authSignal.ts";
-import { type FakeDroid } from "./fakeDroid.testkit.ts";
+import { type FakeDroid, type FakeDroidProcess } from "./fakeDroid.testkit.ts";
 
 export const layerTest = Layer.mergeAll(
   NodeServices.layer,
@@ -97,11 +103,13 @@ export const makeAdapter = Effect.fnUntraced(function* (
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   authSignal?: DroidAuthSignalService,
   binaryPath = "droid",
+  continuationRequests?: DroidAdapterV2Options["continuationRequests"],
 ) {
   const make = makeDroidAdapterV2({
     instanceId: DROID_INSTANCE_ID,
     settings: { enabled: true, binaryPath, customModels: [] },
     environment: {},
+    ...(continuationRequests === undefined ? {} : { continuationRequests }),
   }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
   return yield* authSignal === undefined
     ? make
@@ -151,6 +159,8 @@ export interface OpenOptions {
   readonly binaryPath?: string;
   /** Closing it closes the session while the test keeps collecting the events it publishes. */
   readonly sessionScope?: Scope.Closeable;
+  /** Where the adapter offers the continuations Droid starts on its own; without it none is offered. */
+  readonly continuationRequests?: DroidAdapterV2Options["continuationRequests"];
 }
 
 export const openRuntime = Effect.fnUntraced(function* (
@@ -160,7 +170,13 @@ export const openRuntime = Effect.fnUntraced(function* (
   const spawner = options.spawner ?? fake?.spawner;
   assert.isDefined(spawner);
   const adapter =
-    options.adapter ?? (yield* makeAdapter(spawner!, options.authSignal, options.binaryPath));
+    options.adapter ??
+    (yield* makeAdapter(
+      spawner!,
+      options.authSignal,
+      options.binaryPath,
+      options.continuationRequests,
+    ));
   const open = adapter.openSession({
     threadId: THREAD_ID,
     providerSessionId: SESSION_ID,
@@ -262,6 +278,8 @@ export interface TurnOptions {
   readonly effort?: string | undefined;
   readonly text?: string;
   readonly attachments?: ReadonlyArray<ChatAttachment>;
+  /** The turn the orchestrator starts for a continuation the adapter offered. */
+  readonly continuation?: boolean;
 }
 
 const turnInputFor = Effect.fnUntraced(function* (
@@ -285,8 +303,8 @@ const turnInputFor = Effect.fnUntraced(function* (
       messageId: messageIdFor(runOrdinal) as never,
       text: options.text ?? "Hello droid",
       attachments: options.attachments ?? [],
-      createdBy: "user",
-      creationSource: "web",
+      createdBy: options.continuation === true ? "agent" : "user",
+      creationSource: options.continuation === true ? "provider" : "web",
     },
     modelSelection: selection(effortOf(options), options.model ?? MODEL),
     runtimePolicy: policy(runtimeMode, options.interactionMode),
@@ -325,6 +343,89 @@ export const completed = (runOrdinal: number, reason = "completed") => ({
     thinkingTokens: 0,
   },
 });
+
+/** The queue a test reads the adapter's continuation offers from. */
+export const makeOfferQueue = Effect.fnUntraced(function* () {
+  const offers = yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+  const continuationRequests = {
+    offer: (request: ProviderContinuationRequests.ProviderContinuationRequest) =>
+      Queue.offer(offers, request).pipe(Effect.asVoid),
+  };
+  return { offers, continuationRequests };
+});
+
+/** The message Droid starts a turn of its own with when a background task ends. */
+export const wakeMessage = (wakeId: string, text = "Background task completed.") => ({
+  type: "create_message",
+  message: {
+    id: `task-completion:${wakeId}`,
+    role: "system",
+    content: [{ type: "text", text }],
+    visibility: "llm_only",
+  },
+});
+
+export const wakeCompleted = (wakeId: string, reason = "completed") => ({
+  type: "agent_turn_completed",
+  reason,
+  turnId: `task-completion:${wakeId}`,
+  tokenUsage: {
+    inputTokens: 10,
+    outputTokens: 5,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+    thinkingTokens: 0,
+  },
+});
+
+/** One finished assistant message, streamed as Droid does: a delta and then its completion. */
+export const assistantSays = Effect.fnUntraced(function* (
+  process: FakeDroidProcess,
+  messageId: string,
+  text: string,
+) {
+  yield* process.emit({ type: "assistant_text_delta", messageId, blockIndex: 0, textDelta: text });
+  yield* process.emit({ type: "assistant_text_complete", messageId, blockIndex: 0 });
+});
+
+const BACKGROUND_TASK_ID = "5fd3ffdd-4f3f-41c8-8873-e1fd3f6a1378";
+
+/** A background Task subagent: the launch Droid streams and its acknowledgement, so the task runs on. */
+export const launchBackgroundTask = Effect.fnUntraced(function* (process: FakeDroidProcess) {
+  const toolUseId = "chatcmpl-tool-0d8e2c1e5251402e8a35e8edbb902ac5";
+  const task = (input: Record<string, unknown>) => ({
+    type: "tool_call",
+    toolUse: { type: "tool_use", id: toolUseId, name: "Task", input },
+  });
+  yield* process.emit(task({}));
+  yield* process.emit(
+    task({ subagent_type: "worker", description: "dig", prompt: "Dig in.", await: false }),
+  );
+  yield* process.emit({
+    type: "child_session_available",
+    childSessionId: BACKGROUND_TASK_ID,
+    toolUseId,
+    subagentType: "worker",
+    description: "dig",
+  });
+  yield* process.emit({
+    type: "tool_result",
+    toolUseId,
+    content:
+      `Task launched in background.\ntask_id: ${BACKGROUND_TASK_ID}\n` +
+      `session_id: ${BACKGROUND_TASK_ID}\nsubagent_type: worker\ndescription: dig\n` +
+      "The task is running in a subagent session.",
+    isError: false,
+  });
+});
+
+/** The assistant message items the runtime published, in publication order. */
+export const assistantItems = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+  events.flatMap((event) =>
+    event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+      ? [event.turnItem]
+      : [],
+  );
 
 export const isTerminal = (event: ProviderAdapter.ProviderAdapterV2Event) =>
   event.type === "turn.terminal";

@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
@@ -18,6 +19,7 @@ import {
   adapterFromSavedBlock,
   ensure,
   layerTest,
+  makeOfferQueue,
   makeProviderThread,
   messageIdFor,
   methodsOf,
@@ -28,6 +30,7 @@ import {
   requestsOf,
   runTurn,
   startTurn,
+  wakeMessage,
 } from "./adapterHarness.testkit.ts";
 import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid, type FakeDroid } from "./fakeDroid.testkit.ts";
 
@@ -435,6 +438,29 @@ describe("DroidAdapterV2 fork", () => {
         forkError(yield* opened.runtime.forkThread(forkInput(source)).pipe(Effect.flip));
 
         assert.strictEqual(fake.current().methods().length, sent);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-SUB-014] a fork is refused, before anything is sent, while a wake is pending",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* storedSource();
+        const { offers, continuationRequests } = yield* makeOfferQueue();
+        const opened = yield* openRuntime(fake, { continuationRequests });
+        const thread = yield* ensure(opened);
+        const process = fake.current();
+        yield* process.emit(wakeMessage("1f2e3d4c"));
+        yield* process.settle;
+        yield* Queue.take(offers);
+        const { source } = yield* sourceOnStoredSession();
+        const sent = process.methods().length;
+
+        forkError(yield* opened.runtime.forkThread(forkInput(source)).pipe(Effect.flip));
+
+        assert.strictEqual(process.methods().length, sent, "no load_session and no fork_session");
+        assert.deepStrictEqual(requestsOf(fake, "droid.fork_session"), [], "nothing was forked");
+        assert.isTrue(yield* opened.runtime.hasPendingBackgroundWorkForThread!(thread));
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

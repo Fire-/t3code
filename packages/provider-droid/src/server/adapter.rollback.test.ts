@@ -7,6 +7,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
@@ -20,6 +21,7 @@ import {
   ensure,
   isTerminal,
   layerTest,
+  makeOfferQueue,
   makeProviderThread,
   messageIdFor,
   methodsOf,
@@ -36,6 +38,7 @@ import {
   startTurn,
   terminals,
   THREAD_ID,
+  wakeMessage,
   type OpenRuntime,
   type TurnOptions,
 } from "./adapterHarness.testkit.ts";
@@ -484,6 +487,39 @@ describe("DroidAdapterV2 rollback", () => {
 
         assert.isTrue(isRollbackError(failure));
         assert.strictEqual(methodsOf(fake).length, before);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("[VAL-SUB-014] is refused while a wake is pending, with no rewind sent", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const { offers, continuationRequests } = yield* makeOfferQueue();
+        const opened = yield* openRuntime(fake, { runtimeMode: "auto", continuationRequests });
+        const thread = yield* ensure(opened, { runtimeMode: "auto" });
+        yield* runTurn(opened, fake, thread, { runtimeMode: "auto", text: "prompt 1" });
+        yield* runTurn(opened, fake, thread, {
+          runOrdinal: 2,
+          runtimeMode: "auto",
+          text: "prompt 2",
+        });
+        const turns = providerTurnsOf(opened.all);
+        const process = fake.current();
+        yield* process.emit(wakeMessage("9c8b7a6d"));
+        yield* process.settle;
+        yield* Queue.take(offers);
+        const sent = methodsOf(fake).length;
+
+        const failure = yield* opened.runtime
+          .rollbackThread(rollbackToTurn(thread, turns, 1))
+          .pipe(Effect.flip);
+
+        assert.isTrue(isRollbackError(failure));
+        assert.deepStrictEqual(requestsOf(fake, "droid.execute_rewind"), []);
+        assert.strictEqual(methodsOf(fake).length, sent, "nothing at all was sent");
+        assert.deepStrictEqual(
+          refIds(providerThreadUpdates(opened.all)).at(-1),
+          thread.nativeThreadRef?.nativeId,
+        );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
