@@ -45,6 +45,10 @@ import {
 } from "./protocol.ts";
 
 const STDERR_DRAIN_GRACE = Duration.seconds(1);
+const GROUP_POLL_INTERVAL = Duration.millis(25);
+// SIGKILL cannot be refused, but a killed process still shows in the group until it is reaped.
+const GROUP_REAP_GRACE = Duration.seconds(1);
+const REDACTED = "[redacted]";
 
 const DEFAULT_GRACE: DroidRpcGrace = {
   drain: Duration.seconds(2),
@@ -212,6 +216,28 @@ const describeError = (error: unknown): string => {
   return String(error);
 };
 
+/**
+ * Droid inherits `FACTORY_API_KEY` and can echo it in anything it writes, from stderr to a
+ * JSON-RPC error. Everything Droid wrote that reaches an error or a log goes through here.
+ * An empty or whitespace-only key redacts nothing: replacing "" would mangle every character.
+ */
+const makeRedactor = (apiKey: string | undefined) => {
+  const key = apiKey?.trim();
+  const text = (value: string): string => (key ? value.replaceAll(key, REDACTED) : value);
+  // Keys and string leaves only: the input is parsed JSON, so there are no other carriers.
+  const json = (value: unknown): unknown => {
+    if (Predicate.isString(value)) return text(value);
+    if (Array.isArray(value)) return value.map(json);
+    if (Predicate.isObject(value)) {
+      return Object.fromEntries(
+        Object.entries(value).map(([name, item]) => [text(name), json(item)]),
+      );
+    }
+    return value;
+  };
+  return { text, json };
+};
+
 interface PendingRequest {
   readonly method: string;
   readonly deferred: Deferred.Deferred<unknown, DroidRpcRequestError>;
@@ -244,9 +270,21 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
   const spawnError = (cause: unknown) =>
     new DroidRpcSpawnError({ command: options.binaryPath, cause });
 
-  // Droid's own output can echo the key, and the stderr tail ends up in user-visible errors.
-  const apiKey = (options.env?.["FACTORY_API_KEY"] ?? hostEnvironment["FACTORY_API_KEY"])?.trim();
-  const redact = (text: string) => (apiKey ? text.replaceAll(apiKey, "[redacted]") : text);
+  const redactor = makeRedactor(
+    options.env?.["FACTORY_API_KEY"] ?? hostEnvironment["FACTORY_API_KEY"],
+  );
+  const redact = redactor.text;
+  // The one way this module logs, so text from Droid cannot reach a log unredacted.
+  const logDroid =
+    (log: typeof Effect.logWarning) =>
+    (message: string, fields: Readonly<Record<string, string>> = {}) =>
+      log(redact(message)).pipe(
+        Effect.annotateLogs(
+          Object.fromEntries(Object.entries(fields).map(([name, value]) => [name, redact(value)])),
+        ),
+      );
+  const logWarning = logDroid(Effect.logWarning);
+  const logDebug = logDroid(Effect.logDebug);
 
   // Disables the user's hooks for this process only; never inside the project or ~/.factory.
   const settingsDir = yield* fs
@@ -305,13 +343,26 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
   };
 
   /**
-   * Once the original child is gone its pid and group id can be recycled by the OS, so
-   * escalating blindly could deliver SIGKILL to an unrelated process.
+   * A dead leader cannot tell us whether its descendants are alive, and once nothing is left
+   * in the group the OS may recycle the pid, so the first check treats a dead leader as
+   * "nothing to stop". After our own SIGTERM that shortcut is wrong: a descendant can ignore
+   * it and outlive the leader. POSIX never reuses a pid as a process or group id while any
+   * process is still in that group, so a successful group probe still means our group, and
+   * after the leader died it is the only evidence of a survivor.
    */
-  const probeExists = (): boolean => {
+  const probeGroup = (): "alive" | "lingering" | "gone" => {
     try {
-      if (platform === "win32") process.kill(Number(child.pid), 0);
-      else signalProcessGroup(Number(child.pid), 0);
+      signalProcessGroup(Number(child.pid), 0);
+      return "alive";
+    } catch (error) {
+      // macOS answers EPERM, not ESRCH, while a group's only members are zombies awaiting reap.
+      return Predicate.isObject(error) && error.code === "EPERM" ? "lingering" : "gone";
+    }
+  };
+  const probeExists = (): boolean => {
+    if (platform !== "win32") return probeGroup() === "alive";
+    try {
+      process.kill(Number(child.pid), 0);
       return true;
     } catch {
       return false;
@@ -322,14 +373,26 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     Effect.map((running) => !running || !probeExists()),
   );
 
-  const awaitChildExit = child.exitCode.pipe(Effect.ignore, Effect.timeoutOption(grace.terminate));
+  const awaitGroupGone = Effect.gen(function* () {
+    while (probeExists()) yield* Effect.sleep(GROUP_POLL_INTERVAL);
+  });
+  const awaitGroupReaped = Effect.gen(function* () {
+    while (probeGroup() !== "gone") yield* Effect.sleep(GROUP_POLL_INTERVAL);
+  });
 
   const terminatePosixGroup = Effect.gen(function* () {
     if (yield* hasExited) return;
     if (!signalGroup("SIGTERM")) return;
-    yield* awaitChildExit;
-    if (yield* hasExited) return;
+    // The leader can exit first; its descendants then get the rest of the same grace to follow.
+    yield* child.exitCode.pipe(
+      Effect.ignore,
+      Effect.andThen(awaitGroupGone),
+      Effect.timeoutOption(grace.terminate),
+    );
+    if (!probeExists()) return;
     signalGroup("SIGKILL");
+    // Returning before the group is reaped would leave `close` unable to say it left nothing behind.
+    yield* awaitGroupReaped.pipe(Effect.timeoutOption(GROUP_REAP_GRACE));
   });
 
   // Windows has no process groups; `taskkill /T` reaps the whole tree.
@@ -393,7 +456,7 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
           : "unknown exit status";
     const error = new DroidRpcTerminatedError({
       reason: isClosing ? "closed" : reason,
-      detail: isClosing ? `Droid session closed (${exitText})` : `${detail} (${exitText})`,
+      detail: redact(isClosing ? `Droid session closed (${exitText})` : `${detail} (${exitText})`),
       exitCode: exitInfo.code,
       signal: exitInfo.signal,
       stderrTail: yield* readStderrTail,
@@ -410,9 +473,7 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     if (isClosing) {
       yield* Queue.end(events);
     } else {
-      yield* Effect.logWarning("Droid process terminated").pipe(
-        Effect.annotateLogs({ reason, detail: error.detail }),
-      );
+      yield* logWarning("Droid process terminated", { reason, detail: error.detail });
       yield* Queue.fail(events, error);
     }
   });
@@ -445,12 +506,12 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
   const recordPeerVersion = Effect.fnUntraced(function* (version: string) {
     const recorded = yield* Ref.modify(peerVersion, (current) =>
       Option.isNone(current)
-        ? ([true, Option.some(version)] as const)
+        ? ([true, Option.some(redact(version))] as const)
         : ([false, current] as const),
     );
     if (recorded && version !== DROID_PROTOCOL_VERSION && !protocolMismatchWarned) {
       protocolMismatchWarned = true;
-      yield* Effect.logWarning(
+      yield* logWarning(
         `Droid speaks factoryProtocolVersion ${version}; t3 was built against ${DROID_PROTOCOL_VERSION}`,
       );
     }
@@ -468,16 +529,12 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     const id = frame.id;
     if (!Predicate.isString(id)) {
       // Droid answers an envelope it could not parse with `id: null`.
-      yield* Effect.logWarning("Droid rejected a message").pipe(
-        Effect.annotateLogs({ error: describeError(frame.error) }),
-      );
+      yield* logWarning("Droid rejected a message", { error: describeError(frame.error) });
       return;
     }
     const entry = yield* takePending(id);
     if (Option.isNone(entry)) {
-      yield* Effect.logDebug("Dropping Droid response for an unknown or timed-out request").pipe(
-        Effect.annotateLogs({ id }),
-      );
+      yield* logDebug("Dropping Droid response for an unknown or timed-out request", { id });
       return;
     }
     const { deferred, method } = entry.value;
@@ -489,8 +546,10 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
         new DroidRpcResponseError({
           method,
           code: Predicate.isNumber(fields.code) ? fields.code : JSON_RPC_INTERNAL_ERROR,
-          message: Predicate.isString(fields.message) ? fields.message : describeError(error),
-          ...(fields.data === undefined ? {} : { data: fields.data }),
+          message: redact(
+            Predicate.isString(fields.message) ? fields.message : describeError(error),
+          ),
+          ...(fields.data === undefined ? {} : { data: redactor.json(fields.data) }),
         }),
       );
       return;
@@ -526,16 +585,14 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
         ? decodeDroidNotificationParams(frame.params)
         : Option.none();
     if (Option.isNone(params)) {
-      yield* Effect.logWarning("Dropping an unsupported Droid notification").pipe(
-        Effect.annotateLogs({ method: frame.method }),
-      );
+      yield* logWarning("Dropping an unsupported Droid notification", { method: frame.method });
       return;
     }
     const { notification } = params.value;
     if (!isDroidNotificationType(notification.type)) {
-      yield* Effect.logDebug("Dropping a Droid notification of an unknown type").pipe(
-        Effect.annotateLogs({ type: notification.type }),
-      );
+      yield* logDebug("Dropping a Droid notification of an unknown type", {
+        type: notification.type,
+      });
       return;
     }
     if (notification.type === "agent_turn_completed") {
@@ -558,11 +615,9 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
   const route = Effect.fnUntraced(function* (message: unknown) {
     const frame = decodeDroidFrame(message);
     if (Option.isNone(frame)) {
-      yield* Effect.logWarning("Dropping a Droid message that is not a valid frame").pipe(
-        Effect.annotateLogs({
-          type: Predicate.isObject(message) ? String(message.type) : typeof message,
-        }),
-      );
+      yield* logWarning("Dropping a Droid message that is not a valid frame", {
+        type: Predicate.isObject(message) ? String(message.type) : typeof message,
+      });
       return;
     }
     switch (frame.value.type) {
@@ -586,9 +641,7 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
       Ref.update(stderrTail, (current) => (current + chunk).slice(-DROID_STDERR_TAIL_MAX)),
     ),
     Effect.catchCause((cause) =>
-      Effect.logDebug("Droid stderr reader stopped").pipe(
-        Effect.annotateLogs({ cause: Cause.pretty(cause) }),
-      ),
+      logDebug("Droid stderr reader stopped", { cause: Cause.pretty(cause) }),
     ),
     Effect.ensuring(Deferred.succeed(stderrDrained, undefined)),
     Effect.forkIn(scope),

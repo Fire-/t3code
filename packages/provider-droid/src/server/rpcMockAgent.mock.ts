@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -37,11 +38,16 @@ import * as NodePath from "node:path";
  *   `invalid_option`, `no_reply`, `tool_executed`, `session_switch` (from + to ids),
  *   `stdin_eof`, `sigterm`, `exit`.
  * - `DROID_MOCK_PROTOCOL_VERSION`: overrides the outgoing `factoryProtocolVersion` (default 1.269.0).
- * - `DROID_MOCK_LIST_MODELS`: `error` answers `droid.list_models` with a -32603 error; `noreply`
+ * - `DROID_MOCK_LIST_MODELS`: `error` answers `droid.list_models` with a -32603 error (its message
+ *   and data echo `FACTORY_API_KEY` when set, as a failing real Droid may); `noreply`
  *   never answers it (the request hangs until the caller times out and closes); `malformed`
  *   answers with a body that decodes to no models.
  * - `DROID_MOCK_STUBBORN=1`: same as the `STUBBORN` token, from process start.
  * - `DROID_MOCK_SIGTERM=die`: installs no SIGTERM handler, so SIGTERM ends the process by signal.
+ * - `DROID_MOCK_GRANDCHILD=ignore-sigterm`: before reading stdin, spawns a Node process that
+ *   ignores SIGTERM and stays in this process's group (not detached), and logs its pid as a
+ *   `grandchild` entry once it has installed that handler. The first reply therefore proves the
+ *   grandchild is armed. The grandchild outlives this process unless the group is SIGKILLed.
  * - `DROID_MOCK_STATE_DIR`: opt-in directory standing in for Droid's session store, so a later
  *   mock process can `load_session` a session an earlier one created. `<dir>/<sessionId>.json`
  *   is written synchronously on `initialize_session`, on every appended message (before its
@@ -243,14 +249,14 @@ function respond(id: string, result: unknown): void {
   });
 }
 
-function respondError(id: string | null, code: number, message: string): void {
+function respondError(id: string | null, code: number, message: string, data?: unknown): void {
   send({
     jsonrpc: "2.0",
     type: "response",
     factoryApiVersion: API_VERSION,
     factoryProtocolVersion: PROTOCOL_VERSION,
     id,
-    error: { code, message },
+    error: data === undefined ? { code, message } : { code, message, data },
   });
 }
 
@@ -2505,7 +2511,12 @@ function handleRequest(id: string, method: string, params: Json): void {
     // DROID_MOCK_LIST_MODELS drives discovery failure modes for the provider's probe tests.
     const listModelsMode = process.env.DROID_MOCK_LIST_MODELS;
     if (listModelsMode === "error") {
-      respondError(id, -32603, "mock list_models failure");
+      const apiKey = process.env.FACTORY_API_KEY;
+      if (apiKey) {
+        respondError(id, -32603, `mock list_models failure for key ${apiKey}`, { key: apiKey });
+      } else {
+        respondError(id, -32603, "mock list_models failure");
+      }
       return;
     }
     if (listModelsMode === "noreply") {
@@ -2712,6 +2723,25 @@ function handleSigterm(): void {
   exitAfterFlush(0);
 }
 
+const GRANDCHILD_SOURCE =
+  "process.on('SIGTERM',()=>{});process.stdout.write('armed\\n');setInterval(()=>{},1e6)";
+
+/** A tool subprocess that ignores SIGTERM, in this process's group, like a stuck MCP server. */
+function spawnSigtermIgnoringGrandchild(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const grandchild = NodeChildProcess.spawn(process.execPath, ["-e", GRANDCHILD_SOURCE], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    grandchild.once("error", reject);
+    grandchild.stdout.once("data", () => {
+      log({ type: "grandchild", pid: grandchild.pid });
+      grandchild.stdout.destroy();
+      grandchild.unref();
+      resolve();
+    });
+  });
+}
+
 function runRpc(): void {
   hooksDisabled = readSettingsFile();
   // Without a handler SIGTERM kills the process, which is how a real Droid usually dies.
@@ -2724,6 +2754,15 @@ function runRpc(): void {
     summary: { total: 0, connected: 0, connecting: 0, failed: 0, disabled: 0 },
   });
 
+  // Stdin is not read until the grandchild is armed, so no reply can precede its log entry.
+  if (process.env.DROID_MOCK_GRANDCHILD === "ignore-sigterm") {
+    void spawnSigtermIgnoringGrandchild().then(readStdin);
+  } else {
+    readStdin();
+  }
+}
+
+function readStdin(): void {
   let buffer = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk: string) => {

@@ -170,18 +170,44 @@ const groupExists = (pid: number) =>
     }
   });
 
+/** `process.kill(pid, 0)` outcome: "alive" when it succeeds, else the errno code (`ESRCH` once gone). */
+const probeCode = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    return Predicate.isObject(error) ? String(error.code) : String(error);
+  }
+};
+
+/** Cleanup for a test that captured the group of a mock it spawned; never matches by name. */
+const killGroupIfStillThere = (pgid: number) =>
+  Effect.sync(() => {
+    if (probeCode(-pgid) === "alive") process.kill(-pgid, "SIGKILL");
+  });
+
 interface KillCall {
   readonly pid: number;
   readonly signal: string | number | undefined;
 }
 
-/** Replaces `process.kill` so signals aimed at a fake pid can be observed and never delivered. */
-const recordProcessKill = (groupGone: (calls: ReadonlyArray<KillCall>) => boolean) =>
+/**
+ * Replaces `process.kill` so signals aimed at a fake pid can be observed and never delivered.
+ * A probe answers ESRCH once `groupGone` holds, and EPERM while `lingering` holds, as macOS does
+ * for a group whose only members are zombies awaiting reap.
+ */
+const recordProcessKill = (
+  groupGone: (calls: ReadonlyArray<KillCall>) => boolean,
+  lingering: (calls: ReadonlyArray<KillCall>) => boolean = () => false,
+) =>
   Effect.acquireRelease(
     Effect.sync(() => {
       const calls: Array<KillCall> = [];
       const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
         calls.push({ pid, signal });
+        if (signal === 0 && lingering(calls)) {
+          throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+        }
         if (signal === 0 && groupGone(calls)) {
           throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
         }
@@ -284,6 +310,22 @@ const notificationLine = (notification: Record<string, unknown>, sessionId = "se
   factoryProtocolVersion: DROID_PROTOCOL_VERSION,
   method: "droid.session_notification",
   params: { sessionId, notification },
+});
+
+const errorResponseLine = (id: unknown, error: unknown) => ({
+  ...responseLine(id, undefined),
+  result: undefined,
+  error,
+});
+
+type FakeRuntime = Effect.Success<ReturnType<typeof startFakeRuntime>>;
+
+/** Once it returns, the runtime has routed every frame the fake emitted before the call. */
+const roundTrip = Effect.fn("roundTrip")(function* ({ fake, runtime }: FakeRuntime) {
+  const fiber = yield* runtime.request("droid.list_models").pipe(Effect.forkChild);
+  const line = yield* fake.takeWritten;
+  yield* fake.emit(responseLine(line.id, { models: [] }));
+  yield* Fiber.join(fiber);
 });
 
 const inboundRequestLine = (id: string, method: string, params: unknown) => ({
@@ -1402,7 +1444,9 @@ it.layer(NodeServices.layer)("DroidRpcRuntime", (it) => {
     () =>
       Effect.gen(function* () {
         if ((yield* HostProcess.Platform) === "win32") return;
-        const calls = yield* recordProcessKill(() => false);
+        const calls = yield* recordProcessKill((seen) =>
+          seen.some((call) => call.signal === "SIGKILL"),
+        );
         const { scope } = yield* startFakeRuntime({ grace: { terminate: "5 seconds" } });
         const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
         yield* yieldSome;
@@ -1420,6 +1464,7 @@ it.layer(NodeServices.layer)("DroidRpcRuntime", (it) => {
           { pid: -FAKE_PID, signal: "SIGTERM" },
           { pid: -FAKE_PID, signal: 0 },
           { pid: -FAKE_PID, signal: "SIGKILL" },
+          { pid: -FAKE_PID, signal: 0 },
         ]);
       }),
   );
@@ -1455,6 +1500,160 @@ it.layer(NodeServices.layer)("DroidRpcRuntime", (it) => {
       yield* Scope.close(scope, Exit.void);
       assert.deepStrictEqual(calls, []);
     }),
+  );
+
+  it.effect(
+    "[VAL-RPC-004][M2-RPC-GROUP-EXIT] close leaves no descendant behind when SIGTERM kills the leader and a descendant ignores it",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const { mock, runtime } = yield* startMockRuntime(
+          {
+            DROID_MOCK_STUBBORN: "1",
+            DROID_MOCK_SIGTERM: "die",
+            DROID_MOCK_GRANDCHILD: "ignore-sigterm",
+          },
+          { grace: { closeSession: "5 seconds", exit: "100 millis", terminate: "500 millis" } },
+        );
+        // The mock reads stdin only once its grandchild ignores SIGTERM, so a reply proves that.
+        yield* runtime.request("droid.list_models");
+        const log = yield* mock.readLog;
+        const pgid = spawnedPid(log);
+        const grandchildPid = asNumber(log.find((entry) => entry.type === "grandchild")?.pid);
+        yield* Effect.addFinalizer(() => killGroupIfStillThere(pgid));
+        assert.strictEqual(probeCode(grandchildPid), "alive");
+        assert.strictEqual(probeCode(-pgid), "alive");
+
+        const exit = yield* runtime.close;
+
+        assert.deepStrictEqual(exit, { code: null, signal: "SIGTERM" });
+        assert.strictEqual(probeCode(grandchildPid), "ESRCH");
+        assert.strictEqual(probeCode(-pgid), "ESRCH");
+      }).pipe(live),
+  );
+
+  it.effect(
+    "[VAL-RPC-004][M2-RPC-GROUP-EXIT] SIGKILLs a group that outlives its leader once the grace is spent, not before",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const calls = yield* recordProcessKill((seen) =>
+          seen.some((call) => call.signal === "SIGKILL"),
+        );
+        const { fake, scope } = yield* startFakeRuntime({ grace: { terminate: "5 seconds" } });
+        const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+        yield* yieldSome;
+        // The leader dies from the SIGTERM; a descendant that ignores it keeps the group alive.
+        yield* fake.exit(0);
+        yield* yieldSome;
+
+        const signals = () => calls.filter((call) => call.signal !== 0).map((call) => call.signal);
+        assert.deepStrictEqual(signals(), ["SIGTERM"]);
+        yield* TestClock.adjust("4999 millis");
+        yield* yieldSome;
+        assert.deepStrictEqual(signals(), ["SIGTERM"]);
+
+        yield* TestClock.adjust("1 millis");
+        yield* Fiber.join(closing);
+        assert.deepStrictEqual(signals(), ["SIGTERM", "SIGKILL"]);
+        assert.isTrue(calls.every((call) => call.pid === -FAKE_PID));
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-004][M2-RPC-GROUP-EXIT] sends no SIGKILL when the group drains after its leader exited",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        let drained = false;
+        const calls = yield* recordProcessKill(() => drained);
+        const { fake, scope } = yield* startFakeRuntime({ grace: { terminate: "5 seconds" } });
+        const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+        yield* yieldSome;
+        yield* fake.exit(0);
+        yield* yieldSome;
+        assert.isUndefined(closing.pollUnsafe());
+
+        drained = true;
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(closing);
+        assert.deepStrictEqual(
+          calls.filter((call) => call.signal !== 0).map((call) => call.signal),
+          ["SIGTERM"],
+        );
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-004][M2-RPC-GROUP-EXIT] sends no SIGKILL when only zombies are left in the group after SIGTERM",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const calls = yield* recordProcessKill(
+          () => false,
+          (seen) => seen.some((call) => call.signal === "SIGTERM"),
+        );
+        const { scope } = yield* startFakeRuntime({ grace: { terminate: "5 seconds" } });
+        const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+        yield* yieldSome;
+        yield* TestClock.adjust("5 seconds");
+        yield* Fiber.join(closing);
+
+        assert.deepStrictEqual(
+          calls.filter((call) => call.signal !== 0).map((call) => call.signal),
+          ["SIGTERM"],
+        );
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-004][M2-RPC-GROUP-EXIT] returns only once a SIGKILLed group is fully reaped",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        let reaped = false;
+        const calls = yield* recordProcessKill(
+          () => reaped,
+          (seen) => !reaped && seen.some((call) => call.signal === "SIGKILL"),
+        );
+        const { scope } = yield* startFakeRuntime({ grace: { terminate: "5 seconds" } });
+        const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+        yield* yieldSome;
+        yield* TestClock.adjust("5 seconds");
+        yield* yieldSome;
+
+        const signals = () => calls.filter((call) => call.signal !== 0).map((call) => call.signal);
+        assert.deepStrictEqual(signals(), ["SIGTERM", "SIGKILL"]);
+        assert.isUndefined(closing.pollUnsafe(), "the SIGKILLed group has not been reaped yet");
+
+        reaped = true;
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(closing);
+        assert.deepStrictEqual(signals(), ["SIGTERM", "SIGKILL"]);
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-004][M2-RPC-GROUP-EXIT] gives up on a SIGKILLed group that never goes away after a bounded wait",
+    () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const calls = yield* recordProcessKill(
+          () => false,
+          (seen) => seen.some((call) => call.signal === "SIGKILL"),
+        );
+        const { scope } = yield* startFakeRuntime({ grace: { terminate: "5 seconds" } });
+        const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+        yield* yieldSome;
+        yield* TestClock.adjust("5 seconds");
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(closing);
+
+        assert.deepStrictEqual(
+          calls.filter((call) => call.signal !== 0).map((call) => call.signal),
+          ["SIGTERM", "SIGKILL"],
+        );
+      }),
   );
 
   it.effect("[VAL-RPC-014] FACTORY_API_KEY passed in options.env reaches the session process", () =>
@@ -1530,6 +1729,243 @@ it.layer(NodeServices.layer)("DroidRpcRuntime", (it) => {
           }
         }
         assert.isNotEmpty(logs.entries);
+        for (const entry of logs.entries) {
+          assert.notInclude(entry.text, SENTINEL_KEY);
+        }
+      }).pipe(live, logs.provide);
+    },
+  );
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] a JSON-RPC error that echoes the key reaches the caller redacted, in message and data",
+    () => {
+      const logs = captureLogs();
+      return Effect.gen(function* () {
+        const rejected = Effect.fn("rejected")(function* (options: {
+          readonly env?: Record<string, string>;
+        }) {
+          const { fake, runtime } = yield* startFakeRuntime(options);
+          const fiber = yield* runtime
+            .request("droid.add_user_message", { text: "hello" })
+            .pipe(Effect.asVoid, Effect.flip, Effect.forkChild);
+          const line = yield* fake.takeWritten;
+          yield* fake.emit(
+            errorResponseLine(line.id, {
+              code: -32603,
+              message: `authentication failed for key ${SENTINEL_KEY}`,
+              data: {
+                detail: `key ${SENTINEL_KEY}`,
+                nested: [{ [SENTINEL_KEY]: "kept", note: SENTINEL_KEY }],
+                attempts: 2,
+              },
+            }),
+          );
+          const error = yield* Fiber.join(fiber);
+          return error._tag === "DroidRpcResponseError"
+            ? error
+            : assert.fail(`expected a response error, got ${error._tag}`);
+        });
+
+        yield* stubEnv("FACTORY_API_KEY", undefined);
+        const viaOption = yield* rejected({ env: { FACTORY_API_KEY: SENTINEL_KEY } });
+        yield* stubEnv("FACTORY_API_KEY", SENTINEL_KEY);
+        const viaHost = yield* rejected({});
+
+        for (const error of [viaOption, viaHost]) {
+          assert.strictEqual(error.method, "droid.add_user_message");
+          assert.strictEqual(error.code, -32603);
+          assert.strictEqual(error.message, "authentication failed for key [redacted]");
+          assert.deepStrictEqual(error.data, {
+            detail: "key [redacted]",
+            nested: [{ "[redacted]": "kept", note: "[redacted]" }],
+            attempts: 2,
+          });
+          for (const text of [
+            error.message,
+            JSON.stringify(error.data),
+            Cause.pretty(Cause.fail(error)),
+          ]) {
+            assert.notInclude(text, SENTINEL_KEY);
+          }
+        }
+        for (const entry of logs.entries) {
+          assert.notInclude(entry.text, SENTINEL_KEY);
+        }
+      }).pipe(logs.provide);
+    },
+  );
+
+  it.effect("[VAL-RPC-014] an empty or whitespace-only FACTORY_API_KEY redacts nothing", () =>
+    Effect.gen(function* () {
+      for (const key of ["", "   "]) {
+        const { fake, runtime } = yield* startFakeRuntime({ env: { FACTORY_API_KEY: key } });
+        const fiber = yield* runtime
+          .request("droid.update_session_settings", { autonomyLevel: "bogus" })
+          .pipe(Effect.asVoid, Effect.flip, Effect.forkChild);
+        const line = yield* fake.takeWritten;
+        yield* fake.emit(
+          errorResponseLine(line.id, {
+            code: -32602,
+            message: "Invalid autonomy level",
+            data: { field: "autonomyLevel" },
+          }),
+        );
+        const error = yield* Fiber.join(fiber);
+        assert.strictEqual(error._tag, "DroidRpcResponseError");
+        if (error._tag !== "DroidRpcResponseError") return;
+        assert.strictEqual(error.message, "Invalid autonomy level");
+        assert.deepStrictEqual(error.data, { field: "autonomyLevel" });
+      }
+    }),
+  );
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] a non-JSON stdout line that carries the key fails the pending request and the event stream, and is logged, without it",
+    () => {
+      const logs = captureLogs();
+      return Effect.gen(function* () {
+        // V8 quotes a bad line in full only when it is at most 21 characters, so this test
+        // uses a shorter fake key than SENTINEL_KEY for the parser's message to hold the key.
+        const key = "not-a-real-key";
+        const { fake, runtime } = yield* startFakeRuntime({ env: { FACTORY_API_KEY: key } });
+        const events = yield* collectEvents(runtime);
+        const pending = yield* runtime
+          .request("droid.list_models")
+          .pipe(Effect.asVoid, Effect.flip, Effect.forkChild);
+        yield* fake.takeWritten;
+        yield* fake.emitBytes(encoder.encode(`${key} {\n`));
+        yield* fake.exit(1);
+
+        const requestError = yield* Fiber.join(pending);
+        const streamError = yield* takeUntil(events, () => false).pipe(Effect.flip);
+        for (const error of [requestError, streamError]) {
+          if (error._tag !== "DroidRpcTerminatedError") return assert.fail("expected a stop");
+          assert.strictEqual(error.reason, "malformed_output");
+          assert.include(error.detail, `"[redacted] {"`);
+          for (const text of [
+            error.detail,
+            error.message,
+            error.stderrTail,
+            Cause.pretty(Cause.fail(error)),
+          ]) {
+            assert.notInclude(text, key);
+          }
+        }
+        const warning = logs.entries.find((entry) =>
+          entry.text.includes("Droid process terminated"),
+        );
+        assert.include(warning?.text, `"[redacted] {"`);
+        for (const entry of logs.entries) {
+          assert.notInclude(entry.text, key);
+        }
+      }).pipe(logs.provide);
+    },
+  );
+
+  const logsForFrame = Effect.fn("logsForFrame")(function* (frame: unknown) {
+    const logs = captureLogs();
+    yield* Effect.gen(function* () {
+      const started = yield* startFakeRuntime({ env: { FACTORY_API_KEY: SENTINEL_KEY } });
+      yield* started.fake.emit(frame);
+      yield* roundTrip(started);
+    }).pipe(logs.provide);
+    for (const entry of logs.entries) {
+      assert.notInclude(entry.text, SENTINEL_KEY);
+    }
+    return (level: string, message: string) => {
+      const entry = logs.entries.find(
+        (candidate) => candidate.level === level && candidate.text.includes(message),
+      );
+      return entry?.text ?? assert.fail(`no ${level} log containing "${message}"`);
+    };
+  });
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] an error frame without an id that echoes the key is logged without it",
+    () =>
+      Effect.gen(function* () {
+        const logged = yield* logsForFrame(
+          errorResponseLine(null, {
+            code: -32700,
+            message: `Invalid JSON-RPC message for key ${SENTINEL_KEY}`,
+          }),
+        );
+        assert.include(
+          logged("Warn", "Droid rejected a message"),
+          "Invalid JSON-RPC message for key [redacted]",
+        );
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] a notification method that carries the key is logged without it",
+    () =>
+      Effect.gen(function* () {
+        const logged = yield* logsForFrame({
+          ...notificationLine({ type: "tool_call" }),
+          method: `droid.${SENTINEL_KEY}`,
+        });
+        assert.include(
+          logged("Warn", "Dropping an unsupported Droid notification"),
+          "method=droid.[redacted]",
+        );
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] a notification type that carries the key is logged without it",
+    () =>
+      Effect.gen(function* () {
+        const logged = yield* logsForFrame(notificationLine({ type: `future_${SENTINEL_KEY}` }));
+        assert.include(
+          logged("Debug", "Dropping a Droid notification of an unknown type"),
+          "type=future_[redacted]",
+        );
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] a frame type that carries the key is logged without it",
+    () =>
+      Effect.gen(function* () {
+        const logged = yield* logsForFrame({ type: `frame_${SENTINEL_KEY}` });
+        assert.include(
+          logged("Warn", "Dropping a Droid message that is not a valid frame"),
+          "type=frame_[redacted]",
+        );
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] a response id that carries the key is logged without it",
+    () =>
+      Effect.gen(function* () {
+        const logged = yield* logsForFrame(responseLine(`stray-${SENTINEL_KEY}`, {}));
+        assert.include(
+          logged("Debug", "Dropping Droid response for an unknown or timed-out request"),
+          "id=stray-[redacted]",
+        );
+      }),
+  );
+
+  it.effect(
+    "[VAL-RPC-014][M2-RPC-DIAGNOSTIC-REDACTION] a protocol version that carries the key is warned about and reported without it",
+    () => {
+      const logs = captureLogs();
+      return Effect.gen(function* () {
+        const rpc = yield* loadFreshRpcModule;
+        const agent = yield* makeRpcMockAgent({ DROID_MOCK_PROTOCOL_VERSION: SENTINEL_KEY });
+        const runtime = yield* rpc.makeDroidRpcRuntime({
+          binaryPath: agent.binaryPath,
+          cwd: agent.projectDir,
+          env: { FACTORY_API_KEY: SENTINEL_KEY },
+        });
+        yield* runtime.request("droid.list_models");
+
+        const warnings = logs.entries.filter((entry) => entry.level === "Warn");
+        assert.lengthOf(warnings, 1);
+        assert.include(warnings[0]?.text, `factoryProtocolVersion [redacted];`);
+        assert.deepStrictEqual(yield* runtime.peerProtocolVersion, Option.some("[redacted]"));
         for (const entry of logs.entries) {
           assert.notInclude(entry.text, SENTINEL_KEY);
         }
