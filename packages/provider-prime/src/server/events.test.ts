@@ -1133,7 +1133,7 @@ describe("primeSessionForkReader", () => {
     { label: "a header without an id", lines: [{ type: "session", version: 3, cwd: SENTINEL }] },
     {
       label: "a v1 session, whose entries Prime gives fresh ids",
-      lines: [header(undefined), { type: "message", message: { role: "user", content: "one" } }],
+      lines: [{ ...header(), version: undefined }, user("one")],
     },
     {
       label: "a session format newer than Prime 1.0.0's",
