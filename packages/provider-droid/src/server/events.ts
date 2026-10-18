@@ -122,6 +122,10 @@ export interface DroidMapperState {
   readonly tools: ReadonlyMap<string, ToolState>;
   /** The model the latest assistant message ran on (Droid may reroute a request). */
   readonly assistantModel: DroidAssistantModel | undefined;
+  /** The model this turn asked for; undefined for the router, which picks its own. */
+  readonly requestedModelId: string | undefined;
+  /** Models already announced as a reroute this turn, so each is announced once. */
+  readonly reroutedModels: ReadonlySet<string>;
   /** Session-wide counts at turn start and now; undefined while unknown. */
   readonly turnBaseline: DroidTokenCounts | undefined;
   readonly sessionUsage: DroidTokenCounts | undefined;
@@ -156,6 +160,7 @@ export function createDroidTurnState(input: {
   readonly firstItemOrdinal: number;
   readonly sessionUsage?: DroidTokenCounts | undefined;
   readonly contextUsage?: ThreadTokenUsageSnapshot | undefined;
+  readonly requestedModelId?: string | undefined;
 }): DroidMapperState {
   return {
     nextItemOrdinal: input.firstItemOrdinal,
@@ -163,6 +168,8 @@ export function createDroidTurnState(input: {
     generations: new Map(),
     tools: new Map(),
     assistantModel: undefined,
+    requestedModelId: input.requestedModelId,
+    reroutedModels: new Set(),
     turnBaseline: input.sessionUsage,
     sessionUsage: input.sessionUsage,
     contextUsage: input.contextUsage,
@@ -510,6 +517,55 @@ function assistantModelOf(message: Readonly<Record<string, unknown>>): DroidAssi
 }
 
 /**
+ * Droid may answer a request with another model than the one asked for. The first reply of each
+ * such model in a turn gets one notice; the router asks for no model, so it never reroutes.
+ */
+function rerouteNotice(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  answeredBy: DroidAssistantModel,
+  now: DateTime.Utc,
+): DroidMapResult | undefined {
+  const { modelId, apiProvider } = answeredBy;
+  const requested = state.requestedModelId;
+  if (
+    requested === undefined ||
+    modelId === undefined ||
+    modelId === requested ||
+    state.reroutedModels.has(modelId)
+  ) {
+    return undefined;
+  }
+  const message = `Droid answered with ${modelId}${
+    apiProvider === undefined ? "" : ` (${apiProvider})`
+  } instead of the requested ${requested}.`;
+  const nativeItemId = `${ctx.providerTurn.id}:reroute:${modelId}`;
+  const ordinal = state.nextItemOrdinal;
+  return {
+    state: {
+      ...state,
+      nextItemOrdinal: ordinal + 1,
+      reroutedModels: new Set([...state.reroutedModels, modelId]),
+    },
+    events: [
+      nodeEvent(ctx, nativeItemId, "system", "completed", now, now),
+      {
+        type: "turn_item.updated",
+        driver: DROID_DRIVER,
+        turnItem: {
+          ...itemBase(ctx, nativeItemId, ordinal, now, now),
+          status: "completed",
+          title: message,
+          completedAt: now,
+          type: "system_notice",
+          message,
+        },
+      },
+    ],
+  };
+}
+
+/**
  * The committed assistant message settles what streaming left open and surfaces text blocks
  * that never streamed. Reasoning is only ever shown from its stream.
  */
@@ -528,12 +584,18 @@ function mapCreateMessage(
   ) {
     return unchanged(state);
   }
-  let next: DroidMapperState = { ...state, assistantModel: assistantModelOf(message) };
+  const answeredBy = assistantModelOf(message);
+  let next: DroidMapperState = { ...state, assistantModel: answeredBy };
+  const events: Array<ProviderAdapterV2Event> = [];
+  const reroute = rerouteNotice(next, ctx, answeredBy, now);
+  if (reroute !== undefined) {
+    events.push(...reroute.events);
+    next = reroute.state;
+  }
   const messageId = asTrimmed(message["id"]);
   const content = message["content"];
-  if (messageId === undefined || !Array.isArray(content)) return { state: next, events: [] };
+  if (messageId === undefined || !Array.isArray(content)) return { state: next, events };
 
-  const events: Array<ProviderAdapterV2Event> = [];
   content.forEach((entry, blockIndex) => {
     if (!Predicate.isObject(entry)) return;
     const kind =
@@ -1123,6 +1185,52 @@ function mapTurnCompleted(
     },
     events: snapshot === undefined ? [] : [threadUsageEvent(ctx, snapshot, now)],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Compaction
+// ---------------------------------------------------------------------------
+
+export type DroidCompactionStatus = "running" | "completed" | "failed" | "cancelled";
+
+const COMPACTION_TITLE: Readonly<Record<DroidCompactionStatus, string>> = {
+  running: "Compacting context...",
+  completed: "Context compacted",
+  failed: "Context compaction failed",
+  cancelled: "Context compaction stopped",
+};
+
+/**
+ * The compaction item of a compaction turn and its node. The adapter asks for the compaction and
+ * owns when it settles, so the same `ordinal` and `startedAt` go with every status of one run.
+ */
+export function droidCompactionEvents(
+  ctx: DroidEventContext,
+  compaction: {
+    readonly ordinal: number;
+    readonly status: DroidCompactionStatus;
+    readonly startedAt: DateTime.Utc;
+  },
+  now: DateTime.Utc,
+): ReadonlyArray<ProviderAdapterV2Event> {
+  const { ordinal, status, startedAt } = compaction;
+  const nativeItemId = `compaction:${ctx.providerTurn.id}:${ordinal}`;
+  const completedAt = status === "running" ? null : now;
+  return [
+    nodeEvent(ctx, nativeItemId, "system", status, startedAt, completedAt),
+    {
+      type: "turn_item.updated",
+      driver: DROID_DRIVER,
+      turnItem: {
+        ...itemBase(ctx, nativeItemId, ordinal, startedAt, now),
+        status,
+        title: COMPACTION_TITLE[status],
+        completedAt,
+        type: "compaction",
+        driver: DROID_DRIVER,
+      },
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------

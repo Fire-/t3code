@@ -8,7 +8,8 @@
  * saw (`droidHistoryTurns`, with `droidRewindMessageId` to pick a rewind point in them). A rollback
  * t3 asks for does not read the stored list: the provider turns t3 recorded already carry the
  * message ids (`droidRollbackMessageId`), and a steer Droid ran as a native turn of its own stays
- * with the t3 turn it belongs to.
+ * with the t3 turn it belongs to. A fork reads the stored ids once, to tell the recorded turns
+ * the history still holds from the ones a rollback removed (`droidForkRewindMessageId`).
  */
 import type { OrchestrationV2ProviderRef } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
@@ -141,4 +142,41 @@ export function droidRewindMessageId(
   if (target.type === "thread_start") return turns[0]?.messageId;
   const index = turns.findIndex((turn) => turn.messageId === target.messageId);
   return index < 0 ? undefined : turns[index + 1]?.messageId;
+}
+
+/** Every message id of a stored history, plumbing included. Ids only: no content leaves here. */
+export function droidMessageIds(messages: unknown): ReadonlySet<string> {
+  const ids = new Set<string>();
+  if (!Array.isArray(messages)) return ids;
+  for (const message of messages) {
+    const id = Predicate.isObject(message) ? idOf(message["id"]) : undefined;
+    if (id !== undefined) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * The message `execute_rewind` takes to cut a fork just after the target turn: the user message of
+ * the first later turn the stored history still holds. The recorded turns include ones a rollback
+ * removed and compaction turns that began with no user message, so a turn only counts when it
+ * has a strong ref whose id `sourceMessageIds` lists. `null` when no such turn follows (the fork
+ * already ends at the target) or when there is no target (a fork from the head).
+ */
+export function droidForkRewindMessageId(input: {
+  readonly targetOrdinal: number | undefined;
+  readonly providerThreadTurns: ReadonlyArray<{
+    readonly ordinal: number;
+    readonly nativeTurnRef: OrchestrationV2ProviderRef | null;
+  }>;
+  readonly sourceMessageIds: ReadonlySet<string>;
+}): string | null {
+  const { targetOrdinal } = input;
+  if (targetOrdinal === undefined) return null;
+  for (const turn of input.providerThreadTurns.toSorted((a, b) => a.ordinal - b.ordinal)) {
+    const ref = turn.nativeTurnRef;
+    if (turn.ordinal <= targetOrdinal || ref === null) continue;
+    if (ref.strength !== "strong" || ref.nativeId === null) continue;
+    if (input.sourceMessageIds.has(ref.nativeId)) return ref.nativeId;
+  }
+  return null;
 }

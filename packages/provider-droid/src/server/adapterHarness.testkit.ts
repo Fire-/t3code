@@ -11,11 +11,13 @@ import {
   ProviderThreadId,
   RunAttemptId,
   RunId,
+  ServerSettings,
   ThreadId,
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -29,13 +31,15 @@ import * as Queue from "effect/Queue";
 import * as References from "effect/References";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
-import { DROID_PROVIDER, makeDroidAdapterV2 } from "./adapter.ts";
+import { DROID_PROVIDER, DroidAdapterV2Driver, makeDroidAdapterV2 } from "./adapter.ts";
 import { DroidAuthSignal, type DroidAuthSignalService } from "./authSignal.ts";
 import { type FakeDroid } from "./fakeDroid.testkit.ts";
 
@@ -102,6 +106,38 @@ export const makeAdapter = Effect.fnUntraced(function* (
   return yield* authSignal === undefined
     ? make
     : make.pipe(Effect.provideService(DroidAuthSignal, authSignal));
+});
+
+const SAVED_BLOCK = {
+  driver: "droid",
+  enabled: true,
+  config: { binaryPath: "droid", customModels: [] },
+};
+
+/** The adapter a restart builds: the saved `droid` provider instance block through the driver. */
+export const adapterFromSavedBlock = Effect.fnUntraced(function* (fake: FakeDroid) {
+  const settings = yield* Schema.decodeEffect(ServerSettings)({
+    providerInstances: { droid: SAVED_BLOCK },
+  });
+  const saved = settings.providerInstances[DROID_INSTANCE_ID];
+  if (saved === undefined || !Predicate.isObject(saved.config)) {
+    return assert.fail("the saved droid block did not decode");
+  }
+  const config = yield* Schema.decodeEffect(DroidAdapterV2Driver.configSchema)({
+    enabled: saved.enabled,
+    ...saved.config,
+  });
+  return yield* DroidAdapterV2Driver.create({
+    instanceId: DROID_INSTANCE_ID,
+    displayName: undefined,
+    accentColor: undefined,
+    enabled: saved.enabled ?? false,
+    environment: [],
+    config,
+  }).pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner),
+    Effect.provideService(HostProcess.Environment, {}),
+  );
 });
 
 export interface OpenOptions {
@@ -228,16 +264,15 @@ export interface TurnOptions {
   readonly attachments?: ReadonlyArray<ChatAttachment>;
 }
 
-export const startTurn = Effect.fnUntraced(function* (
-  runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+const turnInputFor = Effect.fnUntraced(function* (
   providerThread: OrchestrationV2ProviderThread,
-  options: TurnOptions = {},
+  options: TurnOptions,
 ) {
   const runOrdinal = options.runOrdinal ?? 1;
   const runtimeMode = options.runtimeMode ?? "approval-required";
   const appThread = yield* makeAppThread(runtimeMode);
   const runId = runIdFor(runOrdinal);
-  yield* runtime.startTurn({
+  return {
     appThread,
     threadId: THREAD_ID,
     runId,
@@ -255,7 +290,27 @@ export const startTurn = Effect.fnUntraced(function* (
     },
     modelSelection: selection(effortOf(options), options.model ?? MODEL),
     runtimePolicy: policy(runtimeMode, options.interactionMode),
-  });
+  } satisfies ProviderAdapter.ProviderAdapterV2TurnInput;
+});
+
+export const startTurn = Effect.fnUntraced(function* (
+  runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+  providerThread: OrchestrationV2ProviderThread,
+  options: TurnOptions = {},
+) {
+  yield* runtime.startTurn(yield* turnInputFor(providerThread, options));
+});
+
+/** The turn the orchestrator starts for a `/compact` message. */
+export const compactTurn = Effect.fnUntraced(function* (
+  runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+  providerThread: OrchestrationV2ProviderThread,
+  options: TurnOptions = {},
+) {
+  if (runtime.compactThread === undefined) return assert.fail("the runtime has no compactThread");
+  yield* runtime.compactThread(
+    yield* turnInputFor(providerThread, { text: "/compact", ...options }),
+  );
 });
 
 export const completed = (runOrdinal: number, reason = "completed") => ({
@@ -280,15 +335,24 @@ export const terminals = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV
 /** `ensureThread` for a fresh thread, then a bound provider thread row. */
 export const ensure = Effect.fnUntraced(function* (
   { runtime }: OpenRuntime,
-  options: { readonly runtimeMode?: RuntimeMode; readonly effort?: string | undefined } = {},
+  options: {
+    readonly runtimeMode?: RuntimeMode;
+    readonly effort?: string | undefined;
+    readonly model?: string;
+  } = {},
 ) {
   const existing = yield* makeProviderThread();
   return yield* runtime.ensureThread({
     threadId: THREAD_ID,
-    modelSelection: selection(effortOf(options)),
+    modelSelection: selection(effortOf(options), options.model ?? MODEL),
     runtimePolicy: policy(options.runtimeMode),
     existingProviderThread: existing,
   });
+});
+
+/** `resumeThread` for a stored session: a bound provider thread row on `nativeId`. */
+export const resume = Effect.fnUntraced(function* ({ runtime }: OpenRuntime, nativeId: string) {
+  return yield* runtime.resumeThread({ providerThread: yield* makeProviderThread(nativeId) });
 });
 
 /** The items whose latest published state is still in flight. */
@@ -307,6 +371,34 @@ export const openItems = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV
 export const sessionStatuses = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
   events.flatMap((event) =>
     event.type === "provider_session.updated" ? [event.providerSession.status] : [],
+  );
+
+export type Events = ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
+
+/** The latest published state of each provider turn, oldest first. */
+export const providerTurnsOf = (events: Events): ReadonlyArray<OrchestrationV2ProviderTurn> => {
+  const latest = new Map<string, OrchestrationV2ProviderTurn>();
+  for (const event of events) {
+    if (event.type === "provider_turn.updated")
+      latest.set(event.providerTurn.id, event.providerTurn);
+  }
+  return [...latest.values()];
+};
+
+export const providerThreadUpdates = (events: Events) =>
+  events.flatMap((event) =>
+    event.type === "provider_thread.updated" ? [event.providerThread] : [],
+  );
+
+export const refIds = (threads: ReadonlyArray<OrchestrationV2ProviderThread>) =>
+  threads.map((thread) => thread.nativeThreadRef?.nativeId);
+
+/** Waits for the `provider_thread.updated` that moves the thread to session `nativeId`. */
+export const awaitRef = (opened: OpenRuntime, nativeId: string) =>
+  opened.takeEvent(
+    (event) =>
+      event.type === "provider_thread.updated" &&
+      event.providerThread.nativeThreadRef?.nativeId === nativeId,
   );
 
 export const methodsOf = (fake: FakeDroid) => fake.current().methods();

@@ -20,6 +20,7 @@ import {
   type DroidEventContext,
   type DroidMapperState,
   createDroidTurnState,
+  droidCompactionEvents,
   droidTurnTokenUsage,
   flushDroidStreams,
   mapDroidNotification,
@@ -1587,5 +1588,111 @@ describe("mapDroidProposedPlan", () => {
       [PlanId.make("plan-2"), "active"],
     ]);
     assert.strictEqual(second.state.nextItemOrdinal, 103);
+  });
+});
+
+describe("model reroute notice [VAL-HIST-014]", () => {
+  const REQUESTED = "claude-opus-5-5";
+  const answered = (modelId: string | undefined, id = MESSAGE_ID, apiProvider?: string) =>
+    ({
+      type: "create_message",
+      message: {
+        id,
+        role: "assistant",
+        ...(modelId === undefined ? {} : { modelId }),
+        ...(apiProvider === undefined ? {} : { apiProvider }),
+        content: [{ type: "text", text: `answer ${id}` }],
+      },
+    }) satisfies Notification;
+  const requestedState = () =>
+    createDroidTurnState({ firstItemOrdinal: 101, requestedModelId: REQUESTED });
+  const notices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+    turnItems(events).flatMap((item) => (item.type === "system_notice" ? [item] : []));
+
+  it("[VAL-HIST-014] a reply from another model emits one system_notice naming it", () => {
+    const { events } = feed([answered("gpt-5-codex", MESSAGE_ID, "openai")], {
+      state: requestedState(),
+    });
+    const [notice, ...others] = notices(events);
+    assert.strictEqual(others.length, 0);
+    assert.isDefined(notice);
+    assert.include(notice?.message, "gpt-5-codex");
+    assert.include(notice?.message, REQUESTED);
+    assert.include(notice?.message, "openai");
+    assert.strictEqual(notice?.status, "completed");
+    assert.include(String(notice?.id), "provider-turn-1");
+    assert.strictEqual(
+      ofType(events, "node.updated").find((event) => event.node.id === notice?.nodeId)?.node.kind,
+      "system",
+    );
+  });
+
+  it("[VAL-HIST-014] later messages from the same rerouted model add no more notices, another model adds one", () => {
+    const { perNotification, state } = feed(
+      [answered("gpt-5-codex", "m1"), answered("gpt-5-codex", "m2")],
+      { state: requestedState() },
+    );
+    assert.strictEqual(notices(perNotification[0] ?? []).length, 1);
+    assert.strictEqual(notices(perNotification[1] ?? []).length, 0);
+    assert.strictEqual(
+      turnItems(perNotification[1] ?? []).some((item) => item.type === "assistant_message"),
+      true,
+      "the reply itself still surfaces",
+    );
+
+    const next = feed([answered("gemini-3-pro", "m3")], { state });
+    assert.strictEqual(notices(next.events).length, 1);
+    assert.include(notices(next.events)[0]?.message, "gemini-3-pro");
+  });
+
+  it("[VAL-HIST-014] a reply from the requested model, or one that names no model, emits no notice", () => {
+    const { events } = feed([answered(REQUESTED, "m1"), answered(undefined, "m2")], {
+      state: requestedState(),
+    });
+    assert.deepStrictEqual(notices(events), []);
+  });
+
+  it("[VAL-HIST-014] the router picks its own model, so no request names one and nothing is a reroute", () => {
+    const { events } = feed([answered("claude-sonnet-5")], {
+      state: createDroidTurnState({ firstItemOrdinal: 101 }),
+    });
+    assert.deepStrictEqual(notices(events), []);
+  });
+});
+
+describe("compaction item [VAL-HIST-009]", () => {
+  const ctx = context();
+  const startedAt = at(0);
+
+  it("[VAL-HIST-009] a running compaction is a compaction item of the droid driver on a system node", () => {
+    const events = droidCompactionEvents(
+      ctx,
+      { ordinal: 101, status: "running", startedAt },
+      at(1),
+    );
+    const [item] = turnItems(events);
+    assert.strictEqual(item?.type, "compaction");
+    assert.strictEqual(item?.type === "compaction" ? item.driver : undefined, "droid");
+    assert.strictEqual(item?.status, "running");
+    assert.strictEqual(item?.completedAt, null);
+    assert.strictEqual(item?.ordinal, 101);
+    assert.include(String(item?.id), "provider-turn-1");
+    assert.strictEqual(ofType(events, "node.updated")[0]?.node.kind, "system");
+    assert.strictEqual(ofType(events, "node.updated")[0]?.node.status, "running");
+  });
+
+  it("[VAL-HIST-009] settling it keeps the id and ordinal and sets the closing status", () => {
+    const [running] = turnItems(
+      droidCompactionEvents(ctx, { ordinal: 101, status: "running", startedAt }, at(1)),
+    );
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      const events = droidCompactionEvents(ctx, { ordinal: 101, status, startedAt }, at(2));
+      const [item] = turnItems(events);
+      assert.strictEqual(item?.id, running?.id);
+      assert.strictEqual(item?.ordinal, 101);
+      assert.strictEqual(item?.status, status);
+      assert.isNotNull(item?.completedAt);
+      assert.strictEqual(ofType(events, "node.updated")[0]?.node.status, status);
+    }
   });
 });

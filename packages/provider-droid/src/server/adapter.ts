@@ -50,6 +50,7 @@ import { DroidAuthSignal } from "./authSignal.ts";
 import {
   createDroidTurnState,
   DROID_ZERO_COUNTS,
+  droidCompactionEvents,
   mapDroidNotification,
   mapDroidProposedPlan,
   settleDroidTurn,
@@ -58,6 +59,8 @@ import {
   type DroidNotification,
 } from "./events.ts";
 import {
+  droidForkRewindMessageId,
+  droidMessageIds,
   droidRollbackMessageId,
   visibleDroidHistory,
   type DroidHistoryMessage,
@@ -78,12 +81,20 @@ import {
   type DroidApprovalRequest,
   type DroidUserInputRequest,
 } from "./requests.ts";
-import { makeDroidRpcRuntime, makeRedactor, type DroidRpcEvent } from "./rpc.ts";
 import {
+  DroidRpcTerminatedError,
+  makeDroidRpcRuntime,
+  makeRedactor,
+  type DroidRpcEvent,
+} from "./rpc.ts";
+import {
+  droidModelCatalog,
   droidSessionSettings,
   droidSettingsParams,
   echoedDroidAutonomy,
+  resolveDroidModelId,
   sameDroidSessionSettings,
+  type DroidModelInfo,
   type DroidSessionSettings,
 } from "./sessionSettings.ts";
 import { definedDroidEnvironment } from "./status.ts";
@@ -107,8 +118,8 @@ const DroidProviderCapabilitiesV2 = {
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
     canRollbackThread: true,
-    canForkThread: false,
-    canForkFromTurn: false,
+    canForkThread: true,
+    canForkFromTurn: true,
     canForkFromSubagentThread: false,
     exposesNativeThreadId: true,
   },
@@ -218,6 +229,11 @@ interface ActiveDroidTurn {
   readonly queuedSteers: Map<string, string>;
   /** Steers Droid runs as native turns of their own; each owes an `agent_turn_completed`. */
   readonly awaitingNative: Set<string>;
+  /**
+   * Set on a compaction turn until its item settles. The turn has no native turn behind it, so
+   * the item settles with the turn, whichever way that ends.
+   */
+  compaction: { readonly ordinal: number; readonly startedAt: DateTime.Utc } | undefined;
 }
 
 type PendingDroidRequestKind =
@@ -246,6 +262,11 @@ const MAX_ERROR_MESSAGE_CHARS = 1_000;
 
 /** Droid names the session a rewind forks after this. */
 const DROID_REWIND_TITLE = "T3 Code rewind";
+
+/** Droid names the session a fork creates after this, and the rewind of a fork from an earlier turn. */
+const DROID_FORK_TITLE = "T3 Code fork";
+
+const isRpcTerminated = Schema.is(DroidRpcTerminatedError);
 
 const field = (value: unknown, key: string): unknown =>
   Predicate.isObject(value) ? value[key] : undefined;
@@ -424,7 +445,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         providerInstanceId: options.instanceId,
         status: "ready",
         cwd,
-        model: input.modelSelection.model,
+        model: resolveDroidModelId(input.modelSelection.model),
         capabilities: DroidProviderCapabilitiesV2,
         createdAt: now,
         updatedAt: now,
@@ -441,6 +462,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       let threadState: DroidThreadState | null = null;
       /** Unknown until the settings frame of the next turn: `load_session` takes no settings. */
       let applied: DroidSessionSettings | undefined;
+      /** The model list the latest `initialize_session` or `load_session` reported. */
+      let models: ReadonlyArray<DroidModelInfo> | undefined;
       let sessionUsage: DroidTokenCounts | undefined;
       let closing = false;
       let ended = false;
@@ -701,6 +724,27 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         state.activeTurn = null;
         // Before the terminal: no request may outlive the turn it belongs to.
         yield* cancelOpenRequests(!ended);
+        if (turn.compaction !== undefined) {
+          const { ordinal, startedAt } = turn.compaction;
+          turn.compaction = undefined;
+          yield* emitMapped(
+            state,
+            droidCompactionEvents(
+              eventContext(state, turn),
+              {
+                ordinal,
+                startedAt,
+                status:
+                  outcome.kind === "completed"
+                    ? "completed"
+                    : outcome.kind === "failed"
+                      ? "failed"
+                      : "cancelled",
+              },
+              yield* DateTime.now,
+            ),
+          );
+        }
         const completedAt = yield* DateTime.now;
         const settled = settleDroidTurn(
           turn.mapper,
@@ -765,6 +809,24 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
       });
 
+      /** Ends the turn and moves the session to the status the outcome leaves it in. */
+      const settleTurn = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        outcome: TurnOutcome,
+      ) {
+        yield* finishTurn(state, turn, outcome);
+        const lastError = outcome.kind === "failed" ? outcome.failure.message : null;
+        if (outcome.disposition === "broken") {
+          // Droid exits right after this, but the EOF is a separate event: the session must not
+          // look ready or take a turn in between.
+          ended = true;
+          yield* updateProviderSession(closing ? "stopped" : "error", lastError);
+        } else {
+          yield* updateProviderSession("ready", lastError);
+        }
+      });
+
       const settleNativeOutcome = Effect.fnUntraced(function* (
         state: DroidThreadState,
         turn: ActiveDroidTurn,
@@ -778,16 +840,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         } else if (outcome.kind === "completed") {
           yield* authSignal.authenticated;
         }
-        yield* finishTurn(state, turn, outcome);
-        const lastError = outcome.kind === "failed" ? outcome.failure.message : null;
-        if (outcome.disposition === "broken") {
-          // Droid exits right after this, but the EOF is a separate event: the session must not
-          // look ready or take a turn in between.
-          ended = true;
-          yield* updateProviderSession(closing ? "stopped" : "error", lastError);
-        } else {
-          yield* updateProviderSession("ready", lastError);
-        }
+        yield* settleTurn(state, turn, outcome);
       });
 
       const handleCompletion = Effect.fnUntraced(function* (
@@ -1074,6 +1127,23 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const settingsFrame = (settings: DroidSessionSettings) =>
         request("droid.update_session_settings", droidSettingsParams(settings));
 
+      /** The settings a turn or thread asks for, against the models and settings the session has. */
+      const desiredSettings = (
+        policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+        modelSelection: ProviderAdapter.ProviderAdapterV2TurnInput["modelSelection"],
+      ) =>
+        droidSessionSettings({
+          runtimeMode: policy.runtimeMode,
+          interactionMode: policy.interactionMode,
+          modelSelection,
+          models,
+          previous: applied,
+        });
+
+      const rememberModels = (result: unknown) => {
+        models = droidModelCatalog(result) ?? models;
+      };
+
       /** Opens a new Droid session carrying `settings` and makes it the thread's session. */
       const startSession = Effect.fnUntraced(function* (
         settings: DroidSessionSettings,
@@ -1097,6 +1167,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           history: [],
           latestPlan: undefined,
         };
+        rememberModels(result);
         applied = settings;
         sessionUsage = DROID_ZERO_COUNTS;
         threadState = state;
@@ -1134,6 +1205,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           history: visibleDroidHistory(field(field(result, "session"), "messages")),
           latestPlan: undefined,
         };
+        rememberModels(result);
         applied = undefined;
         sessionUsage = undefined;
         threadState = state;
@@ -1154,11 +1226,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         threadState = null;
         applied = undefined;
-        const settings = droidSessionSettings({
-          runtimeMode: threadInput.runtimePolicy.runtimeMode,
-          interactionMode: threadInput.runtimePolicy.interactionMode,
-          modelSelection: threadInput.modelSelection,
-        });
+        const settings = desiredSettings(threadInput.runtimePolicy, threadInput.modelSelection);
         const state = yield* startSession(
           settings,
           threadInput.existingProviderThread,
@@ -1233,11 +1301,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
 
         // One frame covers runtime mode, interaction mode, model, and effort; `applied` is set
         // first so the echoes Droid sends for this very frame refine it rather than race it.
-        const desired = droidSessionSettings({
-          runtimeMode: turnInput.runtimePolicy.runtimeMode,
-          interactionMode: turnInput.runtimePolicy.interactionMode,
-          modelSelection: turnInput.modelSelection,
-        });
+        const desired = desiredSettings(turnInput.runtimePolicy, turnInput.modelSelection);
         if (applied === undefined || !sameDroidSessionSettings(applied, desired)) {
           applied = desired;
           yield* settingsFrame(desired).pipe(
@@ -1289,11 +1353,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               firstItemOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
               sessionUsage,
               contextUsage: state.providerThread.contextUsage ?? undefined,
+              requestedModelId: desired.router ? undefined : desired.modelId,
             }),
             errorMessage: undefined,
             nativeSettled: false,
             queuedSteers: new Map(),
             awaitingNative: new Set(),
+            compaction: undefined,
           };
           // Installed before the request so nothing Droid sends right after the ack is lost.
           state.activeTurn = turn;
@@ -1321,7 +1387,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
             lastRunOrdinal: turnInput.runOrdinal,
           });
-          yield* updateProviderSession("running", null, turnInput.modelSelection.model);
+          yield* updateProviderSession("running", null, desired.modelId);
         }).pipe(permit.withPermits(1));
       });
 
@@ -1347,9 +1413,16 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           );
         // Set before the request: Droid's cancel answers can arrive before the reply does.
         yield* markInterruptRequested(true);
-        yield* request("droid.interrupt_session", {}).pipe(
-          Effect.tapError(() => markInterruptRequested(false)),
-        );
+        const stop = request("droid.interrupt_session", {});
+        yield* turn.compaction === undefined
+          ? stop.pipe(Effect.tapError(() => markInterruptRequested(false)))
+          : // No native turn runs during a compaction, so Droid may have nothing to stop; the
+            // t3 turn ends either way.
+            stop.pipe(
+              Effect.catch((error) =>
+                logDebug(`Droid did not stop the compaction: ${describeFailure(error)}`),
+              ),
+            );
         yield* permit.withPermits(1)(
           Effect.gen(function* () {
             if (state.activeTurn !== turn) return;
@@ -1384,6 +1457,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           const state = threadState;
           if (state === null || state.activeTurn !== target || ended || closing) {
             return yield* notActive();
+          }
+          if (target.compaction !== undefined) {
+            return yield* protocolError("Droid takes no message while it compacts the session");
           }
           // No turn item here: the orchestrator already records the steer's user_message under
           // this message id, and an adapter item with the same id would overwrite its intent
@@ -1502,6 +1578,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         return threadSnapshot(state);
       });
 
+      const newSessionIdOf = (method: string, result: unknown) => {
+        const newSessionId = field(result, "newSessionId");
+        return Predicate.isString(newSessionId) && newSessionId.length > 0
+          ? Effect.succeed(newSessionId)
+          : Effect.fail(protocolError(`${method} returned no newSessionId`));
+      };
+
       /**
        * True while a wake is armed for the session: a background task whose completion would start
        * a turn on its own, so rewinding under it would let that turn land on the wrong history.
@@ -1559,27 +1642,14 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             return threadSnapshot(hosted);
           }
 
-          const settings =
-            applied ??
-            droidSessionSettings({
-              runtimeMode: input.runtimePolicy.runtimeMode,
-              interactionMode: input.runtimePolicy.interactionMode,
-              modelSelection: input.modelSelection,
-            });
+          const settings = applied ?? desiredSettings(input.runtimePolicy, input.modelSelection);
           const rewind = request("droid.execute_rewind", {
             sessionId: sourceId,
             messageId,
             filesToRestore: [],
             filesToDelete: [],
             forkTitle: DROID_REWIND_TITLE,
-          }).pipe(
-            Effect.flatMap((result) => {
-              const newSessionId = field(result, "newSessionId");
-              return Predicate.isString(newSessionId) && newSessionId.length > 0
-                ? Effect.succeed(newSessionId)
-                : Effect.fail(protocolError("execute_rewind returned no newSessionId"));
-            }),
-          );
+          }).pipe(Effect.flatMap((result) => newSessionIdOf("execute_rewind", result)));
           // The cut falls before the first user message, which Droid may refuse to rewind to. The
           // thread then moves to an empty session, the same state with nothing before it.
           const rewoundId =
@@ -1614,6 +1684,299 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             ),
           );
           return threadSnapshot(rewound);
+        }).pipe(permit.withPermits(1));
+      });
+
+      /**
+       * Moves the thread to the session Droid compacted into. The state is updated in place so the
+       * turn that asked for the compaction stays attached to it.
+       */
+      const switchSession = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        nativeId: string,
+      ) {
+        const result = yield* request("droid.load_session", {
+          sessionId: nativeId,
+          loadAllMessages: true,
+        });
+        rememberModels(result);
+        applied = undefined;
+        state.history = visibleDroidHistory(field(field(result, "session"), "messages"));
+        // The counts belong to the retired session.
+        turn.mapper = { ...turn.mapper, sessionUsage: undefined, turnBaseline: undefined };
+        yield* updateProviderThread(state, { nativeThreadRef: droidRef(nativeId) });
+      });
+
+      /**
+       * Waits for Droid's answer to `compact_session`, then settles the compaction turn. A stop or
+       * an exit that came first has settled it already, and the late answer changes nothing.
+       */
+      const settleCompaction = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+      ) {
+        const exit = yield* Effect.exit(request("droid.compact_session", {}));
+        if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return;
+        yield* Effect.gen(function* () {
+          if (state.activeTurn !== turn) return;
+          if (Exit.isFailure(exit)) {
+            const error = Cause.squash(exit.cause);
+            if (isRpcTerminated(error)) {
+              return yield* settleTurn(
+                state,
+                turn,
+                processExitOutcome(closing, "Droid exited during the compaction."),
+              );
+            }
+            return yield* settleTurn(state, turn, {
+              kind: "failed",
+              failure: makeProviderFailure({
+                message: `Droid context compaction failed: ${redactor
+                  .text(describeFailure(error))
+                  .slice(0, MAX_ERROR_MESSAGE_CHARS)}`,
+                class: "provider_error",
+                code: "compaction_failed",
+                retryable: false,
+              }),
+              disposition: "reusable",
+            });
+          }
+          // Droid keeps the session id unless it moves the conversation to a new session.
+          const newSessionId = field(exit.value, "newSessionId");
+          if (
+            Predicate.isString(newSessionId) &&
+            newSessionId.length > 0 &&
+            newSessionId !== boundNativeId()
+          ) {
+            const switched = yield* Effect.exit(switchSession(state, turn, newSessionId));
+            if (Exit.isFailure(switched)) {
+              const detail = describeFailure(Cause.squash(switched.cause));
+              yield* logWarning(
+                `Droid compacted into session ${newSessionId} but it could not be loaded: ${detail}`,
+              );
+              // The process may serve either session, so nothing more is sent to it.
+              return yield* settleTurn(state, turn, {
+                kind: "failed",
+                failure: makeProviderFailure({
+                  message: "Droid compacted the session but the new session could not be loaded.",
+                  class: "provider_error",
+                  code: "compaction_session_lost",
+                  retryable: false,
+                }),
+                disposition: "broken",
+              });
+            }
+          }
+          yield* settleTurn(state, turn, { kind: "completed", disposition: "reusable" });
+        }).pipe(permit.withPermits(1));
+      });
+
+      /**
+       * Starts a compaction turn. `compact_session` takes no user message, so the provider turn has
+       * no native turn and no message id to rewind to. The turn is open when this returns; the
+       * request runs beside it and settles it, like the events of any other turn.
+       */
+      const compactThread = Effect.fnUntraced(function* (
+        turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+      ) {
+        const state = threadState;
+        if (state === null) return yield* protocolError("Droid session has no registered thread");
+        if (ended) return yield* protocolError("The Droid process has exited");
+        if (state.activeTurn !== null) {
+          return yield* protocolError(
+            `Droid provider thread ${turnInput.providerThread.id} already has an active turn`,
+          );
+        }
+        const sameSession = () =>
+          state.providerThread.nativeThreadRef?.nativeId ===
+          turnInput.providerThread.nativeThreadRef?.nativeId;
+        if (!sameSession()) {
+          return yield* protocolError("Droid compaction requested for a different native session");
+        }
+
+        const turn = yield* Effect.gen(function* () {
+          if (
+            threadState !== state ||
+            state.activeTurn !== null ||
+            ended ||
+            closing ||
+            !sameSession()
+          ) {
+            return yield* protocolError("Droid turn ownership changed before it could start");
+          }
+          const startedAt = yield* DateTime.now;
+          state.providerThread = turnInput.providerThread;
+          const providerTurn: OrchestrationV2ProviderTurn = {
+            id: idAllocator.derive.providerTurn({
+              driver: DROID_PROVIDER,
+              nativeTurnId: `compaction:${String(turnInput.message.messageId)}`,
+            }),
+            providerThreadId: turnInput.providerThread.id,
+            nodeId: turnInput.rootNodeId,
+            runAttemptId: turnInput.attemptId,
+            nativeTurnRef: null,
+            ordinal: turnInput.providerTurnOrdinal,
+            status: "running",
+            startedAt,
+            completedAt: null,
+          };
+          const opened = createDroidTurnState({
+            firstItemOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
+            sessionUsage,
+            contextUsage: state.providerThread.contextUsage ?? undefined,
+          });
+          const compaction = { ordinal: opened.nextItemOrdinal, startedAt };
+          const compacting: ActiveDroidTurn = {
+            turnInput,
+            providerTurn,
+            mapper: { ...opened, nextItemOrdinal: compaction.ordinal + 1 },
+            errorMessage: undefined,
+            // No native turn runs, so none owes a completion.
+            nativeSettled: true,
+            queuedSteers: new Map(),
+            awaitingNative: new Set(),
+            compaction,
+          };
+          state.activeTurn = compacting;
+          yield* emit({
+            type: "provider_turn.updated",
+            driver: DROID_PROVIDER,
+            threadId: turnInput.threadId,
+            providerTurn,
+          });
+          yield* updateProviderThread(state, {
+            status: "active",
+            firstRunOrdinal: state.providerThread.firstRunOrdinal ?? turnInput.runOrdinal,
+            lastRunOrdinal: turnInput.runOrdinal,
+          });
+          yield* updateProviderSession("running", null);
+          yield* emitMapped(
+            state,
+            droidCompactionEvents(
+              eventContext(state, compacting),
+              { ...compaction, status: "running" },
+              startedAt,
+            ),
+          );
+          return compacting;
+        }).pipe(permit.withPermits(1));
+
+        yield* settleCompaction(state, turn).pipe(Effect.forkIn(scope));
+      });
+
+      /**
+       * A fork that fails after the source was loaded leaves the process on the source. The thread
+       * the runtime already hosts gets its session back; if that fails too, nothing is hosted, so
+       * no turn can go to the wrong session.
+       */
+      const returnToHosted = Effect.fnUntraced(function* (hosted: DroidThreadState | null) {
+        const hostedId = hosted?.providerThread.nativeThreadRef?.nativeId;
+        if (hosted === null || hostedId === undefined || hostedId === null) return;
+        applied = undefined;
+        yield* request("droid.load_session", { sessionId: hostedId, loadAllMessages: true }).pipe(
+          Effect.catch((error) =>
+            Effect.sync(() => {
+              if (threadState === hosted) threadState = null;
+            }).pipe(
+              Effect.andThen(
+                logWarning(
+                  `Droid could not return to session ${hostedId} after a failed fork: ${describeFailure(error)}`,
+                ),
+              ),
+            ),
+          ),
+        );
+      });
+
+      /**
+       * Forks the source's Droid session for another thread, cut after the target turn. Droid's
+       * `fork_session` forks whichever session the process holds and leaves the process there, so
+       * the source is loaded first. A fork from an earlier turn then rewinds the copy, which is
+       * another new session; the source is never touched. The thread the runtime hosted before is
+       * replaced: a runtime serves one thread, and the fork's is the one the caller goes on with.
+       */
+      const forkThread = Effect.fnUntraced(function* (
+        forkInput: ProviderAdapter.ProviderAdapterV2ForkThreadInput,
+      ) {
+        const source = forkInput.sourceProviderThread;
+        const sourceId = source.nativeThreadRef?.nativeId;
+        if (sourceId === undefined || sourceId === null) {
+          return yield* protocolError("The source provider thread has no Droid session to fork");
+        }
+        // The turns come unfiltered: those of other provider threads of the same app thread are in
+        // them, and so are turns of runs a rollback removed.
+        const sourceTurns = (forkInput.sourceProviderTurns ?? []).filter(
+          (turn) => turn.providerThreadId === source.id,
+        );
+        const target =
+          forkInput.providerTurnId === undefined
+            ? undefined
+            : sourceTurns.find((turn) => turn.id === forkInput.providerTurnId);
+        if (forkInput.providerTurnId !== undefined && target === undefined) {
+          return yield* protocolError("The fork target is not a turn of the source thread");
+        }
+
+        return yield* Effect.gen(function* () {
+          if (ended || closing) return yield* protocolError("The Droid process has exited");
+          const hosted = threadState;
+          if (hosted?.activeTurn != null) {
+            return yield* protocolError("Cannot fork a Droid session while a turn is active");
+          }
+          if (wakePending()) {
+            return yield* protocolError("Cannot fork a Droid session while a wake is pending");
+          }
+          const load = (sessionId: string) =>
+            request("droid.load_session", { sessionId, loadAllMessages: true });
+
+          const sourceLoaded = yield* load(sourceId).pipe(
+            Effect.tapError((error) =>
+              logWarning(`Droid could not load session ${sourceId}: ${describeFailure(error)}`),
+            ),
+          );
+          // From here the process serves the source, whichever way this ends.
+          const forked = yield* Effect.gen(function* () {
+            const forkedId = yield* request("droid.fork_session", { title: DROID_FORK_TITLE }).pipe(
+              Effect.flatMap((result) => newSessionIdOf("fork_session", result)),
+            );
+            const rewindTo = droidForkRewindMessageId({
+              targetOrdinal: target?.ordinal,
+              providerThreadTurns: sourceTurns,
+              sourceMessageIds: droidMessageIds(field(field(sourceLoaded, "session"), "messages")),
+            });
+            const finalId =
+              rewindTo === null
+                ? forkedId
+                : yield* request("droid.execute_rewind", {
+                    sessionId: forkedId,
+                    messageId: rewindTo,
+                    filesToRestore: [],
+                    filesToDelete: [],
+                    forkTitle: DROID_FORK_TITLE,
+                  }).pipe(Effect.flatMap((result) => newSessionIdOf("execute_rewind", result)));
+            return { finalId, loaded: yield* load(finalId) };
+          }).pipe(Effect.onError(() => returnToHosted(hosted)));
+
+          const providerThread: OrchestrationV2ProviderThread = {
+            ...bindThread(forked.finalId, undefined, forkInput.targetThreadId, yield* DateTime.now),
+            ownerNodeId: forkInput.ownerNodeId ?? null,
+            forkedFrom: {
+              providerThreadId: source.id,
+              ...(forkInput.providerTurnId === undefined
+                ? {}
+                : { providerTurnId: forkInput.providerTurnId }),
+            },
+          };
+          rememberModels(forked.loaded);
+          applied = undefined;
+          sessionUsage = undefined;
+          threadState = {
+            providerThread,
+            activeTurn: null,
+            history: visibleDroidHistory(field(field(forked.loaded, "session"), "messages")),
+            latestPlan: undefined,
+          };
+          return providerThread;
         }).pipe(permit.withPermits(1));
       });
 
@@ -1723,13 +2086,29 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
                 }),
             ),
           ),
+        compactThread: (turnInput) =>
+          compactThread(turnInput).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterTurnStartError({
+                  driver: DROID_PROVIDER,
+                  threadId: turnInput.threadId,
+                  providerThreadId: turnInput.providerThread.id,
+                  runId: turnInput.runId,
+                  cause,
+                }),
+            ),
+          ),
         forkThread: (forkInput) =>
-          Effect.fail(
-            new ProviderAdapter.ProviderAdapterForkThreadError({
-              driver: DROID_PROVIDER,
-              providerThreadId: forkInput.sourceProviderThread.id,
-              cause: protocolError("Droid does not support forking a thread yet"),
-            }),
+          forkThread(forkInput).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterForkThreadError({
+                  driver: DROID_PROVIDER,
+                  providerThreadId: forkInput.sourceProviderThread.id,
+                  cause,
+                }),
+            ),
           ),
       };
       return runtime;

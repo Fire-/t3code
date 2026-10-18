@@ -2,25 +2,21 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   CheckpointId,
   NodeId,
-  ProviderInstanceId,
-  ServerSettings,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 
-import { DROID_PROVIDER, DroidAdapterV2Driver } from "./adapter.ts";
+import { DROID_PROVIDER } from "./adapter.ts";
 import {
+  adapterFromSavedBlock,
+  awaitRef,
   completed,
-  DROID_INSTANCE_ID,
   ensure,
   isTerminal,
   layerTest,
@@ -31,6 +27,9 @@ import {
   openRuntime,
   policy,
   PROVIDER_THREAD_ID,
+  providerThreadUpdates,
+  providerTurnsOf,
+  refIds,
   requestsOf,
   runTurn,
   selection,
@@ -45,7 +44,6 @@ import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid, type FakeDroid } from "./fa
 const isRollbackError = Schema.is(ProviderAdapter.ProviderAdapterRollbackThreadError);
 const isTurnStartError = Schema.is(ProviderAdapter.ProviderAdapterTurnStartError);
 
-type Events = ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
 type RollbackInput = Parameters<
   ProviderAdapter.ProviderAdapterV2SessionRuntime["rollbackThread"]
 >[0];
@@ -59,24 +57,6 @@ const AUTO_SETTINGS = {
   modelId: MODEL,
   reasoningEffort: "high",
 };
-
-/** The latest published state of each provider turn, oldest first. */
-const providerTurnsOf = (events: Events): ReadonlyArray<OrchestrationV2ProviderTurn> => {
-  const latest = new Map<string, OrchestrationV2ProviderTurn>();
-  for (const event of events) {
-    if (event.type === "provider_turn.updated")
-      latest.set(event.providerTurn.id, event.providerTurn);
-  }
-  return [...latest.values()];
-};
-
-const providerThreadUpdates = (events: Events) =>
-  events.flatMap((event) =>
-    event.type === "provider_thread.updated" ? [event.providerThread] : [],
-  );
-
-const refIds = (threads: ReadonlyArray<OrchestrationV2ProviderThread>) =>
-  threads.map((thread) => thread.nativeThreadRef?.nativeId);
 
 const toTurn = (turns: ReadonlyArray<OrchestrationV2ProviderTurn>, ordinal: number) => {
   const turn = turns.find((candidate) => candidate.ordinal === ordinal);
@@ -148,13 +128,6 @@ const turnsOn = Effect.fnUntraced(function* (fake: FakeDroid, count: number) {
   }
   return { opened, thread, turns: providerTurnsOf(opened.all) };
 });
-
-const awaitRef = (opened: OpenRuntime, nativeId: string) =>
-  opened.takeEvent(
-    (event) =>
-      event.type === "provider_thread.updated" &&
-      event.providerThread.nativeThreadRef?.nativeId === nativeId,
-  );
 
 const PLAN_MARKDOWN = "Create `hello.txt` containing `hi`.";
 
@@ -643,37 +616,6 @@ describe("DroidAdapterV2 rollback", () => {
   });
 
   describe("restart after a session-id change", () => {
-    const SAVED_BLOCK = {
-      driver: "droid",
-      enabled: true,
-      config: { binaryPath: "droid", customModels: [] },
-    };
-
-    const adapterFromSavedBlock = Effect.fnUntraced(function* (fake: FakeDroid) {
-      const settings = yield* Schema.decodeEffect(ServerSettings)({
-        providerInstances: { droid: SAVED_BLOCK },
-      });
-      const saved = settings.providerInstances[ProviderInstanceId.make("droid")];
-      if (saved === undefined || !Predicate.isObject(saved.config)) {
-        return assert.fail("the saved droid block did not decode");
-      }
-      const config = yield* Schema.decodeEffect(DroidAdapterV2Driver.configSchema)({
-        enabled: saved.enabled,
-        ...saved.config,
-      });
-      return yield* DroidAdapterV2Driver.create({
-        instanceId: DROID_INSTANCE_ID,
-        displayName: undefined,
-        accentColor: undefined,
-        enabled: saved.enabled ?? false,
-        environment: [],
-        config,
-      }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner),
-        Effect.provideService(HostProcess.Environment, {}),
-      );
-    });
-
     it.effect(
       "[VAL-HIST-007][VAL-CROSS-001] from the saved block: two turns, one rolled back, close and reopen, and the next turn loads the rewound id, re-sends mode and autonomy, and completes",
       () =>

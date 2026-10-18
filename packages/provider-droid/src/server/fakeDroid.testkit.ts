@@ -38,6 +38,8 @@ export type FakeDroidReply =
 export interface FakeDroidSession {
   readonly settings: FakeDroidSettings;
   readonly messages: ReadonlyArray<unknown>;
+  /** What `fork_session` and `execute_rewind` named the session; `load_session` reports it. */
+  readonly title?: string;
 }
 
 export interface FakeDroidOptions {
@@ -55,6 +57,8 @@ export interface FakeDroidOptions {
   ) => ReadonlyArray<FakeDroidSettings>;
   /** Sessions `load_session` can find, keyed by session id. */
   readonly sessions?: Readonly<Record<string, FakeDroidSession>>;
+  /** The model list `initialize_session` and `load_session` report (Droid's `availableModels`). */
+  readonly availableModels?: ReadonlyArray<Readonly<Record<string, unknown>>>;
 }
 
 export interface FakeDroidRequest {
@@ -190,7 +194,7 @@ const makeFakeProcess = Effect.fnUntraced(function* (
     sessionId === undefined ? undefined : store.get(sessionId)?.settings;
 
   const save = (id: string, settings: FakeDroidSettings) =>
-    store.set(id, { settings, messages: store.get(id)?.messages ?? [] });
+    store.set(id, { messages: [], ...store.get(id), settings });
 
   const handle = Effect.fnUntraced(function* (request: FakeDroidRequest) {
     const { id, method, params } = request;
@@ -215,7 +219,7 @@ const makeFakeProcess = Effect.fnUntraced(function* (
             hostId: "fake-host",
             session: { messages: [] },
             settings,
-            availableModels: [],
+            availableModels: options.availableModels ?? [],
           },
         });
         return;
@@ -231,11 +235,11 @@ const makeFakeProcess = Effect.fnUntraced(function* (
         yield* emit({ type: "settings_updated", settings: found.settings }, null);
         yield* respond(id, {
           result: {
-            session: { messages: found.messages, title: "Fake title" },
+            session: { messages: found.messages, title: found.title ?? "Fake title" },
             hasOlderMessages: false,
             hostId: "fake-host",
             settings: found.settings,
-            availableModels: [],
+            availableModels: options.availableModels ?? [],
             workingState: "idle",
           },
         });
@@ -259,7 +263,7 @@ const makeFakeProcess = Effect.fnUntraced(function* (
         const session = sessionId === undefined ? undefined : store.get(sessionId);
         if (sessionId !== undefined && session !== undefined) {
           store.set(sessionId, {
-            settings: session.settings,
+            ...session,
             messages: [
               ...session.messages,
               {
@@ -288,9 +292,11 @@ const makeFakeProcess = Effect.fnUntraced(function* (
         }
         // Like Droid, the rewind forks a new session and leaves the process on the one it holds.
         const created = nextSessionId();
+        const forkTitle = params["forkTitle"];
         store.set(created, {
           settings: source.settings,
           messages: source.messages.slice(0, index),
+          ...(Predicate.isString(forkTitle) ? { title: forkTitle } : {}),
         });
         yield* respond(id, {
           result: {
@@ -300,6 +306,44 @@ const makeFakeProcess = Effect.fnUntraced(function* (
             failedRestoreCount: 0,
             failedDeleteCount: 0,
           },
+        });
+        return;
+      }
+      case "droid.fork_session": {
+        // Like Droid, the session id param is ignored: the process's current session is forked, and
+        // the process stays on it.
+        const source = sessionId === undefined ? undefined : store.get(sessionId);
+        if (source === undefined) {
+          yield* respond(id, { error: { code: -32603, message: "No active session." } });
+          return;
+        }
+        const created = nextSessionId();
+        const title = params["title"];
+        store.set(created, {
+          settings: source.settings,
+          messages: source.messages,
+          ...(Predicate.isString(title) ? { title } : {}),
+        });
+        yield* respond(id, { result: { newSessionId: created } });
+        return;
+      }
+      case "droid.compact_session": {
+        const session = sessionId === undefined ? undefined : store.get(sessionId);
+        if (sessionId === undefined || session === undefined || session.messages.length === 0) {
+          yield* respond(id, {
+            error: { code: -32603, message: "Failed to generate summary for compaction." },
+          });
+          return;
+        }
+        // Default-mode compaction keeps the session id; the divider notification follows the reply.
+        yield* respond(id, {
+          result: { newSessionId: sessionId, removedCount: session.messages.length },
+        });
+        yield* emit({
+          type: "session_compacted",
+          summaryId: "summary-1",
+          removedCount: session.messages.length,
+          visibleBoundaryMessageId: null,
         });
         return;
       }
