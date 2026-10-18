@@ -247,7 +247,7 @@ describe("orchestrator replay fixtures", () => {
   )("runs %s/%s through OrchestratorV2 using deterministic replay", ([, , fixture, provider]) =>
     runFixtureProviderWithRegisteredHarness({
       fixtureName: fixture.name,
-      buildInput: fixture.buildInput,
+      buildInput: provider.buildInput ?? fixture.buildInput,
       driver: provider,
     }),
   );

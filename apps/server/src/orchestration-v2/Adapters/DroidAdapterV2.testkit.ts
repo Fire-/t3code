@@ -130,19 +130,31 @@ function turnMessageId(frame: unknown): string | undefined {
  * Compares a recorded request against the ids the adapter minted for this run, so the
  * correlation Droid recorded holds without pinning counter values or per-run uuids. The id of a
  * `response` the adapter writes back to a Droid request stays exact.
+ *
+ * A recorded message id the replay has already bound names an existing turn (the target of a
+ * rewind), so the adapter must send the id it chose for that turn. An unbound one is a new turn.
  */
-function withAdapterIds(expected: unknown, actual: unknown): unknown {
+function withAdapterIds(
+  expected: unknown,
+  actual: unknown,
+  boundMessageIds: ReadonlyMap<string, string>,
+): unknown {
   if (!isRecord(expected)) return expected;
   const actualId = adapterRequestId(actual);
   const actualMessageId = turnMessageId(actual);
+  const expectedMessageId = turnMessageId(expected);
   const withId =
     adapterRequestId(expected) !== undefined && actualId !== undefined
       ? { ...expected, id: actualId }
       : expected;
-  return isRecord(withId.params) &&
-    turnMessageId(expected) !== undefined &&
-    actualMessageId !== undefined
-    ? { ...withId, params: { ...withId.params, messageId: actualMessageId } }
+  return isRecord(withId.params) && expectedMessageId !== undefined && actualMessageId !== undefined
+    ? {
+        ...withId,
+        params: {
+          ...withId.params,
+          messageId: boundMessageIds.get(expectedMessageId) ?? actualMessageId,
+        },
+      }
     : withId;
 }
 
@@ -257,7 +269,7 @@ class DroidReplayController {
       possible =
         pending &&
         entryProcess(entry) === process.ordinal &&
-        replayValueMatches(withAdapterIds(entry.frame, actual), actual);
+        replayValueMatches(withAdapterIds(entry.frame, actual, this.messageIds), actual);
       if (!possible && pending && startsTurn(entry)) break;
     }
     if (!possible) {
@@ -321,7 +333,8 @@ class DroidReplayController {
       const entry = entries[index]!;
       if (entry.type !== "expect_outbound") return false;
       if (this.consumed.has(index) || entryProcess(entry) !== process.ordinal) continue;
-      if (!replayValueMatches(withAdapterIds(entry.frame, actual), actual)) continue;
+      if (!replayValueMatches(withAdapterIds(entry.frame, actual, this.messageIds), actual))
+        continue;
       const recordedId = adapterRequestId(entry.frame);
       const actualId = adapterRequestId(actual);
       if (recordedId !== undefined && actualId !== undefined) {

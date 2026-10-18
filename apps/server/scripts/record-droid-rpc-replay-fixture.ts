@@ -60,10 +60,16 @@ const DROID_RECORDING_SCENARIOS: Readonly<Record<string, DroidRecordingScenario>
   message_steering: {},
   plan_questions: {},
   proposed_plan: {},
-  // Probes (`droidReplayProbes.ts`) record to /tmp, not to a fixture file. Each restarts the
-  // process between its two turns.
+  thread_rollback: {},
+  thread_rollback_after_stop: { awaitPreviousExit: true },
+  droid_compaction: {},
+  thread_fork_native_prior_turn: {},
+  // Probes (`droidReplayProbes.ts`) record to /tmp, not to a fixture file. The exit_spec_mode
+  // ones restart the process between their two turns.
   exit_spec_mode_off: { awaitPreviousExit: true },
   exit_spec_mode_high: { awaitPreviousExit: true },
+  thread_start_rewind: {},
+  compaction_stop: {},
 };
 
 /** Model turns cost real credits, so only the model agreed for fixtures may record. */
@@ -424,7 +430,7 @@ const record = Effect.gen(function* () {
   const path = yield* Path.Path;
   const droidVersion = yield* readDroidVersion;
   const outputPath = readArgValue("--out") ?? (yield* path.fromFileUrl(variant.transcriptFile));
-  const fixtureInput = fixture.buildInput();
+  const fixtureInput = (variant.buildInput ?? fixture.buildInput)();
 
   const hashesBefore = yield* settingsHashes;
   yield* Console.log(`settings hashes before: ${describeHashes(hashesBefore)}`);

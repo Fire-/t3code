@@ -37,6 +37,8 @@ import { assertClaudeMcpToolPresentationOutput } from "./claude_mcp_tool_present
 import { claudeResultIsErrorInput } from "./claude_result_is_error/input.ts";
 import { assertClaudeResultIsErrorOutput } from "./claude_result_is_error/output.ts";
 import { grokAutoBlockedCommandInput } from "./grok_auto_blocked_command/input.ts";
+import { droidCompactionInput } from "./droid_compaction/input.ts";
+import { assertDroidCompactionOutput } from "./droid_compaction/droid_output.ts";
 import { assertGrokAutoBlockedCommandOutput } from "./grok_auto_blocked_command/output.ts";
 import { grokBackgroundBashInput } from "./grok_background_bash/input.ts";
 import { assertGrokBackgroundBashOutput } from "./grok_background_bash/output.ts";
@@ -152,12 +154,18 @@ import {
 import { assertSubagentV2NestedOutput } from "./subagent_v2_nested/codex_output.ts";
 import { assertSubagentV2NestedApprovalOutput } from "./subagent_v2_nested_approval/codex_output.ts";
 import { subagentV2NestedApprovalInput } from "./subagent_v2_nested_approval/input.ts";
+import { droidThreadForkNativePriorTurnInput } from "./thread_fork_native_prior_turn/droid_input.ts";
+import { assertDroidThreadForkNativePriorTurnOutput } from "./thread_fork_native_prior_turn/droid_output.ts";
 import { assertClaudeThreadRollbackOutput } from "./thread_rollback/claude_output.ts";
 import { assertThreadRollbackOutput } from "./thread_rollback/codex_output.ts";
+import { droidThreadRollbackInput } from "./thread_rollback/droid_input.ts";
+import { assertDroidThreadRollbackOutput } from "./thread_rollback/droid_output.ts";
 import { threadRollbackInput } from "./thread_rollback/input.ts";
 import { assertPiThreadRollbackOutput } from "./thread_rollback/pi_output.ts";
 import { assertThreadRollbackAfterRestartOutput } from "./thread_rollback_after_restart/codex_output.ts";
 import { threadRollbackAfterRestartInput } from "./thread_rollback_after_restart/input.ts";
+import { droidThreadRollbackAfterStopInput } from "./thread_rollback_after_stop/droid_input.ts";
+import { assertDroidThreadRollbackAfterStopOutput } from "./thread_rollback_after_stop/droid_output.ts";
 import { threadRollbackAfterStopInput } from "./thread_rollback_after_stop/input.ts";
 import { assertPiThreadRollbackAfterStopOutput } from "./thread_rollback_after_stop/pi_output.ts";
 import { assertThreadRollbackToStoppedTurnOutput } from "./thread_rollback_to_stopped_turn/codex_output.ts";
@@ -1328,6 +1336,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "droid_compaction",
+    buildInput: droidCompactionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("droid"),
+        transcriptFile: new URL("./droid_compaction/droid_transcript.ndjson", import.meta.url),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidCompactionOutput,
+      },
+    ],
+  },
+  {
     name: "provider_thread_resume",
     buildInput: providerThreadResumeInput,
     providers: [
@@ -1728,6 +1748,13 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiThreadRollbackOutput,
       },
+      {
+        driver: ProviderDriverKind.make("droid"),
+        buildInput: droidThreadRollbackInput,
+        transcriptFile: new URL("./thread_rollback/droid_transcript.ndjson", import.meta.url),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidThreadRollbackOutput,
+      },
     ],
   },
   {
@@ -1758,6 +1785,16 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiThreadRollbackAfterStopOutput,
       },
+      {
+        driver: ProviderDriverKind.make("droid"),
+        buildInput: droidThreadRollbackAfterStopInput,
+        transcriptFile: new URL(
+          "./thread_rollback_after_stop/droid_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidThreadRollbackAfterStopOutput,
+      },
     ],
   },
   {
@@ -1773,6 +1810,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: CODEX_MODEL_SELECTION,
         runtimePolicyOverride: WORKSPACE_NEVER_POLICY,
         assertOutput: assertThreadRollbackToStoppedTurnOutput,
+      },
+    ],
+  },
+  {
+    name: "thread_fork_native_prior_turn",
+    buildInput: droidThreadForkNativePriorTurnInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("droid"),
+        transcriptFile: new URL(
+          "./thread_fork_native_prior_turn/droid_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: DROID_MODEL_SELECTION,
+        assertOutput: assertDroidThreadForkNativePriorTurnOutput,
       },
     ],
   },

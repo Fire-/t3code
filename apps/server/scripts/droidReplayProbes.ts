@@ -12,13 +12,18 @@ import {
   assertSemanticProjectionIntegrity,
   DROID_MODEL_SELECTION,
   projectionFor,
+  THREAD_ROLLBACK_FIRST_PROMPT,
+  THREAD_ROLLBACK_SECOND_PROMPT,
   type OrchestratorReplayFixture,
 } from "../src/orchestration-v2/testkit/fixtures/shared.ts";
+import { droidCompactionLeadSteps } from "../src/orchestration-v2/testkit/fixtures/droid_compaction/input.ts";
+import { DROID_ASSISTANT_REPLIES_PROMPT } from "../src/orchestration-v2/testkit/fixtures/thread_rollback/droid_input.ts";
 import {
   adapterReplyTo,
   DROID_FILE_WRITE_TOOLS,
   DROID_WRITE_TOOLS,
   droidExitSpecModeRequests,
+  droidInitializedSessionId,
   droidNotifications,
   droidProcessStartIndexes,
   droidRequests,
@@ -178,7 +183,161 @@ function exitSpecModeProbe(autonomy: ProbeAutonomy): OrchestratorReplayFixture {
   };
 }
 
+/**
+ * Rewinds a two-turn session to before its first user message, to learn whether Droid accepts
+ * `execute_rewind` there. Either answer is a valid recording: an accepted rewind moves the thread
+ * to the returned session, a refused one makes the adapter start a fresh session.
+ */
+function assertThreadStartRewind(
+  result: OrchestratorV2ScenarioResult,
+  transcript: ProviderReplayTranscript,
+) {
+  const sends = droidRequests(transcript, "add_user_message");
+  assert.lengthOf(sends, 3, "two turns, then the question after the rewind");
+  const rewinds = droidRequests(transcript, "execute_rewind");
+  assert.lengthOf(rewinds, 1, "the rewind to the thread start is tried once");
+  const [rewind] = rewinds;
+  assert.equal(field(rewind!.params, "messageId"), field(sends[0]!.params, "messageId"));
+  assert.equal(field(rewind!.params, "sessionId"), droidInitializedSessionId(transcript));
+
+  const answer = droidResponseTo(transcript, rewind!);
+  const rewoundSessionId = field(answer, "newSessionId");
+  const loads = droidRequests(transcript, "load_session").filter(
+    (request) => request.index > rewind!.index,
+  );
+  const initializes = droidRequests(transcript, "initialize_session");
+  if (typeof rewoundSessionId === "string") {
+    assert.lengthOf(initializes, 1, "an accepted rewind keeps the one session it opened");
+    assert.lengthOf(loads, 1);
+    assert.equal(field(loads[0]!.params, "sessionId"), rewoundSessionId);
+  } else {
+    assert.lengthOf(initializes, 2, "a refused rewind starts a fresh session");
+    assert.lengthOf(loads, 0);
+  }
+
+  assertBaseProjection({
+    result,
+    transcript,
+    runCount: 3,
+    runStatuses: ["rolled_back", "rolled_back", "completed"],
+  });
+  const projection = projectionFor(result, transcript.scenario);
+  assertSemanticProjectionIntegrity(projection);
+  const finalAnswer = projection.turnItems.findLast((item) => item.type === "assistant_message");
+  assert.notInclude(finalAnswer?.text, "first turn complete");
+  assert.notInclude(finalAnswer?.text, "second turn complete");
+}
+
+const threadStartRewindProbe: OrchestratorReplayFixture = {
+  name: "thread_start_rewind",
+  buildInput: () => ({
+    steps: [
+      { type: "message", text: THREAD_ROLLBACK_FIRST_PROMPT },
+      { type: "message", text: THREAD_ROLLBACK_SECOND_PROMPT },
+      { type: "rollback", checkpointScopeSuffix: "root", checkpointSuffix: "0" },
+      { type: "message", text: DROID_ASSISTANT_REPLIES_PROMPT },
+    ],
+  }),
+  providers: [
+    {
+      driver: ProviderDriverKind.make("droid"),
+      transcriptFile: new URL(`file://${PROBE_DIRECTORY}/thread_start_rewind.ndjson`),
+      modelSelection: DROID_MODEL_SELECTION,
+      assertOutput: assertThreadStartRewind,
+    },
+  ],
+};
+
+/**
+ * Stops a compaction as soon as it runs. The adapter ends a stopped compaction turn at once, so
+ * the recording shows whether Droid stops compacting and when it answers `compact_session`
+ * relative to the next turn's frames.
+ */
+function assertCompactionStop(
+  result: OrchestratorV2ScenarioResult,
+  transcript: ProviderReplayTranscript,
+) {
+  const compactions = droidRequests(transcript, "compact_session");
+  assert.lengthOf(compactions, 1);
+  const stops = droidRequests(transcript, "interrupt_session").filter(
+    (request) => request.index > compactions[0]!.index,
+  );
+  assert.lengthOf(stops, 1, "the stop reaches Droid after it was asked to compact");
+  const sends = droidRequests(transcript, "add_user_message");
+  assert.lengthOf(sends, 4, "three turns before the compaction and one after the stop");
+
+  // Droid answers the stop at once but keeps compacting: `compact_session` is answered only after
+  // the next message was sent and acknowledged, and that message's own frames come after it. The
+  // stopped compaction turn is already over by then, so the late answer must settle nothing.
+  const stopAnswer = droidResponseTo(transcript, stops[0]!);
+  assert.isDefined(stopAnswer);
+  const answerIndex = transcript.entries.findIndex(
+    (entry, index) =>
+      index > compactions[0]!.index &&
+      entry.type === "emit_inbound" &&
+      field(entry.frame, "type") === "response" &&
+      field(entry.frame, "id") === compactions[0]!.id,
+  );
+  assert.isAbove(answerIndex, sends[3]!.index, "the compaction is answered after the stop");
+  const sendAnswerIndex = transcript.entries.findIndex(
+    (entry, index) =>
+      index > sends[3]!.index &&
+      entry.type === "emit_inbound" &&
+      field(entry.frame, "type") === "response" &&
+      field(entry.frame, "id") === sends[3]!.id,
+  );
+  assert.isBelow(sendAnswerIndex, answerIndex, "Droid accepted the next message first");
+  const firstFrameOfNextTurn = droidNotifications(transcript, "create_message").find(
+    ({ index }) => index > sends[3]!.index,
+  );
+  assert.isAbove(
+    firstFrameOfNextTurn!.index,
+    answerIndex,
+    "the next turn runs after the compaction",
+  );
+
+  assertBaseProjection({
+    result,
+    transcript,
+    runCount: 5,
+    runStatuses: ["completed", "completed", "completed", "interrupted", "completed"],
+  });
+  const projection = projectionFor(result, transcript.scenario);
+  assertSemanticProjectionIntegrity(projection);
+  const compactionItems = projection.turnItems.filter((item) => item.type === "compaction");
+  assert.deepEqual(
+    compactionItems.map((item) => item.status),
+    ["cancelled"],
+  );
+  assert.equal(
+    projection.turnItems.findLast((item) => item.type === "assistant_message")?.text,
+    "after the stopped compaction",
+  );
+}
+
+const compactionStopProbe: OrchestratorReplayFixture = {
+  name: "compaction_stop",
+  buildInput: () => ({
+    steps: [
+      ...droidCompactionLeadSteps(),
+      { type: "message", text: "/compact" },
+      { type: "interrupt", targetRunIndex: 4, waitForTurnItemType: "compaction" },
+      { type: "message", text: "Respond with exactly: after the stopped compaction" },
+    ],
+  }),
+  providers: [
+    {
+      driver: ProviderDriverKind.make("droid"),
+      transcriptFile: new URL(`file://${PROBE_DIRECTORY}/compaction_stop.ndjson`),
+      modelSelection: DROID_MODEL_SELECTION,
+      assertOutput: assertCompactionStop,
+    },
+  ],
+};
+
 export const DROID_PROBE_FIXTURES: ReadonlyArray<OrchestratorReplayFixture> = [
   exitSpecModeProbe("off"),
   exitSpecModeProbe("high"),
+  threadStartRewindProbe,
+  compactionStopProbe,
 ];
