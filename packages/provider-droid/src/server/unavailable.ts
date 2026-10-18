@@ -1,11 +1,9 @@
 /**
- * Stand-ins so the driver can register before its adapter and text generation
- * exist. They claim no capability and fail every use with the typed error the
- * caller already handles.
+ * Stand-in so the driver can register before its adapter exists. It claims no
+ * capability and fails every use with the typed error the caller already handles.
  */
 import {
   ProviderDriverKind,
-  TextGenerationError,
   type OrchestrationV2ProviderCapabilities,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -13,7 +11,6 @@ import * as Effect from "effect/Effect";
 
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
-import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 
 const DROID_PROVIDER = ProviderDriverKind.make("droid");
 
@@ -124,14 +121,3 @@ export const makeUnavailableDroidAdapter = (instanceId: ProviderInstanceId) =>
         }),
       ),
   });
-
-export const unavailableDroidTextGeneration = TextGenerationOperations.fromRunner(
-  "DroidTextGeneration",
-  (request) =>
-    Effect.fail(
-      new TextGenerationError({
-        operation: request.operation,
-        detail: "Droid text generation is not available yet.",
-      }),
-    ),
-);

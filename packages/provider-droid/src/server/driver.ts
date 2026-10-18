@@ -5,6 +5,7 @@
 import { ProviderDriverKind } from "@t3tools/contracts";
 import { DroidSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -17,7 +18,8 @@ import {
   checkDroidProviderStatus,
   enrichDroidSnapshot,
 } from "./status.ts";
-import { makeUnavailableDroidAdapter, unavailableDroidTextGeneration } from "./unavailable.ts";
+import { makeDroidTextGeneration } from "./textGeneration.ts";
+import { makeUnavailableDroidAdapter } from "./unavailable.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   defaultProviderContinuationIdentity,
@@ -48,6 +50,7 @@ const MANUAL_MAINTENANCE = makeManualOnlyProviderMaintenanceCapabilities({
 export type DroidDriverEnv =
   | ProviderHost.ProviderHost
   | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
   | HttpClient.HttpClient
   | ProviderLatestVersions.ProviderLatestVersions;
 
@@ -78,6 +81,7 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies DroidSettings;
+      const textGeneration = yield* makeDroidTextGeneration(effectiveConfig, processEnv);
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         Effect.succeed(MANUAL_MAINTENANCE),
       );
@@ -128,7 +132,7 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         enabled,
         snapshot,
         orchestrationAdapter: makeUnavailableDroidAdapter(instanceId),
-        textGeneration: unavailableDroidTextGeneration,
+        textGeneration,
       } satisfies ProviderInstance;
     }),
 };
