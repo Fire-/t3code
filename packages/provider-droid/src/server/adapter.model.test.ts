@@ -73,6 +73,16 @@ const frame = (modelId: string, reasoningEffort: string | undefined) => ({
   ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
 });
 
+/** The explicit settings frame of a plan turn in `approval-required` mode. */
+const specFrame = (modelId: string, reasoningEffort: string | undefined) => ({
+  interactionMode: "spec",
+  autonomyLevel: "off",
+  modelId,
+  ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  specModeModelId: modelId,
+  ...(reasoningEffort === undefined ? {} : { specModeReasoningEffort: reasoningEffort }),
+});
+
 describe("DroidAdapterV2 model switch", () => {
   it.effect(
     "[VAL-HIST-011] a different model sends one settings frame before the message and stays on the same process and session",
@@ -247,15 +257,6 @@ describe("DroidAdapterV2 real model ids and the router", () => {
 });
 
 describe("DroidAdapterV2 effort stability after the router", () => {
-  const specFrame = (modelId: string, reasoningEffort: string | undefined) => ({
-    interactionMode: "spec",
-    autonomyLevel: "off",
-    modelId,
-    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-    specModeModelId: modelId,
-    ...(reasoningEffort === undefined ? {} : { specModeReasoningEffort: reasoningEffort }),
-  });
-
   it.effect(
     "[VAL-HIST-012] leaving the router for a model's default effort sends one frame, then an identical turn sends none",
     () =>
@@ -397,6 +398,191 @@ describe("DroidAdapterV2 effort stability after the router", () => {
         assert.deepStrictEqual(settingsFrames(fake), [
           specFrame(MODEL, undefined),
           frame(OTHER_MODEL, undefined),
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
+
+describe("DroidAdapterV2 effort provenance", () => {
+  interface Pick {
+    readonly model: string;
+    readonly effort: string | undefined;
+    readonly interactionMode?: "default" | "plan";
+  }
+
+  /** `effort` left out is no chosen effort at all, which leaves it to the model's own default. */
+  const on = (model: string, effort?: string, interactionMode?: "default" | "plan"): Pick => ({
+    model,
+    effort,
+    ...(interactionMode === undefined ? {} : { interactionMode }),
+  });
+  const router = on("auto");
+  const codex = (effort?: string, interactionMode?: "default" | "plan") =>
+    on(OTHER_MODEL, effort, interactionMode);
+
+  /** The settings frames each turn sent, first turn first. The thread starts on the first pick. */
+  const framesPerTurn = Effect.fnUntraced(function* (first: Pick, later: ReadonlyArray<Pick>) {
+    const fake = yield* makeFakeDroid({ availableModels: MODELS });
+    const opened = yield* openRuntime(fake);
+    const thread = yield* ensure(opened, { model: first.model, effort: first.effort });
+    const perTurn: Array<ReturnType<typeof settingsFrames>> = [];
+    let sent = 0;
+    for (const [index, pick] of [first, ...later].entries()) {
+      yield* runTurn(opened, fake, thread, { runOrdinal: index + 1, ...pick });
+      const frames = settingsFrames(fake);
+      perTurn.push(frames.slice(sent));
+      sent = frames.length;
+    }
+    return { fake, perTurn };
+  });
+
+  it.effect(
+    "[VAL-HIST-012] case 1: a fresh session with no chosen effort sends none, whatever the model's default",
+    () =>
+      Effect.gen(function* () {
+        const { fake, perTurn } = yield* framesPerTurn(codex(), [
+          codex(),
+          codex(undefined, "plan"),
+        ]);
+        const initialize = requestsOf(fake, "droid.initialize_session")[0]?.params;
+        assert.notProperty(initialize, "reasoningEffort");
+        assert.deepStrictEqual(perTurn, [[], [], [specFrame(OTHER_MODEL, undefined)]]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] case 2: leaving the router with no chosen effort sends one frame carrying the model's default",
+    () =>
+      Effect.gen(function* () {
+        const { perTurn } = yield* framesPerTurn(router, [codex()]);
+        assert.deepStrictEqual(perTurn, [[], [frame(OTHER_MODEL, "low")]]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] case 3: an identical turn after the restored default sends no frame",
+    () =>
+      Effect.gen(function* () {
+        const { perTurn } = yield* framesPerTurn(router, [codex(), codex(), codex()]);
+        assert.deepStrictEqual(perTurn, [[], [frame(OTHER_MODEL, "low")], [], []]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] case 4: spec and implement turns after the restored default all carry it, and repeats send none",
+    () =>
+      Effect.gen(function* () {
+        const { perTurn } = yield* framesPerTurn(router, [
+          codex(),
+          codex(undefined, "plan"),
+          codex(undefined, "plan"),
+          codex(undefined, "default"),
+          codex(undefined, "default"),
+        ]);
+        assert.deepStrictEqual(perTurn, [
+          [],
+          [frame(OTHER_MODEL, "low")],
+          [specFrame(OTHER_MODEL, "low")],
+          [],
+          [frame(OTHER_MODEL, "low")],
+          [],
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] case 5: an explicit effort, one equal to the model's default included, is sent when the wire value changes",
+    () =>
+      Effect.gen(function* () {
+        const fresh = yield* framesPerTurn(codex("low"), [
+          codex("low"),
+          codex("high"),
+          codex("low"),
+          codex("low"),
+        ]);
+        assert.strictEqual(
+          requestsOf(fresh.fake, "droid.initialize_session")[0]?.params?.["reasoningEffort"],
+          "low",
+        );
+        assert.deepStrictEqual(fresh.perTurn, [
+          [],
+          [],
+          [frame(OTHER_MODEL, "high")],
+          [frame(OTHER_MODEL, "low")],
+          [],
+        ]);
+
+        const fromNone = yield* framesPerTurn(codex(), [codex("low"), codex("low")]);
+        assert.deepStrictEqual(fromNone.perTurn, [[], [frame(OTHER_MODEL, "low")], []]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] case 6: dropping an explicit effort sends a frame without one, even when it equals the model's default",
+    () =>
+      Effect.gen(function* () {
+        for (const effort of ["low", "high"]) {
+          const { perTurn } = yield* framesPerTurn(codex(effort), [
+            codex(),
+            codex(undefined, "plan"),
+            codex(undefined, "plan"),
+            codex(undefined, "default"),
+          ]);
+          assert.deepStrictEqual(
+            perTurn,
+            [
+              [],
+              [frame(OTHER_MODEL, undefined)],
+              [specFrame(OTHER_MODEL, undefined)],
+              [],
+              [frame(OTHER_MODEL, undefined)],
+            ],
+            `explicit ${effort} on a fresh session, then none`,
+          );
+        }
+
+        const chosenLater = yield* framesPerTurn(codex(), [codex("low"), codex()]);
+        assert.deepStrictEqual(
+          chosenLater.perTurn,
+          [[], [frame(OTHER_MODEL, "low")], [frame(OTHER_MODEL, undefined)]],
+          "an explicit default reached by a selection change is explicit too",
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] case 7: selecting the restored default explicitly sends no frame, and dropping it afterwards sends one without an effort",
+    () =>
+      Effect.gen(function* () {
+        const { perTurn } = yield* framesPerTurn(router, [
+          codex(),
+          codex("low"),
+          codex(),
+          codex(undefined, "plan"),
+        ]);
+        assert.deepStrictEqual(perTurn, [
+          [],
+          [frame(OTHER_MODEL, "low")],
+          [],
+          [frame(OTHER_MODEL, undefined)],
+          [specFrame(OTHER_MODEL, undefined)],
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-012] case 8: a model change with no chosen effort sends none, and never inherits a restored effort",
+    () =>
+      Effect.gen(function* () {
+        const fromModel = yield* framesPerTurn(on(MODEL), [codex(), codex()]);
+        assert.deepStrictEqual(fromModel.perTurn, [[], [frame(OTHER_MODEL, undefined)], []]);
+
+        const fromRestored = yield* framesPerTurn(router, [codex(), on(MODEL), codex()]);
+        assert.deepStrictEqual(fromRestored.perTurn, [
+          [],
+          [frame(OTHER_MODEL, "low")],
+          [frame(MODEL, undefined)],
+          [frame(OTHER_MODEL, undefined)],
         ]);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );

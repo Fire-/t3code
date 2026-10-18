@@ -191,6 +191,64 @@ describe("the restored default effort stays while the selection does [VAL-HIST-0
   });
 });
 
+describe("where the effort came from [VAL-HIST-012]", () => {
+  const restored = () =>
+    settingsFor(selected("claude-opus-5-5"), {
+      models: LISTED,
+      previous: settingsFor(selected("auto"), { models: LISTED }),
+    });
+
+  it("[VAL-HIST-012] an explicit effort equal to the model's default is not read as restored", () => {
+    const explicit = settingsFor(selected("claude-opus-5-5", "medium"), { models: LISTED });
+    assert.strictEqual(explicit.reasoningEffort, "medium");
+    const dropped = settingsFor(selected("claude-opus-5-5"), {
+      models: LISTED,
+      previous: explicit,
+    });
+    assert.strictEqual(dropped.reasoningEffort, undefined);
+    assert.isFalse(sameDroidSessionSettings(explicit, dropped));
+  });
+
+  it("[VAL-HIST-012] selecting the restored default explicitly changes nothing on the wire but takes ownership of it", () => {
+    const first = restored();
+    const explicit = settingsFor(selected("claude-opus-5-5", "medium"), {
+      models: LISTED,
+      previous: first,
+    });
+    assert.isTrue(sameDroidSessionSettings(first, explicit));
+    const dropped = settingsFor(selected("claude-opus-5-5"), {
+      models: LISTED,
+      previous: explicit,
+    });
+    assert.strictEqual(dropped.reasoningEffort, undefined);
+    assert.isFalse(sameDroidSessionSettings(explicit, dropped));
+  });
+
+  it("[VAL-HIST-012] the restored effort survives a return to the same model through the router only", () => {
+    const viaRouter = settingsFor(selected("claude-opus-5-5"), {
+      models: LISTED,
+      previous: settingsFor(selected("auto"), { models: LISTED, previous: restored() }),
+    });
+    assert.strictEqual(viaRouter.reasoningEffort, "medium");
+    const viaModel = settingsFor(selected("claude-opus-5-5"), {
+      models: LISTED,
+      previous: settingsFor(selected("plain-model"), { models: LISTED, previous: restored() }),
+    });
+    assert.strictEqual(viaModel.reasoningEffort, undefined);
+  });
+
+  it("[VAL-HIST-012] the origin of the effort never reaches the wire", () => {
+    for (const settings of [restored(), settingsFor(selected("claude-opus-5-5", "medium"))]) {
+      assert.deepStrictEqual(droidSettingsParams(settings), {
+        interactionMode: "auto",
+        autonomyLevel: "off",
+        modelId: "claude-opus-5-5",
+        reasoningEffort: "medium",
+      });
+    }
+  });
+});
+
 describe("droidModelCatalog", () => {
   it("[VAL-HIST-012] reads the model list a session reports, router kind and efforts included", () => {
     assert.deepStrictEqual(

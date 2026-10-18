@@ -1308,10 +1308,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
 
         // One frame covers runtime mode, interaction mode, model, and effort; `applied` is set
-        // first so the echoes Droid sends for this very frame refine it rather than race it.
+        // first so the echoes Droid sends for this very frame refine it rather than race it. It is
+        // set when no frame goes out too: a selection the wire cannot tell from the applied one
+        // can still change where the effort came from.
         const desired = desiredSettings(turnInput.runtimePolicy, turnInput.modelSelection);
-        if (applied === undefined || !sameDroidSessionSettings(applied, desired)) {
-          applied = desired;
+        const needsFrame = applied === undefined || !sameDroidSessionSettings(applied, desired);
+        applied = desired;
+        if (needsFrame) {
           yield* settingsFrame(desired).pipe(
             Effect.tapError(() =>
               Effect.sync(() => {

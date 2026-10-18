@@ -82,6 +82,11 @@ export interface DroidSessionSettings {
   readonly router: boolean;
   /** Absent when the selected model has no reasoning effort option, and for the router. */
   readonly reasoningEffort: string | undefined;
+  /**
+   * The effort is the model's default, put back after the router, rather than one the user chose.
+   * Session state only: it is never sent and never compared, because the wire cannot tell the two.
+   */
+  readonly effortRestored: boolean;
 }
 
 export const droidSessionSettings = (input: {
@@ -100,22 +105,27 @@ export const droidSessionSettings = (input: {
     input.modelSelection,
     DROID_REASONING_EFFORT_OPTION_ID,
   );
-  const defaultEffort = listed?.defaultReasoningEffort;
   // The router left no effort behind that the new model could inherit, so a model entered from it
   // without a chosen effort starts at its own default. It has to stay there on the turns that
   // follow: those carry no chosen effort either, and recomputing none would read as a change.
-  const atDefaultEffort =
-    input.previous !== undefined &&
-    (input.previous.router ||
-      (input.previous.modelId === modelId && input.previous.reasoningEffort === defaultEffort));
+  // Where the effort came from is tracked rather than inferred from its value: a user's effort
+  // can equal the default, and dropping it must then leave the effort to Droid.
+  const restoredEffort = (): string | undefined => {
+    const { previous } = input;
+    if (router || chosenEffort !== undefined || previous === undefined) return undefined;
+    if (previous.router) return listed?.defaultReasoningEffort;
+    return previous.effortRestored && previous.modelId === modelId
+      ? previous.reasoningEffort
+      : undefined;
+  };
+  const restored = restoredEffort();
   return {
     interactionMode: input.interactionMode === "plan" ? "spec" : "auto",
     autonomyLevel: droidAutonomyLevel(input.runtimeMode),
     modelId,
     router,
-    reasoningEffort: router
-      ? undefined
-      : (chosenEffort ?? (atDefaultEffort ? defaultEffort : undefined)),
+    reasoningEffort: router ? undefined : (chosenEffort ?? restored),
+    effortRestored: restored !== undefined,
   };
 };
 
