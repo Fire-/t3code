@@ -873,6 +873,7 @@ it("shows readable models and only differing workspace details in agent tooltips
     "antigravity",
     "pi",
     "acpRegistry",
+    "droid",
   ]) {
     state.projection = {
       ...projection,

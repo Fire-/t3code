@@ -21,8 +21,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
@@ -31,6 +33,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
 import { CursorDriver, type CursorDriverEnv } from "@t3tools/provider-cursor/server";
+import { DroidDriver, type DroidDriverEnv } from "@t3tools/provider-droid/server";
 import { GrokDriver, type GrokDriverEnv } from "@t3tools/provider-grok/server";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "@t3tools/provider-opencode/server";
 import type { OpenCodeSettings } from "@t3tools/provider-opencode/settings";
@@ -83,6 +86,25 @@ const layerBackgroundPolicyAlwaysRun = Layer.mock(BackgroundPolicy.BackgroundPol
   shouldRunScopeWork: () => Effect.succeed(true),
   shouldRunOpportunisticWork: Effect.succeed(true),
 });
+
+const versionProbeSpawner = ChildProcessSpawner.make(() =>
+  Effect.succeed(
+    ChildProcessSpawner.makeHandle({
+      // Outside the valid PID range, so cleanup cannot signal a real process.
+      pid: ChildProcessSpawner.ProcessId(999_999_999),
+      exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+      isRunning: Effect.succeed(false),
+      kill: () => Effect.void,
+      unref: Effect.succeed(Effect.void),
+      stdin: Sink.drain,
+      stdout: Stream.succeed(new TextEncoder().encode("0.244.0\n")),
+      stderr: Stream.empty,
+      all: Stream.empty,
+      getInputFd: () => Sink.drain,
+      getOutputFd: () => Stream.empty,
+    }),
+  ),
+);
 
 const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   enabled: false,
@@ -564,6 +586,41 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
         expect(ghost.availability).toBe("unavailable");
         expect(ghost.unavailableReason).toMatch(/ghostDriver/);
       }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.live(
+    "[VAL-REG-003][VAL-REG-004] resolves the saved Droid block to an enabled instance and leaves an unset one disabled",
+    () =>
+      Effect.gen(function* () {
+        const savedId = ProviderInstanceId.make("droid");
+        const unsetId = ProviderInstanceId.make("droid_unset");
+        const droidDriverKind = ProviderDriverKind.make("droid");
+        const configMap: ProviderInstanceConfigMap = {
+          [savedId]: {
+            driver: droidDriverKind,
+            enabled: true,
+            config: { binaryPath: "droid", customModels: [] },
+          },
+          [unsetId]: { driver: droidDriverKind, config: {} },
+        };
+
+        const { registry } = yield* makeProviderInstanceRegistry<DroidDriverEnv>({
+          drivers: [DroidDriver],
+          configMap,
+        });
+
+        expect(yield* registry.listUnavailable).toEqual([]);
+        const saved = yield* registry.getInstance(savedId);
+        expect(saved?.driverKind).toBe(droidDriverKind);
+        expect(saved?.enabled).toBe(true);
+        const unset = yield* registry.getInstance(unsetId);
+        expect(unset?.driverKind).toBe(droidDriverKind);
+        expect(unset?.enabled).toBe(false);
+      }).pipe(
+        // The enabled instance probes `droid --version` on boot; never reach a real binary.
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, versionProbeSpawner),
+        Effect.provide(layerTest),
+      ),
   );
 });
 

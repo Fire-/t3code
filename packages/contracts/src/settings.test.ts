@@ -845,9 +845,18 @@ describe("provider enabled defaults", () => {
       resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make(driver), config: {} });
     expect(enabledByDefault("codex")).toBe(true);
     expect(enabledByDefault("claudeAgent")).toBe(true);
-    for (const driver of ["cursor", "grok", "muse", "pi", "opencode", "antigravity"]) {
+    for (const driver of ["cursor", "grok", "muse", "pi", "droid", "opencode", "antigravity"]) {
       expect(enabledByDefault(driver)).toBe(false);
     }
+  });
+
+  it("[VAL-REG-004] keeps Droid disabled until a configured instance opts in", () => {
+    const droid = ProviderDriverKind.make("droid");
+    expect(resolveProviderInstanceEnabled({ driver: droid, config: {} })).toBe(false);
+    expect(resolveProviderInstanceEnabled({ driver: droid, enabled: true, config: {} })).toBe(true);
+    expect(
+      resolveProviderInstanceEnabled({ driver: droid, enabled: true, config: { enabled: false } }),
+    ).toBe(false);
   });
 
   it("resolves instance enabled state with explicit false winning", () => {

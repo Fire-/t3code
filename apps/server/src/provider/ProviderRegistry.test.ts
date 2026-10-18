@@ -3065,6 +3065,7 @@ it.layer(
               "claudeAgent",
               "codex",
               "cursor",
+              "droid",
               "grok",
               "muse",
               "opencode",
@@ -3076,6 +3077,10 @@ it.layer(
             const museProvider = providers.find((provider) => provider.driver === "muse");
             assert.strictEqual(museProvider?.enabled, false);
             assert.strictEqual(museProvider?.status, "disabled");
+            const droidProvider = providers.find((provider) => provider.driver === "droid");
+            assert.strictEqual(droidProvider?.enabled, false);
+            assert.strictEqual(droidProvider?.status, "disabled");
+            assert.strictEqual(droidProvider?.message, "Droid is disabled in T3 Code settings.");
             assert.strictEqual(cursorSpawned, false);
           }).pipe(Effect.provide(runtimeServices));
         }),
