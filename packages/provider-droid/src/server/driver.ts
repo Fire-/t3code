@@ -7,6 +7,7 @@ import { DroidSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -14,13 +15,15 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
+import { DroidAdapterV2Driver, type DroidAdapterV2DriverEnv } from "./adapter.ts";
+import { DroidAuthSignal } from "./authSignal.ts";
 import {
   buildInitialDroidProviderSnapshot,
   checkDroidProviderStatus,
   enrichDroidSnapshot,
+  withDroidAuthFailure,
 } from "./status.ts";
 import { makeDroidTextGeneration } from "./textGeneration.ts";
-import { makeUnavailableDroidAdapter } from "./unavailable.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   defaultProviderContinuationIdentity,
@@ -49,6 +52,7 @@ const MANUAL_MAINTENANCE = makeManualOnlyProviderMaintenanceCapabilities({
 });
 
 export type DroidDriverEnv =
+  | DroidAdapterV2DriverEnv
   | ProviderHost.ProviderHost
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
@@ -90,6 +94,48 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         Effect.succeed(MANUAL_MAINTENANCE),
       );
 
+      // Set by a turn the adapter ends `model_authentication_failed`, cleared by the next completed
+      // one. Either change re-probes so the snapshot shows it.
+      const scope = yield* Effect.scope;
+      const authFailed = yield* Ref.make(false);
+      let refreshSnapshot: Effect.Effect<void> = Effect.void;
+      const setAuthFailed = (next: boolean) =>
+        Ref.getAndSet(authFailed, next).pipe(
+          Effect.flatMap((previous) =>
+            previous === next
+              ? Effect.void
+              : Effect.suspend(() => refreshSnapshot).pipe(
+                  Effect.ignoreCause({ log: true }),
+                  Effect.forkIn(scope),
+                  Effect.asVoid,
+                ),
+          ),
+        );
+      const authSignal = {
+        authenticationFailed: setAuthFailed(true),
+        authenticated: setAuthFailed(false),
+      };
+
+      const orchestrationAdapter = yield* DroidAdapterV2Driver.create({
+        instanceId,
+        displayName,
+        accentColor,
+        environment,
+        enabled,
+        config,
+      }).pipe(
+        Effect.provideService(DroidAuthSignal, authSignal),
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: "Failed to build Droid orchestration adapter.",
+              cause,
+            }),
+        ),
+      );
+
       const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
       const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<DroidSettings>>({
         resolveMaintenance,
@@ -99,6 +145,11 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         initialSnapshot: (settings) =>
           buildInitialDroidProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
         checkProvider: checkDroidProviderStatus(effectiveConfig, processEnv).pipe(
+          Effect.flatMap((draft) =>
+            Ref.get(authFailed).pipe(
+              Effect.map((failed) => (failed ? withDroidAuthFailure(draft) : draft)),
+            ),
+          ),
           Effect.map(stampIdentity),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -129,6 +180,8 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         ),
       );
 
+      refreshSnapshot = snapshot.refresh.pipe(Effect.asVoid);
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -137,7 +190,7 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        orchestrationAdapter: makeUnavailableDroidAdapter(instanceId),
+        orchestrationAdapter,
         textGeneration,
       } satisfies ProviderInstance;
     }),

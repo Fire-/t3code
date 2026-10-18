@@ -221,7 +221,7 @@ const describeError = (error: unknown): string => {
  * JSON-RPC error. Everything Droid wrote that reaches an error or a log goes through here.
  * An empty or whitespace-only key redacts nothing: replacing "" would mangle every character.
  */
-const makeRedactor = (apiKey: string | undefined) => {
+export const makeRedactor = (apiKey: string | undefined) => {
   const key = apiKey?.trim();
   const text = (value: string): string => (key ? value.replaceAll(key, REDACTED) : value);
   // Keys and string leaves only: the input is parsed JSON, so there are no other carriers.

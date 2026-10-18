@@ -42,7 +42,7 @@ export const DROID_PRESENTATION = {
   displayName: "Droid",
   showInteractionModeToggle: false,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"],
-  reportsContextWindow: false,
+  reportsContextWindow: true,
   requiresNewThreadForModelChange: false,
   supportsConversationRollback: false,
 } as const;
@@ -168,7 +168,7 @@ function droidModelsFromSettings(
   return providerModelsFromSettings(discovered, customModels ?? [], EMPTY_CAPABILITIES);
 }
 
-const definedEnvironment = (environment: NodeJS.ProcessEnv): Record<string, string> =>
+export const definedDroidEnvironment = (environment: NodeJS.ProcessEnv): Record<string, string> =>
   Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -197,7 +197,7 @@ const discoverDroidModels = (
     const runtime = yield* makeDroidRpcRuntime({
       binaryPath: droidSettings.binaryPath || "droid",
       cwd: neutralCwd,
-      env: definedEnvironment(environment),
+      env: definedDroidEnvironment(environment),
     });
     return buildDroidModelsFromListModels(yield* runtime.request("droid.list_models", {}));
   }).pipe(
@@ -254,6 +254,21 @@ const runDroidVersionCommand = (droidSettings: DroidSettings, environment: NodeJ
   });
 
 const unknownAuth = { status: "unknown" } as const;
+
+/**
+ * `droid --version` and model discovery cannot see a rejected login, so a turn that ends
+ * `model_authentication_failed` is the only evidence. The status stays usable: the picker keeps
+ * Droid and the next completed turn clears this.
+ */
+export const withDroidAuthFailure = (draft: ServerProviderDraft): ServerProviderDraft =>
+  !draft.enabled || !draft.installed || draft.status === "error"
+    ? draft
+    : {
+        ...draft,
+        auth: { status: "unauthenticated" },
+        message:
+          "Droid could not authenticate its last turn. Set FACTORY_API_KEY or run `droid` once to sign in.",
+      };
 
 export function buildInitialDroidProviderSnapshot(
   droidSettings: DroidSettings,

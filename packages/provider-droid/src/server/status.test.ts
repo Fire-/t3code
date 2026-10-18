@@ -281,7 +281,7 @@ const M2_RUNTIME_MODES: ReadonlyArray<string> = [
   "full-access",
 ];
 
-const assertM2Presentation = (
+const assertPresentation = (
   snapshot: Pick<
     ServerProvider,
     | "displayName"
@@ -298,20 +298,21 @@ const assertM2Presentation = (
     M2_RUNTIME_MODES,
   );
   assert.strictEqual(snapshot.requiresNewThreadForModelChange, false);
-  assert.strictEqual(snapshot.reportsContextWindow, false);
+  assert.strictEqual(snapshot.reportsContextWindow, true);
   assert.strictEqual(snapshot.supportsConversationRollback, false);
   assert.strictEqual(snapshot.showInteractionModeToggle, false);
 };
 
 describe("DROID_PRESENTATION", () => {
-  it("[VAL-REG-002][VAL-STATUS-009] names Droid and pins the M2 values", () => {
+  it("[VAL-REG-002][VAL-STATUS-009] names Droid and pins the presentation values", () => {
     assert.equal(DROID_PRESENTATION.displayName, "Droid");
     assert.deepEqual<ReadonlyArray<string>>(
       DROID_PRESENTATION.supportedRuntimeModes,
       M2_RUNTIME_MODES,
     );
     assert.isFalse(DROID_PRESENTATION.requiresNewThreadForModelChange);
-    assert.isFalse(DROID_PRESENTATION.reportsContextWindow);
+    // The adapter reports contextUsage on every turn that carries token counts.
+    assert.isTrue(DROID_PRESENTATION.reportsContextWindow);
     // Each turns on in the feature that implements it: VAL-PLAN-012 (M4) and VAL-HIST-004 (M5).
     assert.isFalse(DROID_PRESENTATION.supportsConversationRollback);
     assert.isFalse(DROID_PRESENTATION.showInteractionModeToggle);
@@ -325,7 +326,7 @@ describe("buildInitialDroidProviderSnapshot", () => {
       assert.equal(snapshot.status, "disabled");
       assert.isFalse(snapshot.enabled);
       assert.equal(snapshot.message, "Droid is disabled in T3 Code settings.");
-      assertM2Presentation(snapshot);
+      assertPresentation(snapshot);
     }),
   );
 
@@ -335,7 +336,7 @@ describe("buildInitialDroidProviderSnapshot", () => {
       assert.equal(snapshot.status, "warning");
       assert.equal(snapshot.message, "Checking Droid CLI availability...");
       assert.equal(snapshot.auth.status, "unknown");
-      assertM2Presentation(snapshot);
+      assertPresentation(snapshot);
     }),
   );
 });
@@ -697,7 +698,7 @@ describe("checkDroidProviderStatus", () => {
       assert.equal(snapshot.status, "disabled");
       assert.isFalse(snapshot.enabled);
       assert.equal(snapshot.message, "Droid is disabled in T3 Code settings.");
-      assertM2Presentation(snapshot);
+      assertPresentation(snapshot);
     }),
   );
 
@@ -733,10 +734,10 @@ describe("checkDroidProviderStatus", () => {
     Effect.gen(function* () {
       const ready = yield* makeScriptedDroid({ kind: "result", result: listed(listedModel()) });
       const degraded = yield* makeScriptedDroid({ kind: "error" });
-      assertM2Presentation(yield* provide(checkDroidProviderStatus(settings()), ready.spawner));
+      assertPresentation(yield* provide(checkDroidProviderStatus(settings()), ready.spawner));
       const snapshot = yield* provide(checkDroidProviderStatus(settings()), degraded.spawner);
       assert.equal(snapshot.status, "warning");
-      assertM2Presentation(snapshot);
+      assertPresentation(snapshot);
     }),
   );
 
@@ -994,7 +995,7 @@ describe("Droid model discovery", () => {
         snapshot.models.map((model) => model.slug),
         ["custom:kept"],
       );
-      assertM2Presentation(snapshot);
+      assertPresentation(snapshot);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer), live),
   );
 

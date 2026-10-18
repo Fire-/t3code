@@ -2,15 +2,23 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
+  MessageId,
+  NodeId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
+  RunAttemptId,
+  RunId,
   ThreadId,
+  type OrchestrationV2AppThread,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
@@ -23,6 +31,8 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { fallbackTextGenerationModelSelection } from "@t3tools/shared/serverSettings";
 
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import type { DroidSettings } from "../settings.ts";
@@ -37,6 +47,7 @@ const layerTest = Layer.mergeAll(
     settings: { ...DEFAULT_SERVER_SETTINGS, enableProviderUpdateChecks: false },
     runBackgroundWork: false,
   }),
+  IdAllocator.layer,
   ProviderLatestVersions.layer,
   Layer.succeed(
     HttpClient.HttpClient,
@@ -102,10 +113,11 @@ const receivedMethods = (log: ReadonlyArray<Record<string, unknown>>) =>
     .map((entry) => (Predicate.isObject(entry.message) ? entry.message.method : undefined))
     .filter(Predicate.isString);
 
-const assertM2Presentation = (snapshot: ServerProvider) => {
+const assertPresentation = (snapshot: ServerProvider) => {
   assert.deepEqual(snapshot.supportedRuntimeModes, DROID_PRESENTATION.supportedRuntimeModes);
   assert.strictEqual(snapshot.requiresNewThreadForModelChange, false);
-  assert.strictEqual(snapshot.reportsContextWindow, false);
+  // The adapter fills `contextUsage` from Droid's token counts, so the UI can show a window.
+  assert.strictEqual(snapshot.reportsContextWindow, true);
   assert.strictEqual(snapshot.supportsConversationRollback, false);
   assert.strictEqual(snapshot.showInteractionModeToggle, false);
 };
@@ -149,7 +161,7 @@ it.layer(layerTest)("DroidDriver", (it) => {
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         );
         const initial = yield* instance.snapshot.getSnapshot;
-        assertM2Presentation(initial);
+        assertPresentation(initial);
         yield* instance.snapshot.refresh;
         const snapshot = yield* instance.snapshot.getSnapshot;
         assert.equal(instance.driverKind, "droid");
@@ -159,7 +171,7 @@ it.layer(layerTest)("DroidDriver", (it) => {
         assert.equal(snapshot.accentColor, "#abcdef");
         assert.equal(snapshot.status, "ready");
         assert.equal(snapshot.version, "0.244.0");
-        assertM2Presentation(snapshot);
+        assertPresentation(snapshot);
         assert.equal(
           snapshot.continuation?.groupKey,
           instance.continuationIdentity.continuationKey,
@@ -228,9 +240,9 @@ it.layer(layerTest)("DroidDriver", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("claims no orchestration capability before the adapter lands", () =>
+  it.effect("[VAL-TURN-001] hands the orchestrator the Droid adapter for this instance", () =>
     Effect.gen(function* () {
-      const { spawner } = makeDroidSpawner();
+      const { spawner, launches } = makeDroidSpawner();
       const instance = yield* create().pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
@@ -238,22 +250,120 @@ it.layer(layerTest)("DroidDriver", (it) => {
       assert.equal(adapter.driver, "droid");
       assert.equal(adapter.instanceId, "droid-test");
       const capabilities = yield* adapter.getCapabilities();
-      const claimed = Object.entries(capabilities).flatMap(([group, flags]) =>
-        Object.entries(flags as Record<string, unknown>).flatMap(([name, value]) =>
-          value === true || value === "strong" || value === "weak" ? [`${group}.${name}`] : [],
-        ),
+      assert.equal(capabilities.runtimePolicy.enforcement, "native");
+      assert.isTrue(capabilities.threads.canCreateEmptyThread);
+      assert.isFalse(capabilities.sessions.supportsMultipleProviderThreadsPerSession);
+      assert.isFalse(
+        launches.some((launch) => launch.args.includes("stream-jsonrpc")),
+        "building the adapter opens no session",
       );
-      assert.deepEqual(claimed, []);
-      const error = yield* Effect.flip(
-        adapter.openSession({
-          threadId: ThreadId.make("thread-1"),
-          providerSessionId: ProviderSessionId.make("session-1"),
-          modelSelection: { instanceId: ProviderInstanceId.make("droid-test"), model: "m" },
-          runtimePolicy: { enforcement: "client-boundary" } as never,
-        }),
-      );
-      assert.equal(error._tag, "ProviderAdapterOpenSessionError");
     }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "[VAL-STATUS-008] a turn that fails authentication marks the snapshot unauthenticated, and a completed turn clears it",
+    () =>
+      Effect.gen(function* () {
+        const { spawner, binaryPath } = yield* makeMockDroidSpawner();
+        const instance = yield* create({ binaryPath }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        const probed = yield* instance.snapshot.refresh;
+        assert.equal(probed.auth.status, "unknown");
+
+        const instanceId = ProviderInstanceId.make("droid-test");
+        const threadId = ThreadId.make("thread-droid-auth");
+        const modelSelection = { instanceId, model: "claude-opus-5-5" };
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const runtime = yield* instance.orchestrationAdapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("session-droid-auth"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const now = yield* DateTime.now;
+        const appThread = {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project-droid-auth"),
+          title: "Droid auth",
+          providerInstanceId: instanceId,
+          modelSelection,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        } satisfies OrchestrationV2AppThread;
+        const turn = (ordinal: number, text: string) =>
+          Effect.gen(function* () {
+            const runId = RunId.make(`run-droid-auth-${ordinal}`);
+            yield* runtime.startTurn({
+              appThread,
+              threadId,
+              runId,
+              runOrdinal: ordinal,
+              providerTurnOrdinal: ordinal,
+              attemptId: RunAttemptId.make(`attempt-droid-auth-${ordinal}`),
+              rootNodeId: NodeId.make(`node-droid-auth-${ordinal}`),
+              providerThread,
+              message: {
+                messageId: MessageId.make(`message-droid-auth-${ordinal}`),
+                text,
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+              },
+              modelSelection,
+              runtimePolicy,
+            });
+            return yield* runtime.events.pipe(
+              Stream.filter((event) => event.type === "turn.terminal"),
+              Stream.runHead,
+            );
+          });
+
+        const failed = yield* turn(1, "AUTH_FAIL please");
+        assert.isTrue(
+          Option.isSome(failed) &&
+            failed.value.type === "turn.terminal" &&
+            failed.value.status === "failed",
+        );
+        const unauthenticated = yield* instance.snapshot.refresh;
+        assert.equal(unauthenticated.auth.status, "unauthenticated");
+        assert.include(["ready", "warning"], unauthenticated.status);
+        assert.include(unauthenticated.message ?? "", "FACTORY_API_KEY");
+        assert.isTrue(unauthenticated.models.length > 0, "the picker still lists Droid's models");
+
+        const completed = yield* turn(2, "plain again");
+        assert.isTrue(
+          Option.isSome(completed) &&
+            completed.value.type === "turn.terminal" &&
+            completed.value.status === "completed",
+        );
+        const recovered = yield* instance.snapshot.refresh;
+        assert.equal(recovered.auth.status, "unknown");
+        assert.notInclude(recovered.message ?? "", "could not authenticate");
+      }).pipe(Effect.scoped, live),
   );
 
   it.effect(
