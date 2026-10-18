@@ -150,7 +150,7 @@ const DroidProviderCapabilitiesV2 = {
     supportsInterrupt: true,
     supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: false,
-    supportsQueuedMessages: false,
+    supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
   },
   streaming: {

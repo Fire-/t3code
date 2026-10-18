@@ -540,6 +540,28 @@ describe("DroidAdapterV2 wake buffering", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    it.effect(
+      "[VAL-SUB-017] a continuation dispatch that fails stops the process and drops the wake, as Pi does",
+      () =>
+        Effect.gen(function* () {
+          const { opened, thread, offers, process } = yield* idleRuntime();
+          yield* wakeStarts({ process }, { reply: "Unwanted." });
+          const offer = yield* Queue.take(offers);
+
+          const failure = yield* offer.dispatchIfCurrent!(Effect.fail("dispatch refused")).pipe(
+            Effect.flip,
+          );
+          yield* Deferred.await(opened.streamEnded);
+
+          assert.strictEqual(failure, "dispatch refused");
+          assert.deepStrictEqual(process.signals(), ["SIGTERM"], "Droid would go on unsupervised");
+          assert.deepStrictEqual(yield* pending(opened, thread), [false, false]);
+          assert.strictEqual(sessionStatuses(opened.all).at(-1), "stopped");
+          assert.isTrue(Option.isNone(yield* dispatch(offer)));
+          assert.deepStrictEqual(assistantItems(opened.all), []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect("[VAL-SUB-012] closing the session clears it", () =>
       Effect.gen(function* () {
         const fake = yield* makeFakeDroid();

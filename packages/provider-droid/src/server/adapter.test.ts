@@ -92,7 +92,7 @@ const EXPECTED_CAPABILITIES = {
     supportsInterrupt: true,
     supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: false,
-    supportsQueuedMessages: false,
+    supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
   },
   streaming: {
@@ -162,7 +162,7 @@ const EXPECTED_CAPABILITIES = {
 describe("DroidAdapterV2", () => {
   describe("capabilities and registration", () => {
     it.effect(
-      "[VAL-TURN-002][VAL-REQ-015][VAL-SUB-016] pins the capability object, with steering, structured questions, and subagents on, and the four runtime modes",
+      "[VAL-TURN-002][VAL-TURN-022][VAL-REQ-015][VAL-SUB-016] pins the capability object, with steering, structured questions, subagents, and app-owned queued messages on, and the four runtime modes",
       () =>
         Effect.gen(function* () {
           const fake = yield* makeFakeDroid();
