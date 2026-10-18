@@ -203,10 +203,11 @@ interface ActiveDroidTurn {
   /** Droid completed the native turn this t3 turn started. */
   nativeSettled: boolean;
   /**
-   * Steers Droid accepted but has not echoed yet. Droid queues a steer behind the running native
-   * turn, so it may only start after that turn's completion: the t3 turn waits for it.
+   * Steers Droid accepted but has not echoed yet, by message id with the text sent. Droid queues
+   * a steer behind the running native turn, so it may only start after that turn's completion:
+   * the t3 turn waits for it.
    */
-  readonly queuedSteers: Set<string>;
+  readonly queuedSteers: Map<string, string>;
   /** Steers Droid runs as native turns of their own; each owes an `agent_turn_completed`. */
   readonly awaitingNative: Set<string>;
 }
@@ -325,6 +326,24 @@ function noteQueuedSteerStarted(turn: ActiveDroidTurn, notification: DroidNotifi
   if (field(message, "role") !== "user" || !Predicate.isString(messageId)) return;
   if (!turn.queuedSteers.delete(messageId)) return;
   if (turn.nativeSettled && turn.awaitingNative.size === 0) turn.awaitingNative.add(messageId);
+}
+
+/**
+ * Droid names a dropped message by its text and the JSON-RPC id of the frame that queued it, an
+ * id t3 never sees, so the text picks the steer. One notification covers one message.
+ */
+function dropDiscardedSteer(turn: ActiveDroidTurn, notification: DroidNotification): void {
+  const text = notification["text"];
+  if (!Predicate.isString(text)) {
+    turn.queuedSteers.clear();
+    return;
+  }
+  for (const [messageId, queued] of turn.queuedSteers) {
+    if (queued === text) {
+      turn.queuedSteers.delete(messageId);
+      return;
+    }
+  }
 }
 
 const cancelReply = (kind: PendingDroidRequestKind): unknown =>
@@ -733,6 +752,31 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
       });
 
+      const settleNativeOutcome = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        outcome: TurnOutcome,
+      ) {
+        // Signalled before the terminal goes out, so whoever sees the terminal sees the status flip.
+        if (outcome.kind === "failed") {
+          if (outcome.failure.code === "model_authentication_failed") {
+            yield* authSignal.authenticationFailed;
+          }
+        } else if (outcome.kind === "completed") {
+          yield* authSignal.authenticated;
+        }
+        yield* finishTurn(state, turn, outcome);
+        const lastError = outcome.kind === "failed" ? outcome.failure.message : null;
+        if (outcome.disposition === "broken") {
+          // Droid exits right after this, but the EOF is a separate event: the session must not
+          // look ready or take a turn in between.
+          ended = true;
+          yield* updateProviderSession(closing ? "stopped" : "error", lastError);
+        } else {
+          yield* updateProviderSession("ready", lastError);
+        }
+      });
+
       const handleCompletion = Effect.fnUntraced(function* (
         state: DroidThreadState,
         turn: ActiveDroidTurn,
@@ -757,24 +801,24 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         ) {
           return;
         }
-        // Signalled before the terminal goes out, so whoever sees the terminal sees the status flip.
-        if (outcome.kind === "failed") {
-          if (outcome.failure.code === "model_authentication_failed") {
-            yield* authSignal.authenticationFailed;
-          }
-        } else if (outcome.kind === "completed") {
-          yield* authSignal.authenticated;
+        yield* settleNativeOutcome(state, turn, outcome);
+      });
+
+      const handleDiscardedSteers = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        notification: DroidNotification,
+      ) {
+        dropDiscardedSteer(turn, notification);
+        if (!turn.nativeSettled || turn.queuedSteers.size > 0 || turn.awaitingNative.size > 0) {
+          return;
         }
-        yield* finishTurn(state, turn, outcome);
-        const lastError = outcome.kind === "failed" ? outcome.failure.message : null;
-        if (outcome.disposition === "broken") {
-          // Droid exits right after this, but the EOF is a separate event: the session must not
-          // look ready or take a turn in between.
-          ended = true;
-          yield* updateProviderSession(closing ? "stopped" : "error", lastError);
-        } else {
-          yield* updateProviderSession("ready", lastError);
-        }
+        // Only a clean completion waits for steers, so that is the outcome the discard releases.
+        // A Stop in flight ends it the way the interrupt would have.
+        yield* settleNativeOutcome(state, turn, {
+          kind: turn.mapper.interruptRequested ? "interrupted" : "completed",
+          disposition: "reusable",
+        });
       });
 
       const handleNotification = Effect.fnUntraced(function* (notification: DroidNotification) {
@@ -807,6 +851,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             return;
           }
           return yield* handleCompletion(state, turn, notification);
+        }
+        if (notification.type === "queued_messages_discarded") {
+          return yield* handleDiscardedSteers(state, turn, notification);
         }
         if (notification.type === "create_message") noteQueuedSteerStarted(turn, notification);
         const mapped = mapDroidNotification(
@@ -1116,7 +1163,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             }),
             errorMessage: undefined,
             nativeSettled: false,
-            queuedSteers: new Set(),
+            queuedSteers: new Map(),
             awaitingNative: new Set(),
           };
           // Installed before the request so nothing Droid sends right after the ack is lost.
@@ -1209,7 +1256,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           if (state === null || state.activeTurn !== target || ended || closing) {
             return yield* notActive();
           }
-          target.queuedSteers.add(messageId);
+          // No turn item here: the orchestrator already records the steer's user_message under
+          // this message id, and an adapter item with the same id would overwrite its intent
+          // and context.
+          target.queuedSteers.set(messageId, payload.text);
           yield* request("droid.add_user_message", {
             text: payload.text,
             messageId,
@@ -1222,44 +1272,6 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               }),
             ),
           );
-          const at = yield* DateTime.now;
-          const ordinal = target.mapper.nextItemOrdinal;
-          target.mapper = { ...target.mapper, nextItemOrdinal: ordinal + 1 };
-          // The orchestrator already recorded the steer under this item id; the id is shared so
-          // the projection keeps one row, now tied to Droid's native message.
-          yield* emit({
-            type: "turn_item.updated",
-            driver: DROID_PROVIDER,
-            turnItem: {
-              createdBy: message.createdBy,
-              creationSource: message.creationSource,
-              ...(message.scheduledTaskId === undefined
-                ? {}
-                : { scheduledTaskId: message.scheduledTaskId }),
-              ...(message.senderThreadId === undefined
-                ? {}
-                : { senderThreadId: message.senderThreadId }),
-              id: idAllocator.derive.userTurnItem({ messageId: message.messageId }),
-              threadId: target.turnInput.threadId,
-              runId: target.turnInput.runId,
-              nodeId: target.turnInput.rootNodeId,
-              providerThreadId: state.providerThread.id,
-              providerTurnId: target.providerTurn.id,
-              nativeItemRef: droidRef(messageId),
-              parentItemId: null,
-              ordinal,
-              status: "completed",
-              title: null,
-              startedAt: at,
-              completedAt: at,
-              updatedAt: at,
-              type: "user_message",
-              messageId: message.messageId,
-              inputIntent: "steer",
-              text: message.text,
-              attachments: message.attachments,
-            },
-          });
         }).pipe(permit.withPermits(1));
       });
 

@@ -1,5 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -12,6 +14,7 @@ import {
   methodsOf,
   requestsOf,
   runIdFor,
+  sessionStatuses,
   steerBegunTurn,
   steerMessageIdFor,
   terminals,
@@ -36,6 +39,13 @@ const userEcho = (ordinal: number, text: string) => ({
   },
 });
 
+/** Droid reports a queued message it dropped with that message's text and JSON-RPC request id. */
+const discarded = (text: string, requestId = 7) => ({
+  type: "queued_messages_discarded",
+  text,
+  requestId,
+});
+
 const assistantReply = (id: string, text: string) => ({
   type: "create_message",
   message: { id, role: "assistant", content: [{ type: "text", text }] },
@@ -48,7 +58,7 @@ const addUserMessages = (fake: FakeDroid) => requestsOf(fake, "droid.add_user_me
 
 describe("DroidAdapterV2 steering", () => {
   it.effect(
-    "[VAL-REQ-001] an active steer is sent end_of_turn, shown as a steer item, and never interrupts",
+    "[VAL-REQ-001] an active steer is sent end_of_turn without interrupting, and the adapter emits no item for it",
     () =>
       Effect.gen(function* () {
         const fake = yield* makeFakeDroid();
@@ -65,17 +75,12 @@ describe("DroidAdapterV2 steering", () => {
         });
         assert.notInclude(methodsOf(fake), "droid.interrupt_session");
 
-        const steerItems = turnItems(begun).flatMap((item) =>
-          item.type === "user_message" ? [item] : [],
+        // The orchestrator records the steer's user_message item under the id derived from the
+        // message id; an adapter item under that id would overwrite the intent and context.
+        assert.deepStrictEqual(
+          turnItems(begun).filter((item) => item.type === "user_message"),
+          [],
         );
-        assert.strictEqual(steerItems.length, 1);
-        const item = steerItems[0];
-        assert.strictEqual(item?.inputIntent, "steer");
-        assert.strictEqual(item?.text, "Also add tests");
-        assert.strictEqual(String(item?.messageId), steerMessageIdFor(1));
-        assert.strictEqual(item?.runId, runIdFor(1));
-        assert.strictEqual(item?.providerTurnId, begun.providerTurn.id);
-        assert.strictEqual(item?.status, "completed");
         assert.deepStrictEqual(terminals(begun.opened.all), [], "the steer does not end the turn");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -207,6 +212,149 @@ describe("DroidAdapterV2 steering", () => {
           requestsOf(fake, "droid.interrupt_session").map((request) => request.params),
           [{}],
         );
+        assert.strictEqual(terminals(begun.opened.all).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-REQ-002] a discarded queued steer without Stop ends the T3 turn the native turn already settled",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const begun = yield* beginTurn(fake);
+        yield* steerBegunTurn(begun);
+        yield* begun.process.emit(completed(1));
+        yield* begun.process.settle;
+        assert.deepStrictEqual(terminals(begun.opened.all), [], "the queued steer holds the turn");
+
+        yield* begun.process.emit(discarded("Also add tests"));
+        const terminal = yield* begun.opened.takeEvent(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.notInclude(methodsOf(fake), "droid.interrupt_session");
+
+        // The discard and the steer's delivery can cross: neither may end the turn again.
+        yield* begun.process.emit(userEcho(1, "Also add tests"));
+        yield* begun.process.emit(steerCompleted());
+        yield* begun.process.settle;
+        assert.strictEqual(terminals(begun.opened.all).length, 1, "exactly one terminal");
+        assert.strictEqual(sessionStatuses(begun.opened.all).at(-1), "ready");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-REQ-002] a discarded queued steer while the native turn runs leaves the end to that turn",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const begun = yield* beginTurn(fake);
+        yield* steerBegunTurn(begun);
+        yield* begun.process.emit(discarded("Also add tests"));
+        yield* begun.process.settle;
+        assert.deepStrictEqual(terminals(begun.opened.all), []);
+
+        yield* begun.process.emit(completed(1));
+        const terminal = yield* begun.opened.takeEvent(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        yield* begun.process.settle;
+        assert.strictEqual(terminals(begun.opened.all).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-REQ-002] the turn stays open until every queued steer is discarded, matched by text",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const begun = yield* beginTurn(fake);
+        yield* steerBegunTurn(begun, { ordinal: 1, text: "Also add tests" });
+        yield* steerBegunTurn(begun, { ordinal: 2, text: "And a changelog" });
+        yield* begun.process.emit(completed(1));
+        yield* begun.process.settle;
+
+        yield* begun.process.emit(discarded("Also add tests"));
+        yield* begun.process.emit(discarded("Nothing queued says this"));
+        yield* begun.process.settle;
+        assert.deepStrictEqual(terminals(begun.opened.all), [], "one steer is still queued");
+
+        yield* begun.process.emit(discarded("And a changelog"));
+        const terminal = yield* begun.opened.takeEvent(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        yield* begun.process.settle;
+        assert.strictEqual(terminals(begun.opened.all).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-REQ-002] a discard that names no text clears every queued steer and ends the turn",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const begun = yield* beginTurn(fake);
+        yield* steerBegunTurn(begun, { ordinal: 1, text: "Also add tests" });
+        yield* steerBegunTurn(begun, { ordinal: 2, text: "And a changelog" });
+        yield* begun.process.emit(completed(1));
+        yield* begun.process.settle;
+
+        yield* begun.process.emit({ type: "queued_messages_discarded" });
+        const terminal = yield* begun.opened.takeEvent(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        yield* begun.process.settle;
+        assert.strictEqual(terminals(begun.opened.all).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-REQ-002] a discard that arrives ahead of Stop's reply ends the turn interrupted once",
+    () =>
+      Effect.gen(function* () {
+        const interruptSeen = yield* Deferred.make<void>();
+        const fake = yield* makeFakeDroid({
+          overrides: {
+            "droid.interrupt_session": () => {
+              Deferred.doneUnsafe(interruptSeen, Exit.void);
+              return "silent";
+            },
+          },
+        });
+        const begun = yield* beginTurn(fake);
+        yield* steerBegunTurn(begun);
+        yield* begun.process.emit(completed(1));
+        yield* begun.process.settle;
+
+        yield* begun.opened.runtime
+          .interruptTurn({
+            providerThread: begun.providerThread,
+            providerTurnId: begun.providerTurn.id,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptSeen);
+        yield* begun.process.emit(discarded("Also add tests"));
+
+        const terminal = yield* begun.opened.takeEvent(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+        yield* begun.process.settle;
+        assert.strictEqual(terminals(begun.opened.all).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-REQ-002] a discard cannot end the turn while a steer's own native turn is still running",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const begun = yield* beginTurn(fake);
+        yield* steerBegunTurn(begun, { ordinal: 1, text: "Also add tests" });
+        yield* begun.process.emit(completed(1));
+        yield* begun.process.emit(userEcho(1, "Also add tests"));
+        yield* steerBegunTurn(begun, { ordinal: 2, text: "And a changelog" });
+        yield* begun.process.emit(discarded("And a changelog"));
+        yield* begun.process.settle;
+        assert.deepStrictEqual(terminals(begun.opened.all), [], "the first steer's turn runs");
+
+        yield* begun.process.emit(steerCompleted(1));
+        const terminal = yield* begun.opened.takeEvent(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        yield* begun.process.settle;
         assert.strictEqual(terminals(begun.opened.all).length, 1);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
