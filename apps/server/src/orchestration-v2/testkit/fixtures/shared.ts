@@ -381,6 +381,11 @@ export const PI_MODEL_SELECTION = {
   model: "openrouter/deepseek/deepseek-v4-flash",
 } satisfies ModelSelection;
 
+export const DROID_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("droid"),
+  model: "claude-haiku-5-5",
+} satisfies ModelSelection;
+
 export const ACP_REGISTRY_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("acpRegistry"),
   model: "default",
