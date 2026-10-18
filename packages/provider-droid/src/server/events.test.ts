@@ -713,6 +713,19 @@ describe("tool calls and results [VAL-TURN-008]", () => {
     });
   });
 
+  it("[VAL-REQ-006] settles a tool whose permission was declined cancelled, not failed", () => {
+    const open = feed([toolCall("Execute", { command: "rm -rf build" })]);
+    const declined = { ...open.state, declinedToolUseIds: new Set([TOOL_ID]) };
+    const { events } = feed([toolResult("Error: Tool execution declined by user", true)], {
+      state: declined,
+    });
+    assert.strictEqual(turnItems(events).at(-1)?.status, "cancelled");
+    assert.deepStrictEqual(
+      ofType(events, "node.updated").map((event) => event.node.status),
+      ["cancelled"],
+    );
+  });
+
   it("[VAL-TURN-008] keeps two concurrent tools on separate items", () => {
     const { events } = feed([
       toolCall("Read", { file_path: "/tmp/a" }, TOOL_ID),
@@ -1348,6 +1361,95 @@ describe("old follow-up 7: zero-usage first turn [VAL-TURN-012]", () => {
     });
     assert.strictEqual(usage.usageStatus, "partial");
     assert.strictEqual(usage.hasSubagents, true);
+  });
+
+  describe("a t3 turn that folded in a steer sees one completion per native turn", () => {
+    const counts = (inputTokens: number, outputTokens: number, cacheReadTokens = 0) => ({
+      inputTokens,
+      outputTokens,
+      cacheCreationTokens: 0,
+      cacheReadTokens,
+      thinkingTokens: 0,
+    });
+    const nativeCompletion = (
+      turnId: string,
+      tokenUsage: ReturnType<typeof counts>,
+      cumulativeTokenUsage: ReturnType<typeof counts>,
+    ): Notification => ({
+      type: "agent_turn_completed",
+      reason: "completed",
+      turnId,
+      tokenUsage,
+      cumulativeTokenUsage,
+      childTokenUsage: ZERO,
+    });
+
+    it("[VAL-REQ-002] sums the usage of every native turn", () => {
+      const fresh = createDroidTurnState({ firstItemOrdinal: 1, sessionUsage: DROID_ZERO_COUNTS });
+      const { state } = feed(
+        [
+          nativeCompletion("user-message-1", counts(1_000, 80, 500), counts(1_000, 80, 500)),
+          nativeCompletion("steer-message-1", counts(300, 20), counts(1_300, 100, 500)),
+        ],
+        { state: fresh },
+      );
+      assert.deepStrictEqual(state.turnTokenUsage, {
+        usageScope: "main_agent",
+        usageStatus: "complete",
+        inputTokens: 1_500 + 300,
+        outputTokens: 100,
+        cachedInputTokens: 500,
+        hasSubagents: false,
+      });
+    });
+
+    it("[VAL-REQ-002] measures a follow-on native turn that reports nothing from the previous completion", () => {
+      const fresh = createDroidTurnState({ firstItemOrdinal: 1, sessionUsage: DROID_ZERO_COUNTS });
+      const { state } = feed(
+        [
+          nativeCompletion("user-message-1", counts(1_000, 80), counts(1_000, 80)),
+          {
+            type: "session_token_usage_changed",
+            sessionId: "droid-session-1",
+            tokenUsage: counts(1_400, 130),
+            lastCallTokenUsage: counts(400, 50),
+          },
+          {
+            type: "agent_turn_completed",
+            reason: "completed",
+            turnId: "steer-message-1",
+            tokenUsage: ZERO,
+            cumulativeTokenUsage: counts(1_400, 130),
+            childTokenUsage: ZERO,
+          },
+        ],
+        { state: fresh },
+      );
+      assert.strictEqual(state.turnTokenUsage?.usageStatus, "complete");
+      assert.strictEqual(state.turnTokenUsage?.inputTokens, 1_000 + 400);
+      assert.strictEqual(state.turnTokenUsage?.outputTokens, 80 + 50);
+    });
+
+    it("[VAL-REQ-002] keeps the sum partial when one native turn's usage is unknown", () => {
+      const { state } = feed([
+        {
+          type: "agent_turn_completed",
+          reason: "completed",
+          turnId: "user-message-1",
+          tokenUsage: counts(1_000, 80),
+          childTokenUsage: ZERO,
+        },
+        {
+          type: "agent_turn_completed",
+          reason: "completed",
+          turnId: "steer-message-1",
+          tokenUsage: ZERO,
+          childTokenUsage: ZERO,
+        },
+      ]);
+      assert.strictEqual(state.turnTokenUsage?.usageStatus, "partial");
+      assert.strictEqual(state.turnTokenUsage?.inputTokens, 1_000);
+    });
   });
 
   it("[VAL-TURN-012] a turn that ends without any completion notification still gets exact usage when the baseline is known", () => {

@@ -4,12 +4,15 @@ import {
   ProviderDriverKind,
   type ChatAttachment,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRef,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2TurnItem,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -56,9 +59,17 @@ import { visibleDroidHistory, type DroidHistoryMessage } from "./history.ts";
 import {
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
-  type DroidInboundRequestMethod,
   type DroidTokenCounts,
 } from "./protocol.ts";
+import {
+  DROID_CANCEL_OPTION,
+  droidApprovalRequest,
+  droidAskUserReply,
+  droidPermissionReply,
+  droidUserInputRequest,
+  type DroidApprovalRequest,
+  type DroidUserInputRequest,
+} from "./requests.ts";
 import { makeDroidRpcRuntime, makeRedactor, type DroidRpcEvent } from "./rpc.ts";
 import {
   droidSessionSettings,
@@ -98,7 +109,7 @@ const DroidProviderCapabilitiesV2 = {
     emitsTurnStarted: true,
     emitsTurnCompleted: true,
     supportsInterrupt: true,
-    supportsActiveSteering: false,
+    supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: false,
     supportsQueuedMessages: false,
     terminalStatusQuality: "strong",
@@ -131,7 +142,7 @@ const DroidProviderCapabilitiesV2 = {
     emitsPlanUpdated: false,
     emitsTodoList: false,
     emitsProposedPlan: false,
-    supportsStructuredQuestions: false,
+    supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
   },
   subagents: {
@@ -189,6 +200,29 @@ interface ActiveDroidTurn {
   mapper: DroidMapperState;
   /** The latest `error` notification's text: Droid sends the reason before the failing completion. */
   errorMessage: string | undefined;
+  /** Droid completed the native turn this t3 turn started. */
+  nativeSettled: boolean;
+  /**
+   * Steers Droid accepted but has not echoed yet. Droid queues a steer behind the running native
+   * turn, so it may only start after that turn's completion: the t3 turn waits for it.
+   */
+  readonly queuedSteers: Set<string>;
+  /** Steers Droid runs as native turns of their own; each owes an `agent_turn_completed`. */
+  readonly awaitingNative: Set<string>;
+}
+
+type PendingDroidRequestKind =
+  | { readonly type: "permission"; readonly request: DroidApprovalRequest }
+  | { readonly type: "user_input"; readonly request: DroidUserInputRequest };
+
+/** An inbound Droid request t3 has shown and Droid still waits on. */
+interface PendingDroidRequest {
+  readonly inboundId: string;
+  readonly kind: PendingDroidRequestKind;
+  readonly turn: ActiveDroidTurn;
+  readonly runtimeRequest: OrchestrationV2RuntimeRequest;
+  readonly node: OrchestrationV2ExecutionNode;
+  readonly turnItem: OrchestrationV2TurnItem;
 }
 
 interface DroidThreadState {
@@ -284,16 +318,19 @@ function classifyCompletion(
   }
 }
 
-const inboundDecline = (method: DroidInboundRequestMethod): unknown => {
-  switch (method) {
-    case "droid.request_permission":
-      return { selectedOption: "cancel" };
-    case "droid.ask_user":
-      return DROID_ASK_USER_CANCELLED;
-    case "droid.pick_options":
-      return DROID_PICK_OPTIONS_CANCELLED;
-  }
-};
+/** Droid's echo of a queued steer tells whether it joined the running native turn or began one. */
+function noteQueuedSteerStarted(turn: ActiveDroidTurn, notification: DroidNotification): void {
+  const message = notification["message"];
+  const messageId = field(message, "id");
+  if (field(message, "role") !== "user" || !Predicate.isString(messageId)) return;
+  if (!turn.queuedSteers.delete(messageId)) return;
+  if (turn.nativeSettled && turn.awaitingNative.size === 0) turn.awaitingNative.add(messageId);
+}
+
+const cancelReply = (kind: PendingDroidRequestKind): unknown =>
+  kind.type === "permission"
+    ? { selectedOption: kind.request.cancelOptionId }
+    : DROID_ASK_USER_CANCELLED;
 
 export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
   options: DroidAdapterV2Options,
@@ -375,6 +412,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       let sessionUsage: DroidTokenCounts | undefined;
       let closing = false;
       let ended = false;
+      /** Keyed by the runtime request id; an entry exists exactly while Droid waits on the request. */
+      const pendingRequests = new Map<string, PendingDroidRequest>();
 
       const logWarning = (message: string) => Effect.logWarning(redactor.text(message));
       const logDebug = (message: string) => Effect.logDebug(redactor.text(message));
@@ -433,6 +472,150 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
       });
 
+      const openRequest = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        inboundId: string,
+        kind: PendingDroidRequestKind,
+      ) {
+        const createdAt = yield* DateTime.now;
+        const requestId = yield* idAllocator.allocate.runtimeRequest({
+          driver: DROID_PROVIDER,
+          providerTurnId: turn.providerTurn.id,
+          nativeRequestId: inboundId,
+        });
+        const nodeId = idAllocator.derive.approvalNode({ requestId });
+        const nativeRef = droidRef(inboundId);
+        const ordinal = turn.mapper.nextItemOrdinal;
+        turn.mapper = { ...turn.mapper, nextItemOrdinal: ordinal + 1 };
+        const runtimeRequest: OrchestrationV2RuntimeRequest = {
+          id: requestId,
+          nodeId,
+          providerTurnId: turn.providerTurn.id,
+          nativeRequestRef: nativeRef,
+          kind: kind.type === "permission" ? kind.request.requestKind : "user_input",
+          status: "pending",
+          responseCapability: { type: "live", providerSessionId: input.providerSessionId },
+          createdAt,
+          resolvedAt: null,
+        };
+        const node: OrchestrationV2ExecutionNode = {
+          id: nodeId,
+          threadId: turn.turnInput.threadId,
+          runId: turn.turnInput.runId,
+          parentNodeId: turn.turnInput.rootNodeId,
+          rootNodeId: turn.turnInput.rootNodeId,
+          kind: kind.type === "permission" ? "approval_request" : "user_input_request",
+          status: "waiting",
+          countsForRun: false,
+          providerThreadId: state.providerThread.id,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef: nativeRef,
+          runtimeRequestId: requestId,
+          checkpointScopeId: null,
+          startedAt: createdAt,
+          completedAt: null,
+        };
+        const itemBase = {
+          id: idAllocator.derive.approvalTurnItem({ requestId }),
+          threadId: turn.turnInput.threadId,
+          runId: turn.turnInput.runId,
+          nodeId,
+          providerThreadId: state.providerThread.id,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef: nativeRef,
+          parentItemId: null,
+          ordinal,
+          status: "waiting",
+          startedAt: createdAt,
+          completedAt: null,
+          updatedAt: createdAt,
+        } as const;
+        const turnItem: OrchestrationV2TurnItem =
+          kind.type === "permission"
+            ? {
+                ...itemBase,
+                title: kind.request.title,
+                type: "approval_request",
+                requestId,
+                requestKind: kind.request.requestKind,
+                ...(kind.request.prompt === undefined ? {} : { prompt: kind.request.prompt }),
+                options: kind.request.options,
+              }
+            : {
+                ...itemBase,
+                title: kind.request.questions[0]?.header ?? "Droid question",
+                type: "user_input_request",
+                requestId,
+                questions: kind.request.questions,
+              };
+        pendingRequests.set(String(requestId), {
+          inboundId,
+          kind,
+          turn,
+          runtimeRequest,
+          node,
+          turnItem,
+        });
+        yield* emit({
+          type: "runtime_request.updated",
+          driver: DROID_PROVIDER,
+          threadId: node.threadId,
+          runtimeRequest,
+        });
+        yield* emit({ type: "node.updated", driver: DROID_PROVIDER, node });
+        yield* emit({ type: "turn_item.updated", driver: DROID_PROVIDER, turnItem });
+      });
+
+      /** The caller has already removed `pending` from the registry. */
+      const settleRequest = Effect.fnUntraced(function* (
+        pending: PendingDroidRequest,
+        status: "resolved" | "cancelled",
+        outcome: Pick<OrchestrationV2RuntimeRequest, "decision" | "answers">,
+      ) {
+        const resolvedAt = yield* DateTime.now;
+        yield* emit({
+          type: "runtime_request.updated",
+          driver: DROID_PROVIDER,
+          threadId: pending.node.threadId,
+          runtimeRequest: { ...pending.runtimeRequest, ...outcome, status, resolvedAt },
+        });
+        yield* emit({
+          type: "node.updated",
+          driver: DROID_PROVIDER,
+          node: {
+            ...pending.node,
+            status: status === "resolved" ? "completed" : "cancelled",
+            completedAt: resolvedAt,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: DROID_PROVIDER,
+          turnItem: {
+            ...pending.turnItem,
+            status: status === "resolved" ? "completed" : "cancelled",
+            completedAt: resolvedAt,
+            updatedAt: resolvedAt,
+          },
+        });
+      });
+
+      /**
+       * Droid waits on every inbound request it sent, so a request t3 stops showing is answered
+       * with its cancel shape first. `reply` is false once the process is gone.
+       */
+      const cancelOpenRequests = Effect.fnUntraced(function* (reply: boolean) {
+        const open = [...pendingRequests.values()];
+        pendingRequests.clear();
+        for (const pending of open) {
+          if (reply) {
+            yield* rpc.respond(pending.inboundId, cancelReply(pending.kind)).pipe(Effect.ignore);
+          }
+          yield* settleRequest(pending, "cancelled", { decision: "cancel" });
+        }
+      });
+
       /** Adopts the orchestrator's row when there is one so its identity survives the new session. */
       const bindThread = (
         sessionId: string,
@@ -484,6 +667,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       ) {
         if (state.activeTurn !== turn) return;
         state.activeTurn = null;
+        // Before the terminal: no request may outlive the turn it belongs to.
+        yield* cancelOpenRequests(!ended);
         const completedAt = yield* DateTime.now;
         const settled = settleDroidTurn(
           turn.mapper,
@@ -564,6 +749,14 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         yield* emitMapped(state, mapped.events);
 
         const outcome = classifyCompletion(notification["reason"], turn.errorMessage, closing);
+        // A steer Droid has queued or is running natively belongs to this t3 turn, so a clean
+        // completion of an earlier native turn does not end it. Any other outcome does.
+        if (
+          outcome.kind === "completed" &&
+          (turn.queuedSteers.size > 0 || turn.awaitingNative.size > 0)
+        ) {
+          return;
+        }
         // Signalled before the terminal goes out, so whoever sees the terminal sees the status flip.
         if (outcome.kind === "failed") {
           if (outcome.failure.code === "model_authentication_failed") {
@@ -604,9 +797,18 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return;
         }
         if (notification.type === "agent_turn_completed") {
-          if (notification["turnId"] !== turn.turnInput.message.messageId) return;
+          const nativeTurnId = notification["turnId"];
+          if (nativeTurnId === turn.turnInput.message.messageId && !turn.nativeSettled) {
+            turn.nativeSettled = true;
+          } else if (
+            !Predicate.isString(nativeTurnId) ||
+            !turn.awaitingNative.delete(nativeTurnId)
+          ) {
+            return;
+          }
           return yield* handleCompletion(state, turn, notification);
         }
+        if (notification.type === "create_message") noteQueuedSteerStarted(turn, notification);
         const mapped = mapDroidNotification(
           turn.mapper,
           eventContext(state, turn),
@@ -623,12 +825,43 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         yield* emitMapped(state, mapped.events);
       });
 
-      const handleEvent = Effect.fnUntraced(function* (event: DroidRpcEvent) {
-        if (event._tag === "Request") {
-          // t3 has no prompt UI yet, so Droid is told no rather than left waiting on one.
-          yield* rpc.respond(event.id, inboundDecline(event.method)).pipe(Effect.ignore);
-          return;
+      const handleInbound = Effect.fnUntraced(function* (
+        event: Extract<DroidRpcEvent, { readonly _tag: "Request" }>,
+      ) {
+        const state = threadState;
+        const turn = state?.activeTurn ?? null;
+        const reply = (result: unknown) => rpc.respond(event.id, result).pipe(Effect.ignore);
+        switch (event.method) {
+          case "droid.pick_options":
+            // No t3 surface offers a list pick, so Droid is told it was declined.
+            return yield* reply(DROID_PICK_OPTIONS_CANCELLED);
+          case "droid.ask_user": {
+            const request = droidUserInputRequest(event.params);
+            if (state === null || turn === null || request.native.length === 0) {
+              return yield* reply(DROID_ASK_USER_CANCELLED);
+            }
+            return yield* openRequest(state, turn, event.id, { type: "user_input", request });
+          }
+          case "droid.request_permission": {
+            const request = droidApprovalRequest(event.params);
+            if (request.confirmationType === "ask_user") {
+              // Droid has only been seen asking questions through `droid.ask_user`.
+              yield* logWarning(
+                "Droid sent a permission request with confirmationType ask_user; cancelling it.",
+              );
+              return yield* reply({ selectedOption: DROID_CANCEL_OPTION });
+            }
+            if (state === null || turn === null) {
+              yield* logDebug("Cancelling a Droid permission request that arrived outside a turn.");
+              return yield* reply({ selectedOption: request.cancelOptionId });
+            }
+            return yield* openRequest(state, turn, event.id, { type: "permission", request });
+          }
         }
+      });
+
+      const handleEvent = Effect.fnUntraced(function* (event: DroidRpcEvent) {
+        if (event._tag === "Request") return yield* handleInbound(event);
         const bound = boundNativeId();
         if (bound === undefined || (event.sessionId !== undefined && event.sessionId !== bound)) {
           return;
@@ -882,6 +1115,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               contextUsage: state.providerThread.contextUsage ?? undefined,
             }),
             errorMessage: undefined,
+            nativeSettled: false,
+            queuedSteers: new Set(),
+            awaitingNative: new Set(),
           };
           // Installed before the request so nothing Droid sends right after the ack is lost.
           state.activeTurn = turn;
@@ -916,8 +1152,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const interruptTurn = Effect.fnUntraced(function* (
         interruptInput: ProviderAdapter.ProviderAdapterV2InterruptInput,
       ) {
-        const turn = threadState?.activeTurn ?? null;
-        if (turn === null || turn.providerTurn.id !== interruptInput.providerTurnId) {
+        const state = threadState;
+        const turn = state?.activeTurn ?? null;
+        if (
+          state === null ||
+          turn === null ||
+          turn.providerTurn.id !== interruptInput.providerTurnId
+        ) {
           return yield* protocolError(`Droid turn ${interruptInput.providerTurnId} is not active`);
         }
         // Under the event permit so a notification being mapped cannot overwrite the flag with
@@ -933,6 +1174,142 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         yield* request("droid.interrupt_session", {}).pipe(
           Effect.tapError(() => markInterruptRequested(false)),
         );
+        yield* permit.withPermits(1)(
+          Effect.gen(function* () {
+            if (state.activeTurn !== turn) return;
+            // A stopped turn takes no answers, and Droid hears one for each request it sent.
+            yield* cancelOpenRequests(true);
+            // With no native turn running, only a queued steer holds the t3 turn open, and
+            // Droid sends no completion for a turn it never started.
+            if (turn.nativeSettled && turn.awaitingNative.size === 0) {
+              yield* finishTurn(state, turn, { kind: "interrupted", disposition: "reusable" });
+              yield* updateProviderSession("ready", null);
+            }
+          }),
+        );
+      });
+
+      const steerTurn = Effect.fnUntraced(function* (
+        steerInput: ProviderAdapter.ProviderAdapterV2SteerInput,
+      ) {
+        const notActive = () =>
+          protocolError(`Droid turn ${steerInput.providerTurnId} is not active`);
+        const target = threadState?.activeTurn ?? null;
+        if (target === null || target.providerTurn.id !== steerInput.providerTurnId) {
+          return yield* notActive();
+        }
+        const message = steerInput.message;
+        const payload = yield* resolvePromptPayload(message.text, message.attachments);
+        const messageId = String(message.messageId);
+
+        // A turn finishes under this permit, so once the turn is seen active here a late steer
+        // cannot slip in behind its terminal: it fails before anything is sent, as in Pi.
+        yield* Effect.gen(function* () {
+          const state = threadState;
+          if (state === null || state.activeTurn !== target || ended || closing) {
+            return yield* notActive();
+          }
+          target.queuedSteers.add(messageId);
+          yield* request("droid.add_user_message", {
+            text: payload.text,
+            messageId,
+            queuePlacement: "end_of_turn",
+            ...(payload.images.length === 0 ? {} : { images: payload.images }),
+          }).pipe(
+            Effect.tapError(() =>
+              Effect.sync(() => {
+                target.queuedSteers.delete(messageId);
+              }),
+            ),
+          );
+          const at = yield* DateTime.now;
+          const ordinal = target.mapper.nextItemOrdinal;
+          target.mapper = { ...target.mapper, nextItemOrdinal: ordinal + 1 };
+          // The orchestrator already recorded the steer under this item id; the id is shared so
+          // the projection keeps one row, now tied to Droid's native message.
+          yield* emit({
+            type: "turn_item.updated",
+            driver: DROID_PROVIDER,
+            turnItem: {
+              createdBy: message.createdBy,
+              creationSource: message.creationSource,
+              ...(message.scheduledTaskId === undefined
+                ? {}
+                : { scheduledTaskId: message.scheduledTaskId }),
+              ...(message.senderThreadId === undefined
+                ? {}
+                : { senderThreadId: message.senderThreadId }),
+              id: idAllocator.derive.userTurnItem({ messageId: message.messageId }),
+              threadId: target.turnInput.threadId,
+              runId: target.turnInput.runId,
+              nodeId: target.turnInput.rootNodeId,
+              providerThreadId: state.providerThread.id,
+              providerTurnId: target.providerTurn.id,
+              nativeItemRef: droidRef(messageId),
+              parentItemId: null,
+              ordinal,
+              status: "completed",
+              title: null,
+              startedAt: at,
+              completedAt: at,
+              updatedAt: at,
+              type: "user_message",
+              messageId: message.messageId,
+              inputIntent: "steer",
+              text: message.text,
+              attachments: message.attachments,
+            },
+          });
+        }).pipe(permit.withPermits(1));
+      });
+
+      const respondToRuntimeRequest = Effect.fnUntraced(function* (
+        requestInput: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput,
+      ) {
+        const key = String(requestInput.requestId);
+        const pending = pendingRequests.get(key);
+        if (pending === undefined) {
+          return yield* protocolError(`Droid has no open request ${requestInput.requestId}`);
+        }
+        const { kind } = pending;
+        const decision = requestInput.decision;
+        let reply: unknown;
+        let status: "resolved" | "cancelled" = "resolved";
+        let outcome: Pick<OrchestrationV2RuntimeRequest, "decision" | "answers"> = {};
+        if (kind.type === "permission") {
+          if (decision === undefined) return yield* protocolError("An approval needs a decision");
+          reply = droidPermissionReply(kind.request, decision);
+          if (reply === undefined) {
+            return yield* protocolError(`Droid offered no option for ${decision} in this request`);
+          }
+          status = decision === "cancel" ? "cancelled" : "resolved";
+          outcome = { decision };
+        } else {
+          const answered =
+            decision === "cancel" || decision === "decline"
+              ? undefined
+              : droidAskUserReply(kind.request, requestInput.answers);
+          reply = answered ?? DROID_ASK_USER_CANCELLED;
+          if (answered === undefined) {
+            status = "cancelled";
+            outcome = { decision: "cancel" };
+          } else if (requestInput.answers !== undefined) {
+            outcome = { answers: requestInput.answers };
+          }
+        }
+        yield* rpc.respond(pending.inboundId, reply);
+        pendingRequests.delete(key);
+        if (kind.type === "permission" && (decision === "decline" || decision === "cancel")) {
+          // Droid reports the declined tool as an error result; that is a refusal, not a failure.
+          pending.turn.mapper = {
+            ...pending.turn.mapper,
+            declinedToolUseIds: new Set([
+              ...pending.turn.mapper.declinedToolUseIds,
+              ...kind.request.toolUseIds,
+            ]),
+          };
+        }
+        yield* settleRequest(pending, status, outcome);
       });
 
       const readThreadSnapshot = Effect.fnUntraced(function* (
@@ -1025,13 +1402,16 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             ),
           ),
         steerTurn: (steerInput) =>
-          Effect.fail(
-            new ProviderAdapter.ProviderAdapterSteerRunError({
-              driver: DROID_PROVIDER,
-              providerThreadId: steerInput.providerThread.id,
-              providerTurnId: steerInput.providerTurnId,
-              cause: protocolError("Droid does not support steering a running turn yet"),
-            }),
+          steerTurn(steerInput).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterSteerRunError({
+                  driver: DROID_PROVIDER,
+                  providerThreadId: steerInput.providerThread.id,
+                  providerTurnId: steerInput.providerTurnId,
+                  cause,
+                }),
+            ),
           ),
         interruptTurn: (interruptInput) =>
           interruptTurn(interruptInput).pipe(
@@ -1046,12 +1426,16 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             ),
           ),
         respondToRuntimeRequest: (requestInput) =>
-          Effect.fail(
-            new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-              driver: DROID_PROVIDER,
-              requestId: requestInput.requestId,
-              cause: protocolError("Droid has no pending runtime requests"),
-            }),
+          respondToRuntimeRequest(requestInput).pipe(
+            permit.withPermits(1),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                  driver: DROID_PROVIDER,
+                  requestId: requestInput.requestId,
+                  cause,
+                }),
+            ),
           ),
         readThreadSnapshot: (snapshotInput) =>
           readThreadSnapshot(snapshotInput).pipe(

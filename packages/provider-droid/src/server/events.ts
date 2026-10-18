@@ -131,6 +131,11 @@ export interface DroidMapperState {
    * (sometimes two) before the cancelled completion; that is a stop, not a tool failure.
    */
   readonly interruptRequested: boolean;
+  /**
+   * Tools whose permission the user declined. Droid answers each with an error `tool_result`;
+   * that is a refusal the user chose, so the tool settles `cancelled` rather than `failed`.
+   */
+  readonly declinedToolUseIds: ReadonlySet<string>;
 }
 
 export interface DroidMapResult {
@@ -161,6 +166,7 @@ export function createDroidTurnState(input: {
     contextUsage: input.contextUsage,
     turnTokenUsage: undefined,
     interruptRequested: false,
+    declinedToolUseIds: new Set(),
   };
 }
 
@@ -763,7 +769,11 @@ function mapToolResult(
   const tool =
     toolUseId === undefined ? undefined : state.tools.get(toolNativeItemId(ctx, toolUseId));
   if (tool === undefined || tool.completed) return unchanged(state);
-  const errorStatus = state.interruptRequested ? "interrupted" : "failed";
+  const errorStatus = state.interruptRequested
+    ? "interrupted"
+    : toolUseId !== undefined && state.declinedToolUseIds.has(toolUseId)
+      ? "cancelled"
+      : "failed";
   return updateTool(state, ctx, tool, now, {
     status: notification["isError"] === true ? errorStatus : "completed",
     content: notification["content"],
@@ -955,6 +965,47 @@ export function droidTurnTokenUsage(
   return { usageScope: "main_agent", usageStatus: "unavailable", hasSubagents };
 }
 
+const addCounts = (left: number | undefined, right: number | undefined): number | undefined =>
+  left === undefined ? right : right === undefined ? left : left + right;
+
+/**
+ * A t3 turn that folded in a steer sees one completion per native turn Droid ran for it; the
+ * turn's usage is their sum, and any gap makes the sum partial.
+ */
+function addTurnUsage(previous: TurnTokenUsage | undefined, next: TurnTokenUsage): TurnTokenUsage {
+  if (previous === undefined) return next;
+  const optional = (
+    key: "cachedInputTokens" | "cacheCreationTokens" | "reasoningTokens",
+  ): Partial<Record<typeof key, number>> => {
+    const sum = addCounts(previous[key], next[key]);
+    return sum === undefined ? {} : { [key]: sum };
+  };
+  const common = {
+    usageScope: "main_agent",
+    hasSubagents: previous.hasSubagents || next.hasSubagents,
+    ...optional("cachedInputTokens"),
+    ...optional("cacheCreationTokens"),
+    ...optional("reasoningTokens"),
+  } as const;
+  if (previous.usageStatus === "complete" && next.usageStatus === "complete") {
+    return {
+      ...common,
+      usageStatus: "complete",
+      inputTokens: previous.inputTokens + next.inputTokens,
+      outputTokens: previous.outputTokens + next.outputTokens,
+    };
+  }
+  const inputTokens = addCounts(previous.inputTokens, next.inputTokens);
+  const outputTokens = addCounts(previous.outputTokens, next.outputTokens);
+  const known = inputTokens !== undefined || outputTokens !== undefined;
+  return {
+    ...common,
+    usageStatus: known ? "partial" : "unavailable",
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+  };
+}
+
 /**
  * Completion usage keeps the last call's context size and refreshes the session totals. With no
  * per-call report to build on, the session totals stand in for the context size, and a session
@@ -991,14 +1042,20 @@ function mapTurnCompleted(
   notification: DroidNotification,
   now: DateTime.Utc,
 ): DroidMapResult {
-  const turnTokenUsage = droidTurnTokenUsage(state, notification);
+  const turnTokenUsage = addTurnUsage(
+    state.turnTokenUsage,
+    droidTurnTokenUsage(state, notification),
+  );
   const snapshot = completionContextUsage(state, ctx, notification);
   const cumulative = nonZero(droidTokenCounts(notification["cumulativeTokenUsage"]));
+  const sessionUsage = cumulative ?? state.sessionUsage;
   return {
     state: {
       ...state,
       turnTokenUsage,
-      sessionUsage: cumulative ?? state.sessionUsage,
+      // A follow-on native turn measures its growth from here, not from the t3 turn's start.
+      turnBaseline: sessionUsage,
+      sessionUsage,
       contextUsage: snapshot ?? state.contextUsage,
     },
     events: snapshot === undefined ? [] : [threadUsageEvent(ctx, snapshot, now)],

@@ -1,39 +1,22 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
-  NodeId,
-  ProviderInstanceId,
-  ProviderSessionId,
-  ProviderThreadId,
-  RunAttemptId,
-  RunId,
-  ThreadId,
   type ChatAttachment,
-  type ModelSelection,
-  type OrchestrationV2AppThread,
   type OrchestrationV2ProviderCapabilities,
-  type OrchestrationV2ProviderThread,
   type RuntimeMode,
 } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
-import * as Predicate from "effect/Predicate";
-import * as Queue from "effect/Queue";
-import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
@@ -41,24 +24,37 @@ import { AgentScope, type AgentScopeShape } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { DROID_PROVIDER, DroidAdapterV2Driver, makeDroidAdapterV2 } from "./adapter.ts";
-import { DroidAuthSignal, type DroidAuthSignalService } from "./authSignal.ts";
+import {
+  asRecord,
+  captureLogs,
+  completed,
+  DROID_INSTANCE_ID,
+  ensure,
+  isTerminal,
+  layerTest,
+  makeAdapter,
+  makeProviderThread,
+  MODEL,
+  messageIdFor,
+  methodsOf,
+  openItems,
+  openRuntime,
+  PROVIDER_THREAD_ID,
+  policy,
+  requestsOf,
+  runTurn,
+  selection,
+  SESSION_ID,
+  sessionStatuses,
+  startTurn,
+  terminals,
+  THREAD_ID,
+} from "./adapterHarness.testkit.ts";
 import { DROID_PRESENTATION } from "./status.ts";
 import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid, type FakeDroid } from "./fakeDroid.testkit.ts";
 import { makeRpcMockAgent } from "./rpcMockAgent.testkit.ts";
 
-const layerTest = Layer.mergeAll(
-  NodeServices.layer,
-  IdAllocator.layer,
-  TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
-);
-
 const isResumeError = Schema.is(ProviderAdapter.ProviderAdapterResumeThreadError);
-
-const DROID_INSTANCE_ID = ProviderInstanceId.make("droid");
-const THREAD_ID = ThreadId.make("thread-droid-test");
-const SESSION_ID = ProviderSessionId.make("provider-session-droid-test");
-const PROVIDER_THREAD_ID = ProviderThreadId.make("provider-thread:droid-test");
-const MODEL = "claude-opus-5-5";
 
 const AUTONOMY_BY_MODE = [
   ["approval-required", "off"],
@@ -67,285 +63,9 @@ const AUTONOMY_BY_MODE = [
   ["full-access", "high"],
 ] as const satisfies ReadonlyArray<readonly [RuntimeMode, string]>;
 
-/** `null` selects a model that has no reasoning effort option. */
-const selection = (effort: string | null = "high", model = MODEL): ModelSelection => ({
-  instanceId: DROID_INSTANCE_ID,
-  model,
-  ...(effort === null ? {} : { options: [{ id: "reasoningEffort", value: effort }] }),
-});
-
-/** A turn or thread option that names `effort: undefined` asks for no effort at all. */
-const effortOf = (options: { readonly effort?: string | undefined }): string | null =>
-  "effort" in options ? (options.effort ?? null) : "high";
-
-const policy = (
-  runtimeMode: RuntimeMode = "approval-required",
-  interactionMode: "default" | "plan" = "default",
-) =>
-  ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({ runtimeMode, interactionMode, cwd: null });
-
 /** Runs on the live clock; the timeout only fails a hung test. */
 const live = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.timeout("30 seconds"), TestClock.withLive);
-
-const captureLogs = () => {
-  const entries: Array<{ readonly level: string; readonly text: string }> = [];
-  const logger = Logger.make<unknown, void>((options) => {
-    const message = Array.isArray(options.message) ? options.message : [options.message];
-    const annotations = options.fiber.getRef(References.CurrentLogAnnotations);
-    entries.push({
-      level: options.logLevel,
-      text: [
-        ...message.map(String),
-        ...Object.entries(annotations).map(([key, value]) => `${key}=${String(value)}`),
-      ].join(" "),
-    });
-  });
-  const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    effect.pipe(
-      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
-      Effect.provideService(References.MinimumLogLevel, "All"),
-    );
-  return { entries, provide };
-};
-
-const makeAdapter = Effect.fnUntraced(function* (
-  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
-  authSignal?: DroidAuthSignalService,
-  binaryPath = "droid",
-) {
-  const make = makeDroidAdapterV2({
-    instanceId: DROID_INSTANCE_ID,
-    settings: { enabled: true, binaryPath, customModels: [] },
-    environment: {},
-  }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-  return yield* authSignal === undefined
-    ? make
-    : make.pipe(Effect.provideService(DroidAuthSignal, authSignal));
-});
-
-interface OpenOptions {
-  readonly runtimeMode?: RuntimeMode;
-  readonly interactionMode?: "default" | "plan";
-  readonly effort?: string | undefined;
-  readonly authSignal?: DroidAuthSignalService;
-  readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
-  readonly binaryPath?: string;
-  /** Closing it closes the session while the test keeps collecting the events it publishes. */
-  readonly sessionScope?: Scope.Closeable;
-}
-
-const openRuntime = Effect.fnUntraced(function* (
-  fake: FakeDroid | undefined,
-  options: OpenOptions = {},
-) {
-  const spawner = options.spawner ?? fake?.spawner;
-  assert.isDefined(spawner);
-  const adapter = yield* makeAdapter(spawner!, options.authSignal, options.binaryPath);
-  const open = adapter.openSession({
-    threadId: THREAD_ID,
-    providerSessionId: SESSION_ID,
-    modelSelection: selection(effortOf(options)),
-    runtimePolicy: policy(options.runtimeMode, options.interactionMode),
-  });
-  const runtime = yield* options.sessionScope === undefined
-    ? open
-    : open.pipe(Scope.provide(options.sessionScope));
-  const queue = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
-  const all: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
-  const streamEnded =
-    yield* Deferred.make<Exit.Exit<void, ProviderAdapter.ProviderAdapterV2Error>>();
-  yield* runtime.events.pipe(
-    Stream.runForEach((event) =>
-      Effect.suspend(() => {
-        all.push(event);
-        return Queue.offer(queue, event);
-      }),
-    ),
-    Effect.exit,
-    Effect.flatMap((exit) => Deferred.succeed(streamEnded, exit)),
-    Effect.forkScoped,
-  );
-  const takeEvent = (predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean) =>
-    Effect.gen(function* () {
-      while (true) {
-        const event = yield* Queue.take(queue);
-        if (predicate(event)) return event;
-      }
-    });
-  return { adapter, runtime, takeEvent, all, streamEnded };
-});
-
-type OpenRuntime = Effect.Success<ReturnType<typeof openRuntime>>;
-
-const makeAppThread = Effect.fnUntraced(function* (runtimeMode: RuntimeMode = "approval-required") {
-  const now = yield* DateTime.now;
-  return {
-    createdBy: "user",
-    creationSource: "web",
-    id: THREAD_ID,
-    projectId: "project:fixture:droid" as OrchestrationV2AppThread["projectId"],
-    title: "Droid test thread",
-    providerInstanceId: DROID_INSTANCE_ID,
-    modelSelection: selection(),
-    runtimeMode,
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
-    activeProviderThreadId: null,
-    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: THREAD_ID },
-    forkedFrom: null,
-    createdAt: now,
-    updatedAt: now,
-    archivedAt: null,
-    settledOverride: null,
-    settledAt: null,
-    lastVisitedAt: null,
-    deletedAt: null,
-  } satisfies OrchestrationV2AppThread;
-});
-
-const makeProviderThread = Effect.fnUntraced(function* (nativeId: string | null = null) {
-  const now = yield* DateTime.now;
-  return {
-    id: PROVIDER_THREAD_ID,
-    driver: DROID_PROVIDER,
-    providerInstanceId: DROID_INSTANCE_ID,
-    providerSessionId: SESSION_ID,
-    appThreadId: THREAD_ID,
-    ownerNodeId: null,
-    nativeThreadRef:
-      nativeId === null ? null : { driver: DROID_PROVIDER, nativeId, strength: "strong" as const },
-    nativeConversationHeadRef: null,
-    status: "idle",
-    firstRunOrdinal: null,
-    lastRunOrdinal: null,
-    handoffIds: [],
-    forkedFrom: null,
-    pendingBackgroundTasks: [],
-    contextUsage: null,
-    nativeMetadata: null,
-    goal: null,
-    createdAt: now,
-    updatedAt: now,
-  } satisfies OrchestrationV2ProviderThread;
-});
-
-const messageIdFor = (runOrdinal: number) => `message:${THREAD_ID}:${runOrdinal}`;
-
-interface TurnOptions {
-  readonly runOrdinal?: number;
-  readonly runtimeMode?: RuntimeMode;
-  readonly interactionMode?: "default" | "plan";
-  readonly model?: string;
-  readonly effort?: string | undefined;
-  readonly text?: string;
-  readonly attachments?: ReadonlyArray<ChatAttachment>;
-}
-
-const startTurn = Effect.fnUntraced(function* (
-  runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
-  providerThread: OrchestrationV2ProviderThread,
-  options: TurnOptions = {},
-) {
-  const runOrdinal = options.runOrdinal ?? 1;
-  const runtimeMode = options.runtimeMode ?? "approval-required";
-  const appThread = yield* makeAppThread(runtimeMode);
-  const runId = RunId.make(`run:${THREAD_ID}:${runOrdinal}`);
-  yield* runtime.startTurn({
-    appThread,
-    threadId: THREAD_ID,
-    runId,
-    runOrdinal,
-    providerTurnOrdinal: runOrdinal,
-    attemptId: RunAttemptId.make(`run-attempt:${runId}:1`),
-    rootNodeId: NodeId.make(`node:${runId}:root`),
-    providerThread,
-    message: {
-      messageId: messageIdFor(runOrdinal) as never,
-      text: options.text ?? "Hello droid",
-      attachments: options.attachments ?? [],
-      createdBy: "user",
-      creationSource: "web",
-    },
-    modelSelection: selection(effortOf(options), options.model ?? MODEL),
-    runtimePolicy: policy(runtimeMode, options.interactionMode),
-  });
-});
-
-const completed = (runOrdinal: number, reason = "completed") => ({
-  type: "agent_turn_completed",
-  reason,
-  turnId: messageIdFor(runOrdinal),
-  tokenUsage: {
-    inputTokens: 10,
-    outputTokens: 5,
-    cacheCreationTokens: 0,
-    cacheReadTokens: 0,
-    thinkingTokens: 0,
-  },
-});
-
-const isTerminal = (event: ProviderAdapter.ProviderAdapterV2Event) =>
-  event.type === "turn.terminal";
-
-const terminals = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
-  events.flatMap((event) => (event.type === "turn.terminal" ? [event] : []));
-
-/** `ensureThread` for a fresh thread, then a bound provider thread row. */
-const ensure = Effect.fnUntraced(function* (
-  { runtime }: OpenRuntime,
-  options: { readonly runtimeMode?: RuntimeMode; readonly effort?: string | undefined } = {},
-) {
-  const existing = yield* makeProviderThread();
-  return yield* runtime.ensureThread({
-    threadId: THREAD_ID,
-    modelSelection: selection(effortOf(options)),
-    runtimePolicy: policy(options.runtimeMode),
-    existingProviderThread: existing,
-  });
-});
-
-/** The items whose latest published state is still in flight. */
-const openItems = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) => {
-  const latest = new Map<string, string>();
-  for (const event of events) {
-    if (event.type === "turn_item.updated") {
-      latest.set(String(event.turnItem.id), event.turnItem.status);
-    }
-  }
-  return [...latest].filter(([, status]) =>
-    ["idle", "pending", "running", "waiting"].includes(status),
-  );
-};
-
-const sessionStatuses = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
-  events.flatMap((event) =>
-    event.type === "provider_session.updated" ? [event.providerSession.status] : [],
-  );
-
-const methodsOf = (fake: FakeDroid) => fake.current().methods();
-
-const requestsOf = (fake: FakeDroid, method: string) =>
-  fake
-    .current()
-    .requests()
-    .filter((request) => request.method === method);
-
-const asRecord = (value: unknown): Record<string, unknown> =>
-  Predicate.isObject(value) ? value : assert.fail(`expected an object, got ${typeof value}`);
-
-/** Runs one whole turn on an already-bound thread and returns when its terminal arrived. */
-const runTurn = Effect.fnUntraced(function* (
-  opened: OpenRuntime,
-  fake: FakeDroid,
-  providerThread: OrchestrationV2ProviderThread,
-  options: TurnOptions & { readonly reason?: string } = {},
-) {
-  yield* startTurn(opened.runtime, providerThread, options);
-  yield* fake.current().emit(completed(options.runOrdinal ?? 1, options.reason));
-  return yield* opened.takeEvent(isTerminal);
-});
 
 const EXPECTED_CAPABILITIES = {
   runtimePolicy: { enforcement: "native" },
@@ -370,7 +90,7 @@ const EXPECTED_CAPABILITIES = {
     emitsTurnStarted: true,
     emitsTurnCompleted: true,
     supportsInterrupt: true,
-    supportsActiveSteering: false,
+    supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: false,
     supportsQueuedMessages: false,
     terminalStatusQuality: "strong",
@@ -403,7 +123,7 @@ const EXPECTED_CAPABILITIES = {
     emitsPlanUpdated: false,
     emitsTodoList: false,
     emitsProposedPlan: false,
-    supportsStructuredQuestions: false,
+    supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
   },
   subagents: {
@@ -441,17 +161,19 @@ const EXPECTED_CAPABILITIES = {
 
 describe("DroidAdapterV2", () => {
   describe("capabilities and registration", () => {
-    it.effect("[VAL-TURN-002] pins the M3 capability object and the four runtime modes", () =>
-      Effect.gen(function* () {
-        const fake = yield* makeFakeDroid();
-        const adapter = yield* makeAdapter(fake.spawner);
-        assert.deepStrictEqual(yield* adapter.getCapabilities(), EXPECTED_CAPABILITIES);
-        assert.strictEqual(adapter.driver, DROID_PROVIDER);
-        assert.deepStrictEqual(
-          [...DROID_PRESENTATION.supportedRuntimeModes],
-          ["approval-required", "auto-accept-edits", "auto", "full-access"],
-        );
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    it.effect(
+      "[VAL-TURN-002][VAL-REQ-015] pins the capability object, with steering and structured questions on, and the four runtime modes",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const adapter = yield* makeAdapter(fake.spawner);
+          assert.deepStrictEqual(yield* adapter.getCapabilities(), EXPECTED_CAPABILITIES);
+          assert.strictEqual(adapter.driver, DROID_PROVIDER);
+          assert.deepStrictEqual(
+            [...DROID_PRESENTATION.supportedRuntimeModes],
+            ["approval-required", "auto-accept-edits", "auto", "full-access"],
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("[VAL-TURN-001] the adapter driver builds the adapter for a Droid instance", () =>
@@ -1424,19 +1146,21 @@ describe("DroidAdapterV2", () => {
     );
 
     it.effect(
-      "[VAL-TURN-013] inbound requests are declined so Droid never waits on a hidden prompt",
+      "[VAL-REQ-014] inbound requests with no turn to show them in are cancelled at once so Droid never waits on a hidden prompt",
       () =>
         Effect.gen(function* () {
           const fake = yield* makeFakeDroid();
           const opened = yield* openRuntime(fake);
-          const thread = yield* ensure(opened);
-          yield* startTurn(opened.runtime, thread);
+          yield* ensure(opened);
           const process = fake.current();
           yield* process.emitInbound("perm-1", "droid.request_permission", {
             toolUses: [],
             options: [],
           });
-          yield* process.emitInbound("ask-1", "droid.ask_user", { toolCallId: "t", questions: [] });
+          yield* process.emitInbound("ask-1", "droid.ask_user", {
+            toolCallId: "t",
+            questions: [{ index: 0, question: "Which one?", options: ["a", "b"] }],
+          });
           yield* process.emitInbound("pick-1", "droid.pick_options", { options: [] });
           yield* process.settle;
           const answers = Object.fromEntries(process.answers().map((a) => [a.id, a.result]));
@@ -1444,6 +1168,7 @@ describe("DroidAdapterV2", () => {
           assert.deepStrictEqual(answers["ask-1"], { cancelled: true, answers: [] });
           assert.deepStrictEqual(answers["pick-1"], { selectedIds: [], cancelled: true });
           assert.deepStrictEqual(terminals(opened.all), []);
+          assert.isFalse(opened.all.some((event) => event.type === "runtime_request.updated"));
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
