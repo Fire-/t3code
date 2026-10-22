@@ -19,8 +19,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ProviderAdapterDriverCreateError } from "@t3tools/provider-core/server/adapterDriver";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import type { OrchestratorV2ProviderReplayHarness } from "../testkit/ProviderReplayHarness.ts";
-import { PrimeAdapterV2Driver } from "@t3tools/provider-prime/server";
-import { PRIME_PROVIDER } from "@t3tools/provider-prime/testing";
+import { PRIME_PROVIDER, PrimeAdapterV2Driver } from "@t3tools/provider-prime/server";
 
 export const PRIME_RPC_REPLAY_PROTOCOL = "prime.rpc-jsonl";
 export const PRIME_REPLAY_ANY = "<any>";

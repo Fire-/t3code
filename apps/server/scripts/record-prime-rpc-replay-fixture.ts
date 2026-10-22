@@ -26,7 +26,7 @@ import {
   PrimeOrchestratorReplayHarness,
 } from "../src/orchestration-v2/Adapters/PrimeAdapterV2.testkit.ts";
 import * as PrimeAdapterV2Testkit from "../src/orchestration-v2/Adapters/PrimeAdapterV2.testkit.ts";
-import { PRIME_PROVIDER } from "@t3tools/provider-prime/testing";
+import { PRIME_PROVIDER } from "@t3tools/provider-prime/server";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { provideDeterministicTestRuntime } from "../src/orchestration-v2/testkit/DeterministicRuntime.ts";
 import { ORCHESTRATOR_REPLAY_FIXTURES } from "../src/orchestration-v2/testkit/fixtures/index.ts";

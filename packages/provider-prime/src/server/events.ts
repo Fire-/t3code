@@ -349,7 +349,7 @@ const NUMBERED_DIFF_GAP = /^ +\.\.\.$/u;
  * ` 12 text` lines numbered by new, old and old line respectively, with a
  * bare `...` line where unchanged lines were skipped.
  */
-export function primeNumberedDiffToPatch(fileName: string, diff: string): string | undefined {
+function primeNumberedDiffToPatch(fileName: string, diff: string): string | undefined {
   const hunks: Array<Array<string>> = [];
   const headers: Array<string> = [];
   let current: Array<string> | null = null;
