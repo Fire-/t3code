@@ -24,6 +24,7 @@ import * as Option from "effect/Option";
 import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
+import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn } from "~/lib/utils";
 import { relayEnvironmentDiscovery } from "~/state/relay";
 import { useRelayEnvironmentDiscovery } from "~/state/environments";
@@ -177,7 +178,9 @@ export function CloudEnvironmentConnectRows({
         ? {
             secondaryActionProps: {
               children: "Copy trace ID",
-              onClick: () => void navigator.clipboard?.writeText(traceId),
+              onClick: () => {
+                void writeTextToClipboard(traceId, "trace ID").catch(() => undefined);
+              },
             },
           }
         : undefined,
