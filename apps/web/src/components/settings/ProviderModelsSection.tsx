@@ -24,6 +24,7 @@ const CUSTOM_MODEL_PLACEHOLDER_BY_KIND: Partial<Record<ProviderDriverKind, strin
   [ProviderDriverKind.make("opencode")]: "openai/gpt-5",
   [ProviderDriverKind.make("pi")]: "anthropic/claude-sonnet-5",
   [ProviderDriverKind.make("droid")]: "claude-opus-5-5",
+  [ProviderDriverKind.make("prime-agent")]: "mistral/zai-glm-5-3",
 };
 
 const FILTER_THRESHOLD = 8;
