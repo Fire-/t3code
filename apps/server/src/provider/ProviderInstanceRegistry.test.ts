@@ -36,6 +36,7 @@ import { CursorDriver, type CursorDriverEnv } from "@t3tools/provider-cursor/ser
 import { DroidDriver, type DroidDriverEnv } from "@t3tools/provider-droid/server";
 import { GrokDriver, type GrokDriverEnv } from "@t3tools/provider-grok/server";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "@t3tools/provider-opencode/server";
+import { PrimeDriver, type PrimeDriverEnv } from "@t3tools/provider-prime/server";
 import type { OpenCodeSettings } from "@t3tools/provider-opencode/settings";
 import * as ModelManifest from "./ModelManifest.ts";
 import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRuntime";
@@ -546,6 +547,40 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
         });
         expect(outcome).toMatchObject({ _tag: "Success", success: "alreadyRedeemed" });
       }),
+  );
+
+  it.live(
+    "[VAL-SET-001][VAL-SET-002] resolves the saved Prime block to an enabled Prime instance",
+    () =>
+      Effect.gen(function* () {
+        const savedId = ProviderInstanceId.make("prime-agent");
+        const unsetId = ProviderInstanceId.make("prime_unset");
+        const primeDriverKind = ProviderDriverKind.make("prime-agent");
+        const configMap: ProviderInstanceConfigMap = {
+          [savedId]: {
+            driver: primeDriverKind,
+            enabled: true,
+            config: {
+              binaryPath: "/x/prime-agent",
+              customModels: ["mistral/zai-glm-5-3", { slug: "a/b", name: "B" }],
+            },
+          },
+          [unsetId]: { driver: primeDriverKind, config: {} },
+        };
+
+        const { registry } = yield* makeProviderInstanceRegistry<PrimeDriverEnv>({
+          drivers: [PrimeDriver],
+          configMap,
+        });
+
+        expect(yield* registry.listUnavailable).toEqual([]);
+        const saved = yield* registry.getInstance(savedId);
+        expect(saved?.driverKind).toBe(primeDriverKind);
+        expect(saved?.enabled).toBe(true);
+        const unset = yield* registry.getInstance(unsetId);
+        expect(unset?.driverKind).toBe(primeDriverKind);
+        expect(unset?.enabled).toBe(false);
+      }).pipe(Effect.provide(layerTest)),
   );
 
   it.live(

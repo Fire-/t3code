@@ -840,12 +840,27 @@ describe("provider enabled defaults", () => {
     ).toBe(false);
   });
 
+  it("[VAL-SET-002] keeps Prime disabled until a configured instance opts in", () => {
+    const prime = ProviderDriverKind.make("prime-agent");
+    expect(resolveProviderInstanceEnabled({ driver: prime, config: {} })).toBe(false);
+    expect(resolveProviderInstanceEnabled({ driver: prime, enabled: true, config: {} })).toBe(true);
+  });
+
   it("enables only the stable bindings by default", () => {
     const enabledByDefault = (driver: string) =>
       resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make(driver), config: {} });
     expect(enabledByDefault("codex")).toBe(true);
     expect(enabledByDefault("claudeAgent")).toBe(true);
-    for (const driver of ["cursor", "grok", "muse", "pi", "droid", "opencode", "antigravity"]) {
+    for (const driver of [
+      "cursor",
+      "grok",
+      "muse",
+      "pi",
+      "prime-agent",
+      "droid",
+      "opencode",
+      "antigravity",
+    ]) {
       expect(enabledByDefault(driver)).toBe(false);
     }
   });

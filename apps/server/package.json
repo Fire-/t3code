@@ -26,6 +26,7 @@
     "record:cursor-replay": "node --env-file-if-exists=../../.env --experimental-strip-types scripts/record-cursor-agent-sdk-replay-fixture.ts",
     "record:pi-replay": "node scripts/record-pi-rpc-replay-fixture.ts",
     "record:droid-replay": "node scripts/record-droid-rpc-replay-fixture.ts",
+    "record:prime-replay": "node scripts/record-prime-rpc-replay-fixture.ts",
     "record:grok-replay": "node scripts/record-grok-acp-replay-fixture.ts",
     "record:muse-replay": "node scripts/record-muse-msp-replay-fixture.ts"
   },
@@ -47,6 +48,7 @@
     "@t3tools/provider-muse": "workspace:*",
     "@t3tools/provider-opencode": "workspace:*",
     "@t3tools/provider-pi": "workspace:*",
+    "@t3tools/provider-prime": "workspace:*",
     "@t3tools/source-control-azure-devops": "workspace:*",
     "@t3tools/source-control-bitbucket": "workspace:*",
     "@t3tools/source-control-core": "workspace:*",
