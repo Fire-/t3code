@@ -1,6 +1,8 @@
 [tools]
-node = "24"
-pnpm = "11.10.0"
+# Matches package.json engines; runtime picks it up only on `mise run generate-runtime`.
+node = "26.12.1"
+# The aqua and asdf pnpm backends cannot find pnpm 12's renamed release assets.
+"github:pnpm/pnpm" = "12.14.0"
 
 [env]
 _.path = ["{{config_root}}/node_modules/.bin"]

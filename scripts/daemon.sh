@@ -272,13 +272,13 @@ if [[ ! -f "$DIST/current/bin.mjs" ]]; then
 	exit 1
 fi
 
-# The node binary is resolved at generation time (node 24 required).
+# The node binary is resolved at generation time (the version pinned in .mise.toml).
 NODE_BIN="$RUNTIME_DIR/node.bin"
 if [[ ! -x "$NODE_BIN" ]]; then
 	NODE_BIN="$(cd ~/vendor/t3code 2>/dev/null && mise where node)/bin/node"
 fi
 if [[ ! -x "$NODE_BIN" ]]; then
-	log "ERROR: could not resolve node 24 (tried $RUNTIME_DIR/node.bin and mise)"
+	log "ERROR: could not resolve node (tried $RUNTIME_DIR/node.bin and mise)"
 	exit 1
 fi
 

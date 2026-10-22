@@ -37,7 +37,7 @@ fi
 
 mkdir -p "$BIN_DIR" "$DIST_DIR"/{current,bak,stable}
 
-# --- Resolve the mise-managed node 24 binary (t3 requires node:sqlite) ---
+# --- Resolve the mise-pinned node binary (t3 requires node:sqlite) ---
 NODE_BIN="$(cd "$VENDOR_DIR" && mise where node)/bin/node"
 if [[ ! -x "$NODE_BIN" ]]; then
 	echo "ERROR: could not resolve node via mise in $VENDOR_DIR" >&2
@@ -166,9 +166,9 @@ mise run upgrade   # sync upstream, rebuild main, build, smoke-test, swap
 
 ## Node
 
-The runner execs a baked absolute node path ($NODE_BIN, node 24 — the
-server needs node:sqlite). Re-run \`mise run generate-runtime\` after
-changing the mise toolchain.
+The runner execs a baked absolute node path ($NODE_BIN, pinned in the
+vendor .mise.toml; the server needs node:sqlite). Re-run
+\`mise run generate-runtime\` after changing the mise toolchain.
 AGENTS_EOF
 echo "Generated: $RUNTIME_DIR/AGENTS.md"
 
