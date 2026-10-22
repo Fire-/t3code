@@ -292,6 +292,18 @@ export type OrchestratorFixtureInputStep =
   | {
       readonly type: "advance_clock";
       readonly duration: Duration.Input;
+    }
+  | {
+      readonly type: "set_interaction_mode";
+      readonly interactionMode: ProviderInteractionMode;
+    }
+  | {
+      /**
+       * Forks the thread from the run `sourceRunIndex` (1-based) into a new thread. Every later
+       * step runs on the fork, whose run indexes start again at 1.
+       */
+      readonly type: "fork_thread";
+      readonly sourceRunIndex: number;
     };
 
 export interface OrchestratorFixtureInput {
@@ -309,6 +321,8 @@ export interface OrchestratorFixtureInput {
 
 export interface ProviderOrchestratorReplayVariant {
   readonly driver: ProviderDriverKind;
+  /** Replaces the fixture's input for this provider, when its prompts must differ. */
+  readonly buildInput?: () => OrchestratorFixtureInput;
   readonly transcriptFile: URL;
   readonly recordedScenario?: string;
   readonly transcriptEntriesThroughLabel?: string;
@@ -379,6 +393,11 @@ export const OPENCODE2_MODEL_SELECTION = {
 export const PI_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("pi"),
   model: "openrouter/deepseek/deepseek-v4-flash",
+} satisfies ModelSelection;
+
+export const DROID_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("droid"),
+  model: "claude-haiku-5-5",
 } satisfies ModelSelection;
 
 export const ACP_REGISTRY_MODEL_SELECTION = {
@@ -510,7 +529,9 @@ export function materializeFixtureInput(input: {
       fixtureName: input.scenario,
       projectId,
     });
-    const ids = { threadId, projectId } satisfies FixtureIds;
+    // Reassigned by a `fork_thread` step: the steps after it run on the fork.
+    let ids: FixtureIds = { threadId, projectId };
+    const projectionThreadIds: Array<ThreadId> = [threadId];
     const commands: Array<OrchestrationV2Command> = [];
     const steps: Array<OrchestratorV2ScenarioStep> = [];
     let messageIndex = 0;
@@ -914,6 +935,40 @@ export function materializeFixtureInput(input: {
             });
           }
           break;
+        case "set_interaction_mode":
+          pushDispatch({
+            type: "thread.interaction-mode.set",
+            commandId: yield* idAllocator.allocate.command({
+              fixtureName: input.scenario,
+              commandName: `set-interaction-mode-${step.interactionMode}-${messageIndex}`,
+            }),
+            threadId: ids.threadId,
+            interactionMode: step.interactionMode,
+          });
+          break;
+        case "fork_thread": {
+          const targetThreadId = yield* idAllocator.allocate.thread({
+            fixtureName: `${input.scenario}-fork`,
+            projectId,
+          });
+          pushDispatch({
+            type: "thread.fork",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: yield* idAllocator.allocate.command({
+              fixtureName: input.scenario,
+              commandName: `fork-run-${step.sourceRunIndex}`,
+            }),
+            sourceThreadId: ids.threadId,
+            targetThreadId,
+            sourcePoint: { type: "run", runId: runIdFor(step.sourceRunIndex) },
+            title: `Fork of run ${step.sourceRunIndex}`,
+          });
+          projectionThreadIds.push(targetThreadId);
+          ids = { threadId: targetThreadId, projectId };
+          runIndex = 0;
+          break;
+        }
       }
     }
 
@@ -925,7 +980,7 @@ export function materializeFixtureInput(input: {
     return {
       commands,
       steps,
-      projectionThreadIds: [ids.threadId],
+      projectionThreadIds,
     };
   });
 }

@@ -38,17 +38,16 @@ describe("orchestrator replay fixture contract", () => {
 
           for (const provider of fixture.providers) {
             const transcript = yield* readTranscript(provider.transcriptFile);
-            const replayGateLabels = fixture
-              .buildInput()
-              .steps.flatMap((step) =>
-                step.type === "release_replay_gate" ||
-                step.type === "release_replay_gate_after_waiting"
-                  ? [step.label]
-                  : [],
-              );
+            const buildInput = provider.buildInput ?? fixture.buildInput;
+            const replayGateLabels = buildInput().steps.flatMap((step) =>
+              step.type === "release_replay_gate" ||
+              step.type === "release_replay_gate_after_waiting"
+                ? [step.label]
+                : [],
+            );
             const materialized = yield* materializeFixtureInput({
               scenario: fixture.name,
-              fixtureInput: fixture.buildInput(),
+              fixtureInput: buildInput(),
               driver: provider.driver,
               modelSelection: provider.modelSelection,
             }).pipe(Effect.provide(IdAllocator.layer), provideDeterministicTestRuntime);
@@ -74,17 +73,15 @@ describe("orchestrator replay fixture contract", () => {
               throw new Error(`${fixture.name}/${provider.driver} must start with thread.create`);
             }
             assert.equal(firstCommand.threadId, materialized.projectionThreadIds[0]);
-            const commandProducingSteps = fixture
-              .buildInput()
-              .steps.filter(
-                (step) =>
-                  step.type !== "advance_clock" &&
-                  step.type !== "await_run_status" &&
-                  step.type !== "finish_held_run" &&
-                  step.type !== "capture_shell_snapshot" &&
-                  step.type !== "release_replay_gate" &&
-                  step.type !== "release_replay_gate_after_waiting",
-              );
+            const commandProducingSteps = buildInput().steps.filter(
+              (step) =>
+                step.type !== "advance_clock" &&
+                step.type !== "await_run_status" &&
+                step.type !== "finish_held_run" &&
+                step.type !== "capture_shell_snapshot" &&
+                step.type !== "release_replay_gate" &&
+                step.type !== "release_replay_gate_after_waiting",
+            );
             assert.equal(materialized.commands.length, commandProducingSteps.length + 1);
             assert.isAtLeast(materialized.steps.length, materialized.commands.length);
             assert.equal(typeof provider.assertOutput, "function");
