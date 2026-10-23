@@ -12,6 +12,7 @@ import {
   turnItemOutputText,
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
+import { commandHighlightLanguage } from "@t3tools/client-runtime/work-log/command-label";
 import { isJavaScriptReplTool } from "@t3tools/shared/toolActivity";
 import { ExternalLinkIcon, GitBranchIcon, RotateCcwIcon } from "lucide-react";
 import { memo, type ReactNode, Suspense, use } from "react";
@@ -30,6 +31,7 @@ import { RenderErrorBoundary } from "../RenderErrorBoundary";
 import { CommandOutputPanel, useCommandOutputStreaming } from "./CommandOutputPanel";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
+import { MarkdownCodeBlock } from "./MarkdownCodeBlock";
 import { ShellCommandBlock } from "./ShellCommandBlock";
 
 interface V2ItemInspectorProps {
@@ -234,6 +236,32 @@ function ToolCallBody(
   );
 }
 
+/** Frames a tool call like a chat code fence so it stands apart from the work log around it. */
+function ToolCallFrame(props: {
+  readonly command?: string;
+  readonly args?: unknown;
+  readonly children: ReactNode;
+}) {
+  const theme = useRenderedAppearance();
+  const call = toolCallLines({ command: props.command, args: props.args });
+  const copyText =
+    call.command ??
+    call.argsText ??
+    (props.args === undefined ? "" : JSON.stringify(props.args, null, 2));
+  return (
+    <MarkdownCodeBlock
+      code={copyText}
+      language={call.command ? commandHighlightLanguage(call.command) : "json"}
+      fenceTitle={null}
+      theme={theme}
+      isStreaming={false}
+      canWrap={false}
+    >
+      <div className="px-3 pt-1 pb-2.5">{props.children}</div>
+    </MarkdownCodeBlock>
+  );
+}
+
 export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspectorProps) {
   // Command rows stream their output, including the final output, from the server.
   const streamsOutput =
@@ -264,21 +292,23 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "command_execution" ? (
-        <ToolCallBody
-          command={item.input}
-          exitCode={item.exitCode}
-          {...outputState}
-          onImageExpand={props.onImageExpand}
-          outputSlot={
-            streamsOutput ? (
-              <CommandOutputPanel
-                environmentId={props.environmentId}
-                threadId={props.projectedItem.sourceThreadId}
-                itemId={props.projectedItem.sourceItemId}
-              />
-            ) : undefined
-          }
-        />
+        <ToolCallFrame command={item.input}>
+          <ToolCallBody
+            command={item.input}
+            exitCode={item.exitCode}
+            {...outputState}
+            onImageExpand={props.onImageExpand}
+            outputSlot={
+              streamsOutput ? (
+                <CommandOutputPanel
+                  environmentId={props.environmentId}
+                  threadId={props.projectedItem.sourceThreadId}
+                  itemId={props.projectedItem.sourceItemId}
+                />
+              ) : undefined
+            }
+          />
+        </ToolCallFrame>
       ) : null}
 
       {item.type === "file_change" ? (
@@ -376,12 +406,14 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "dynamic_tool" ? (
-        <ToolCallBody
-          toolName={item.toolName}
-          args={item.input}
-          {...outputState}
-          onImageExpand={props.onImageExpand}
-        />
+        <ToolCallFrame args={item.input}>
+          <ToolCallBody
+            toolName={item.toolName}
+            args={item.input}
+            {...outputState}
+            onImageExpand={props.onImageExpand}
+          />
+        </ToolCallFrame>
       ) : null}
 
       {item.type === "approval_request" ? <StructuredValue value={item.prompt} /> : null}
