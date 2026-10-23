@@ -134,6 +134,7 @@ function WorkingTimer({ createdAt }: { createdAt: string }) {
 }
 
 const compactWorkEntryHeight = 24;
+const workGroupListContentStyle = { paddingBottom: 1 };
 
 function ExpandedWorkGroupEntries({
   anchorKey,
@@ -252,6 +253,10 @@ function ExpandedWorkGroupEntries({
           keyExtractor={workEntryKey}
           renderItem={renderEntry}
           estimatedItemSize={compactWorkEntryHeight}
+          // LegendList rounds measured rows to whole pixels, so at non-default font
+          // sizes the last row overhangs by up to half a pixel and Chrome shows a
+          // scrollbar for a list that fits.
+          contentContainerStyle={workGroupListContentStyle}
           drawDistance={240}
           recycleItems
           {...(initialScrollIndex ? { initialScrollIndex } : {})}
