@@ -83,7 +83,7 @@ export function ThreadDetailsCard({
   useLayoutEffect(() => {
     onPresentationChange(mode);
     if (mode === "inline" && popoverOpen)
-      useRightPanelStore.getState().setThreadPanelOpen(threadRef, "popover", false);
+      useRightPanelStore.getState().promoteThreadPanelPopover(threadRef);
   }, [mode, onPresentationChange, threadRef, popoverOpen]);
   useLayoutEffect(() => {
     const element = contentElement;
