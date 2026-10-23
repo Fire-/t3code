@@ -258,6 +258,7 @@ function ToolCallFrame(props: {
       theme={theme}
       isStreaming={false}
       canWrap={false}
+      flush
     >
       <div className="px-3 pt-1 pb-2.5">{props.children}</div>
     </MarkdownCodeBlock>
