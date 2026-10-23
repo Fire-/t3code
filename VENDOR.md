@@ -220,6 +220,11 @@ If typecheck, tests, or builds fail in code that no overlay branch touches,
 they are upstream's issues — do not fix, track, or document them here. Only
 failures introduced by overlay changes are ours to fix.
 
+Exception: when such a failure exposes a real product bug (not just a broken
+or flaky test), it may get its own small fix overlay, but only with the user's
+explicit approval. Fix the code, not the test, and drop the overlay once
+upstream fixes it.
+
 The `patches/` directory and `patchedDependencies` are **upstream's own**
 pnpm patch mechanism — our overlays never touch it.
 
