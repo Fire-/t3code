@@ -6,7 +6,7 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, expect, it } from "@effect/vitest";
 
-import { PRIME_T3_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
+import { PRIME_RUNTIME_MODE_COMMAND, PRIME_T3_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 
 type RequestHook = (
@@ -40,6 +40,7 @@ async function loadHooks(commands: ReadonlyArray<SkillCommand> = []) {
     stripFrontmatter: (content: string) => content,
     pi: {
       on: (name: string, handler: unknown) => handlers.set(name, handler),
+      registerCommand: () => undefined,
       getCommands: () => commands,
     },
   });
@@ -360,6 +361,7 @@ describe("Prime tool discovery permissions", () => {
         on: (name: string, handler: ToolCallHook) => {
           if (name === "tool_call") toolCall = handler;
         },
+        registerCommand: () => undefined,
         getAllTools: () => [{ name: "tool_search", sourceInfo: { path: searchPath } }],
       },
     });
@@ -452,6 +454,27 @@ describe("Prime ipython permissions", () => {
     },
   );
 
+  it("follows runtime mode changes sent to the live session", async () => {
+    const bridge = await loadMcpBridge({ runtimeMode: "approval-required" });
+    const hook = bridge.handlers.get("tool_call") as unknown as ToolCallHook;
+    const setMode = bridge.commands.get(PRIME_RUNTIME_MODE_COMMAND)!;
+    const asks = async () => {
+      let asked = false;
+      await hook(
+        { toolName: "ipython", input: { code: "1" } },
+        { ui: { confirm: async () => (asked = true) } },
+      );
+      return asked;
+    };
+    assert.isTrue(await asks());
+    await setMode("full-access");
+    assert.isFalse(await asks());
+    await setMode("approval-required");
+    assert.isTrue(await asks());
+    await expect(setMode("everything")).rejects.toThrow("Unknown T3 Code runtime mode");
+    assert.isTrue(await asks());
+  });
+
   it("[VAL-LAUNCH-004] runs ipython without asking in full-access", async () => {
     const { result, confirmations } = await callTool("full-access", "ipython", false);
     assert.isUndefined(result);
@@ -502,7 +525,10 @@ async function loadRequestHook(): Promise<RequestHook> {
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
     process: { env: {} },
-    pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
+    pi: {
+      on: (name: string, handler: RequestHook) => handlers.set(name, handler),
+      registerCommand: () => undefined,
+    },
   });
   const hook = handlers.get("before_provider_request");
   assert.isDefined(hook);

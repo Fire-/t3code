@@ -6,6 +6,7 @@ import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcp
 import {
   PRIME_T3_MCP_EXTENSION_FILENAME,
   PRIME_T3_MCP_EXTENSION_SOURCE,
+  primeRuntimeMode,
   T3_MCP_BEARER_ENV,
   T3_MCP_URL_ENV,
   T3_PRIME_RUNTIME_MODE_ENV,
@@ -286,6 +287,7 @@ export function buildPrimeRpcLaunch(input: {
   delete environment[T3_MCP_URL_ENV];
   delete environment[T3_MCP_BEARER_ENV];
   delete environment[T3_PRIME_MCP_EXTENSION_PATH_ENV];
+  delete environment[T3_PRIME_RUNTIME_MODE_ENV];
 
   return {
     args,
@@ -295,10 +297,7 @@ export function buildPrimeRpcLaunch(input: {
         ? { [T3_PRIME_MCP_EXTENSION_PATH_ENV]: input.extensionPath }
         : {}),
       ...(hasT3Extension && input.runtimeMode !== undefined
-        ? {
-            [T3_PRIME_RUNTIME_MODE_ENV]:
-              input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
-          }
+        ? { [T3_PRIME_RUNTIME_MODE_ENV]: primeRuntimeMode(input.runtimeMode) }
         : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {

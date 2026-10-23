@@ -10,6 +10,17 @@ export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PRIME_RUNTIME_MODE_ENV = "T3_PRIME_RUNTIME_MODE";
 export const T3_PRIME_MCP_EXTENSION_PATH_ENV = "T3_PRIME_MCP_EXTENSION_PATH";
+/** Hidden bridge command that switches a live session's runtime mode. */
+export const PRIME_RUNTIME_MODE_COMMAND = "t3-runtime-mode";
+
+export type PrimeRuntimeMode = "approval-required" | "auto-accept-edits" | "full-access";
+
+/** The bridge has no classifier for "auto", so it asks like approval-required. */
+export function primeRuntimeMode(
+  mode: "approval-required" | "auto-accept-edits" | "auto" | "full-access",
+): PrimeRuntimeMode {
+  return mode === "auto" ? "approval-required" : mode;
+}
 
 /**
  * Prime tools whose confirmations the bridge raises as file-change approvals.
@@ -27,6 +38,7 @@ const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PRIME_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PRIME_MCP_EXTENSION_PATH_ENV)};
+const RUNTIME_MODE_COMMAND = ${JSON.stringify(PRIME_RUNTIME_MODE_COMMAND)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
 // Prime's only built-in tool, ipython, can run shell commands and edit files
@@ -57,14 +69,16 @@ function env(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
-function runtimeMode(): RuntimeMode {
-  const value = env(RUNTIME_MODE_ENV);
+function isRuntimeMode(value: string | undefined): value is RuntimeMode {
   return value === "approval-required" ||
     value === "auto-accept-edits" ||
     value === "auto" ||
-    value === "full-access"
-    ? value
-    : "full-access";
+    value === "full-access";
+}
+
+function runtimeMode(): RuntimeMode {
+  const value = env(RUNTIME_MODE_ENV);
+  return isRuntimeMode(value) ? value : "full-access";
 }
 
 // Approvers need the cell or command itself; its JSON wrapper escapes every
@@ -342,6 +356,18 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     if (!approved) {
       return { block: true, reason: \`\${event.toolName} was declined in T3 Code.\` };
     }
+  });
+
+  // T3 switches a live session's mode here rather than through anything on
+  // disk that an auto-accepted edit could rewrite. The hook above reads
+  // process.env, which RLM subagent sessions in this worker share.
+  pi.registerCommand(RUNTIME_MODE_COMMAND, {
+    description: "Set the T3 Code runtime mode for this session.",
+    handler: async (args) => {
+      const mode = args.trim();
+      if (!isRuntimeMode(mode)) throw new Error(\`Unknown T3 Code runtime mode: \${mode}\`);
+      process.env[RUNTIME_MODE_ENV] = mode;
+    },
   });
 
   const endpoint = env(URL_ENV);

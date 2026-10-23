@@ -726,6 +726,7 @@ const startTurn = Effect.fnUntraced(function* (
   threadId = THREAD_ID,
   continuation = false,
   title?: string,
+  policy = runtimePolicy,
 ) {
   const appThread = yield* makeAppThread(model, threadId, title);
   const runId = RunId.make(`run:${threadId}:${runOrdinal}`);
@@ -746,7 +747,7 @@ const startTurn = Effect.fnUntraced(function* (
       creationSource: continuation ? "provider" : "web",
     },
     modelSelection: selection ?? modelSelection(model),
-    runtimePolicy,
+    runtimePolicy: policy,
   });
 });
 
@@ -4990,6 +4991,10 @@ describe("Prime settle engine", () => {
   ) {
     const fake = yield* makeFakePrime;
     configure?.(fake);
+    const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+      ...runtimePolicy,
+      runtimeMode,
+    });
     const { runtime, takeEvent } = yield* openRuntime(
       fake,
       "default",
@@ -4997,12 +5002,12 @@ describe("Prime settle engine", () => {
       SESSION_ID,
       undefined,
       continuationRequests,
-      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({ ...runtimePolicy, runtimeMode }),
+      policy,
     );
     const providerThread = yield* runtime.ensureThread({
       threadId: THREAD_ID,
       modelSelection: modelSelection("default"),
-      runtimePolicy,
+      runtimePolicy: policy,
     });
     const seen: Array<AdapterEvent> = [];
     const record = (predicate: (event: AdapterEvent) => boolean) =>
@@ -5011,7 +5016,19 @@ describe("Prime settle engine", () => {
         return predicate(event);
       });
     const begin = Effect.fnUntraced(function* (text = "Hello prime-agent", runOrdinal = 1) {
-      yield* startTurn(runtime, providerThread, "default", [], text, undefined, runOrdinal);
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        text,
+        undefined,
+        runOrdinal,
+        THREAD_ID,
+        false,
+        undefined,
+        policy,
+      );
       yield* fake.takeRequest("prompt");
       // Prime acknowledges a prompt on acceptance, before the run's events.
       yield* fake.emit({ type: "response", command: "prompt", success: true });
@@ -5083,6 +5100,104 @@ describe("Prime settle engine", () => {
     attachments: [],
     createdBy: "user" as const,
     creationSource: "web" as const,
+  });
+
+  describe("live runtime mode changes", () => {
+    type RuntimeMode = ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
+    const policyFor = (runtimeMode: RuntimeMode) =>
+      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({ ...runtimePolicy, runtimeMode });
+    const promptMessages = (fake: FakePrime) =>
+      fake
+        .allRequests()
+        .filter((request) => request["type"] === "prompt")
+        .map((request) => request["message"]);
+    const acceptPrompt = (fake: FakePrime) =>
+      fake
+        .takeRequest("prompt")
+        .pipe(Effect.andThen(fake.emit({ type: "response", command: "prompt", success: true })));
+
+    it.effect(
+      "sends each change once and re-sends a mode other than the launch mode before every turn",
+      () =>
+        Effect.gen(function* () {
+          const { fake, runtime, providerThread, record } = yield* openTurn(
+            undefined,
+            "approval-required",
+          );
+          const setMode = (runtimeMode: RuntimeMode) =>
+            runtime.setRuntimeMode!({ providerThread, runtimeMode });
+          const completeTurn = Effect.fnUntraced(function* (
+            text: string,
+            runOrdinal: number,
+            runtimeMode: RuntimeMode,
+            prompts: number,
+          ) {
+            yield* startTurn(
+              runtime,
+              providerThread,
+              "default",
+              [],
+              text,
+              undefined,
+              runOrdinal,
+              THREAD_ID,
+              false,
+              undefined,
+              policyFor(runtimeMode),
+            );
+            for (let sent = 0; sent < prompts; sent++) yield* acceptPrompt(fake);
+            yield* fake.emit({ type: "agent_start" });
+            yield* replyText(fake, text);
+            yield* fake.emit(agentEnd());
+            const terminal = yield* record((event) => event.type === "turn.terminal");
+            assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          });
+
+          yield* setMode("full-access");
+          yield* acceptPrompt(fake);
+          yield* setMode("full-access");
+          yield* completeTurn("first", 1, "full-access", 2);
+          yield* setMode("approval-required");
+          yield* acceptPrompt(fake);
+          yield* completeTurn("second", 2, "approval-required", 1);
+
+          assert.deepEqual(promptMessages(fake), [
+            "/t3-runtime-mode full-access",
+            "/t3-runtime-mode full-access",
+            "first",
+            "/t3-runtime-mode approval-required",
+            "second",
+          ]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "a rejected change leaves the turn running and is sent again on the next request",
+      () =>
+        Effect.gen(function* () {
+          const { fake, runtime, providerThread, record, begin } = yield* openTurn(
+            undefined,
+            "approval-required",
+          );
+          yield* begin();
+          yield* fake.emit({ type: "agent_start" });
+          yield* runtime.setRuntimeMode!({ providerThread, runtimeMode: "full-access" });
+          yield* fake.takeRequest("prompt");
+          yield* fake.emitOrphanError("prompt", "Session input was invalidated before admission");
+          yield* pumpBarrier(fake, record, "after the rejection");
+          yield* runtime.setRuntimeMode!({ providerThread, runtimeMode: "full-access" });
+          yield* acceptPrompt(fake);
+          yield* replyText(fake, "still running");
+          yield* fake.emit(agentEnd());
+          const terminal = yield* record((event) => event.type === "turn.terminal");
+          assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+          assert.deepEqual(promptMessages(fake), [
+            "Hello prime-agent",
+            "/t3-runtime-mode full-access",
+            "/t3-runtime-mode full-access",
+          ]);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
   });
 
   it.effect(

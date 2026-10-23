@@ -121,7 +121,7 @@ describe("prime-agent T3 MCP injection", () => {
         "--provider",
         "anthropic",
       ],
-      environment: {},
+      environment: { [T3_PRIME_RUNTIME_MODE_ENV]: "full-access" },
       mcpSession,
       extensionPath: "/tmp/cache/prime-t3-mcp-extension.ts",
       ephemeral: true,
@@ -138,6 +138,7 @@ describe("prime-agent T3 MCP injection", () => {
       "--no-tools",
     ]);
     assert.isFalse(launch.hasT3Mcp);
+    assert.isUndefined(launch.env[T3_PRIME_RUNTIME_MODE_ENV]);
     assert.deepInclude(resolvePrimeLaunchArgs("--mode text"), {
       ok: false,
       message: "Prime launch argument '--mode' is controlled by T3 Code and cannot be overridden.",

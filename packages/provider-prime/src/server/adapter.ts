@@ -108,7 +108,12 @@ import {
   materializePrimeT3McpExtension,
   resolvePrimeLaunchArgs,
 } from "./mcpInjection.ts";
-import { PRIME_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
+import {
+  PRIME_FILE_CHANGE_TOOLS,
+  PRIME_RUNTIME_MODE_COMMAND,
+  type PrimeRuntimeMode,
+  primeRuntimeMode,
+} from "./mcpExtensionSource.ts";
 
 export const PRIME_PROVIDER = ProviderDriverKind.make("prime-agent");
 const PRIME_DRIVER_KIND = PRIME_PROVIDER;
@@ -236,9 +241,9 @@ const PrimeProviderCapabilitiesV2 = {
     supportsMultipleProviderThreadsPerSession: false,
     supportsModelSwitchInSession: true,
     supportsProviderSwitchingViaHandoff: true,
-    // Mode changes restart this process so the injected permission hook gets
-    // one immutable policy for its whole lifetime.
-    supportsRuntimeModeSwitchInSession: false,
+    // The injected permission hook takes mode changes through a hidden bridge
+    // command, so they reach the session without restarting it.
+    supportsRuntimeModeSwitchInSession: true,
     pendingRequestsSurviveRestart: false,
   },
   threads: {
@@ -725,10 +730,25 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       // Prompt responses carry no id. Keep their session-wide send order and
       // owner so a late ack from a settled turn cannot affect the next turn.
       const pendingPromptResponses: Array<{
-        readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
-        readonly kind: "turn_start" | "steer";
+        readonly providerTurnId: OrchestrationV2ProviderTurn["id"] | null;
+        readonly kind: "turn_start" | "steer" | "runtime_mode";
         readonly sessionCommand?: string | undefined;
       }> = [];
+      // A recovered Prime worker restarts from its launch environment, so a
+      // mode that differs from the launch mode is re-sent before every turn.
+      // `null` means a change was rejected and what Prime holds is unknown.
+      const launchedRuntimeMode = primeRuntimeMode(input.runtimePolicy.runtimeMode);
+      let heldRuntimeMode: PrimeRuntimeMode | null = launchedRuntimeMode;
+      /** Callers hold `sessionEventPermit` so the ack cannot overtake its pending entry. */
+      const sendRuntimeMode = (mode: PrimeRuntimeMode) =>
+        connection.send({ type: "prompt", message: `/${PRIME_RUNTIME_MODE_COMMAND} ${mode}` }).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              pendingPromptResponses.push({ providerTurnId: null, kind: "runtime_mode" });
+              heldRuntimeMode = mode;
+            }),
+          ),
+        );
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
 
@@ -2491,6 +2511,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               return;
             }
             if (event["success"] !== false) return;
+            if (pendingPrompt?.kind === "runtime_mode") {
+              heldRuntimeMode = null;
+              yield* Effect.logWarning("Prime rejected a runtime mode change.", {
+                errorLength: recordString(event, "error")?.length,
+              });
+              return;
+            }
             if (command === "steer" || pendingPrompt?.kind === "steer") {
               // A rejected steer only means that one message was refused. The
               // turn it was aimed at is still running on Prime, so terminalizing
@@ -3083,6 +3110,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               state.activeTurn = activeTurn;
               activeTurn.adoptedWake = wake !== null && !continuation;
               if (payload !== null) {
+                const runtimeMode = primeRuntimeMode(turnInput.runtimePolicy.runtimeMode);
+                if (runtimeMode !== heldRuntimeMode || runtimeMode !== launchedRuntimeMode) {
+                  yield* sendRuntimeMode(runtimeMode);
+                }
                 yield* connection.send({
                   type: "prompt",
                   message: payload.message,
@@ -3195,6 +3226,31 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 }),
             ),
           ),
+        setRuntimeMode: ({ providerThread, runtimeMode }) =>
+          sessionEventPermit
+            .withPermits(1)(
+              Effect.gen(function* () {
+                if (
+                  closed ||
+                  stopRequested ||
+                  threadState?.providerThread.id !== providerThread.id
+                ) {
+                  return;
+                }
+                const mode = primeRuntimeMode(runtimeMode);
+                if (mode !== heldRuntimeMode) yield* sendRuntimeMode(mode);
+              }),
+            )
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: PRIME_PROVIDER,
+                    detail: "Prime did not take the runtime mode change",
+                    cause,
+                  }),
+              ),
+            ),
         interruptTurn: (interruptInput) =>
           Effect.gen(function* () {
             const turn = threadState?.activeTurn ?? null;
