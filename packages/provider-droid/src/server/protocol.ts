@@ -209,6 +209,15 @@ export function droidToolSummary(input: unknown): string | undefined {
   return undefined;
 }
 
+/** A Script row's title names the tools its JavaScript calls as `tools.Name(...)`. */
+export function droidScriptTitle(script: string): string {
+  const names = new Set<string>();
+  for (const match of script.matchAll(/\btools\.([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (match[1] !== undefined) names.add(match[1]);
+  }
+  return names.size === 0 ? "Script" : `Script: ${[...names].join(", ")}`;
+}
+
 export function droidToolPath(input: unknown): string | undefined {
   if (!Predicate.isObject(input)) return undefined;
   return asTrimmed(input["file_path"]) ?? asTrimmed(input["path"]);

@@ -32,6 +32,7 @@ import * as Struct from "effect/Struct";
 import {
   type DroidTokenCounts,
   droidEditDiffCounts,
+  droidScriptTitle,
   droidTokenCounts,
   droidToolKind,
   droidToolPath,
@@ -732,6 +733,24 @@ function toolItemEvent(
         ...(newStr === undefined ? {} : { newStr }),
         ...(counts === undefined ? {} : counts),
         ...(diffStr === undefined ? {} : { diffStr }),
+      },
+    };
+  }
+
+  // Script runs JavaScript, so clients get it as their JavaScript tool: a `code` input that
+  // renders highlighted and height-capped instead of one unbounded plain-text `script` line.
+  if (tool.name === "Script") {
+    const code = asString(input["script"]);
+    return {
+      type: "turn_item.updated",
+      driver: DROID_DRIVER,
+      turnItem: {
+        ...shared,
+        type: "dynamic_tool",
+        title: code === undefined ? tool.name : droidScriptTitle(code),
+        toolName: "js",
+        input: code === undefined ? {} : { code },
+        ...(resultText === undefined ? {} : { output: resultText }),
       },
     };
   }

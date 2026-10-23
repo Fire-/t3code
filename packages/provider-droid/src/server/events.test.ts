@@ -632,6 +632,36 @@ describe("tool calls and results [VAL-TURN-008]", () => {
     }
   });
 
+  it("[VAL-TURN-008] shows a Script call as JavaScript titled by the tools it calls", () => {
+    const script = [
+      'const page = await tools.FetchUrl({ url: "https://example.com" });',
+      'await tools.Execute({ command: "ls" });',
+      'text(await tools.FetchUrl({ url: "https://example.org" }));',
+    ].join("\n");
+    const { events } = feed([
+      toolCall("Script", {}),
+      toolCall("Script", { script }),
+      toolResult("ok\n[Script completed · 0.4 s elapsed · 3 calls · log: /tmp/x.log]"),
+    ]);
+    const items = turnItems(events);
+    assert.strictEqual(new Set(items.map((item) => item.id)).size, 1);
+    assert.deepStrictEqual(
+      items.map((item) =>
+        item.type === "dynamic_tool" ? [item.toolName, item.title, item.input] : [item.type],
+      ),
+      [
+        ["js", "Script", {}],
+        ["js", "Script: FetchUrl, Execute", { code: script }],
+        ["js", "Script: FetchUrl, Execute", { code: script }],
+      ],
+    );
+    const final = items.at(-1);
+    assert.strictEqual(
+      final?.type === "dynamic_tool" ? final.output : undefined,
+      "ok\n[Script completed · 0.4 s elapsed · 3 calls · log: /tmp/x.log]",
+    );
+  });
+
   it("[VAL-SUB-001] leaves a Task call and its result to the subagent projection", () => {
     const { events } = feed([
       toolCall("Task", {}),
