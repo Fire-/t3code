@@ -1,0 +1,290 @@
+[tools]
+# Matches package.json engines; runtime picks it up only on `mise run generate-runtime`.
+node = "26.12.1"
+# The aqua and asdf pnpm backends cannot find pnpm 12's renamed release assets.
+"github:pnpm/pnpm" = "12.14.0"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+[tasks.sync]
+description = "Fetch upstream and re-overlay all overlay/* branches onto origin/main (requires clean worktree)"
+run = """
+set -eu
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "ERROR: You have uncommitted changes. Commit or stash them first."
+  git status --short
+  exit 1
+fi
+branch=$(git branch --show-current)
+git fetch origin main
+for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
+  bash "$HOME/code/git-overlay/git-overlay" origin/main "$b"
+done
+if [ -n "$branch" ]; then git checkout "$branch"; fi
+"""
+
+[tasks.rebuild-local]
+description = "Reset local to origin/main and re-merge all overlay/* branches (ends on local)"
+run = """
+set -eu
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "ERROR: You have uncommitted changes. Commit or stash them first."
+  git status --short
+  exit 1
+fi
+mise run check-overlays
+git checkout local
+git reset --hard origin/main
+for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
+  # rerere stages recorded conflict resolutions but merge still exits
+  # non-zero — conclude the merge so the sequence can continue hands-free.
+  # A genuinely new conflict leaves unmerged paths and commit fails, aborting.
+  git merge "$b" --no-edit || git commit --no-edit
+done
+echo "local rebuilt: origin/main + all overlay/* branches (alphabetical order)"
+"""
+
+# Overlays never stack, so a change two of them need is cherry-picked into
+# each. Copies that drift apart make the merge into local conflict or blend
+# both versions.
+[tasks.check-overlays]
+description = "Fail if a commit shared by several overlay/* branches (same subject) differs between them"
+run = '''
+set -euo pipefail
+for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
+  git log --no-merges -p origin/main.."$b" | git patch-id --stable |
+    while read -r pid sha; do
+      printf '%s\t%s\t%s\t%s\n' "$(git log -1 --format=%s "$sha")" "$pid" "$b" "$sha"
+    done
+done | awk -F'\t' '
+  { rows[$1] = rows[$1] sprintf("  %-28s %.10s  patch %.10s\n", $3, $4, $2); n[$1]++ }
+  !($1 in pid) { pid[$1] = $2; next }
+  pid[$1] != $2 { bad[$1] = 1 }
+  END {
+    for (s in n) if (n[s] > 1) shared++
+    for (s in bad) drift++
+    if (!drift) { printf "overlays ok: %d shared commit(s), identical in every overlay\n", shared; exit }
+    print "ERROR: commits shared between overlays have drifted (matched by subject):"
+    for (s in bad) printf "%s\n%s", s, rows[s]
+    print "Re-cherry-pick one copy into the other overlays so every copy carries the same patch."
+    exit 1
+  }'
+'''
+
+[tasks.build]
+description = "Build all workspace packages"
+run = "pnpm build"
+
+[tasks.smoke-test]
+description = "Verify the built server bundle boots (--version)"
+run = """
+BIN="{{config_root}}/apps/server/dist/bin.mjs"
+if [[ ! -f "$BIN" ]]; then
+  echo "ERROR: server bundle not found. Run 'mise run build' first."
+  exit 1
+fi
+if ! node "$BIN" --version >/dev/null 2>&1; then
+  echo "ERROR: smoke test failed - bundle crashes on startup"
+  exit 1
+fi
+echo "smoke ok: $(node "$BIN" --version)"
+"""
+
+[tasks.swap]
+description = "Promote built bundle to ~/.t3/code/dist/current (shift current->bak)"
+run = """
+set -euo pipefail
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+DIST="$RUNTIME/dist"
+VENDOR_DIST="{{config_root}}/apps/server/dist"
+STAGING="$DIST/.staging"
+
+if [[ ! -f "$VENDOR_DIST/bin.mjs" ]]; then
+  echo "ERROR: no server bundle found. Run 'mise run build' first."
+  exit 1
+fi
+
+# Build the new tier off to the side so the daemon never sees a half-copied
+# current, and a failed natives copy leaves the live tiers untouched.
+mkdir -p "$DIST"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+cp -R "$VENDOR_DIST/." "$STAGING/"
+node "{{config_root}}/scripts/runtime-natives.mjs" "$STAGING/node_modules"
+# Boot from the tier itself: the vendor tree's node_modules can hide a
+# missing external.
+version=$(node "$STAGING/bin.mjs" --version)
+
+# Shift tiers: bak -> (dropped), current -> bak
+if [[ -f "$DIST/current/bin.mjs" ]]; then
+  rm -rf "$DIST/bak"
+  mv "$DIST/current" "$DIST/bak"
+fi
+mv "$STAGING" "$DIST/current"
+
+echo "swapped: current <- $version"
+"""
+
+[tasks.swap-back]
+description = "Restore previous build from bak to current"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+DIST="$RUNTIME/dist"
+
+if [[ ! -f "$DIST/bak/bin.mjs" ]]; then
+  echo "ERROR: no bak tier to restore from."
+  exit 1
+fi
+
+# A pre-v2 build reads state.sqlite, frozen at the v2 cutover.
+if [[ -f "$RUNTIME/userdata/statev2.sqlite" ]] && ! grep -qs 'statev2.sqlite' "$DIST/bak"/*.mjs && [[ "${T3_ALLOW_V1_FALLBACK:-0}" != 1 ]]; then
+  echo "ERROR: bak is a pre-v2 build; it would serve the frozen pre-upgrade state.sqlite and"
+  echo "everything since the cutover would be missing. Set T3_ALLOW_V1_FALLBACK=1 to do it anyway."
+  exit 1
+fi
+
+rm -rf "$DIST/current"
+mv "$DIST/bak" "$DIST/current"
+echo "swap-back: bak promoted to current"
+"""
+
+[tasks.setup-stable]
+description = "Copy current bak to stable fallback (run once with known-good build)"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+DIST="$RUNTIME/dist"
+
+if [[ ! -f "$DIST/bak/bin.mjs" ]]; then
+  echo "ERROR: no bak tier. Run 'mise run swap' first to create bak."
+  exit 1
+fi
+
+if [[ -f "$RUNTIME/userdata/statev2.sqlite" ]] && ! grep -qs 'statev2.sqlite' "$DIST/bak"/*.mjs; then
+  echo "ERROR: bak is a pre-v2 build; the daemon never falls back to one after the cutover."
+  echo "Pin stable once bak holds a v2 build (after the next swap)."
+  exit 1
+fi
+
+rm -rf "$DIST/stable"
+cp -R "$DIST/bak" "$DIST/stable"
+ls -lh "$DIST/stable/bin.mjs"
+echo "stable pinned from bak"
+"""
+
+[tasks.generate-runtime]
+description = "(Re)generate ~/.t3/code runner shim, AGENTS.md, and tier scaffold"
+run = "bash {{config_root}}/scripts/generate-runtime.sh"
+
+# --frozen-lockfile: a plain install rewrites one alchemy peer hash in
+# pnpm-lock.yaml, and the dirty file then blocks the next rebuild-local.
+[tasks.update]
+description = "Rebuild main, install deps, build, smoke-test, swap to runtime"
+run = "mise run rebuild-local && pnpm install --frozen-lockfile && mise run build && mise run smoke-test && mise run swap"
+
+[tasks.upgrade]
+description = "Full upstream sync: fetch, re-overlay, rebuild main, install deps, build, smoke-test, swap"
+run = "mise run sync && mise run rebuild-local && pnpm install --frozen-lockfile && mise run build && mise run smoke-test && mise run swap"
+
+[tasks.serve]
+description = "Run the built server from the vendor tree (dev mode; runtime uses bin/t3)"
+raw = true
+run = 'node apps/server/dist/bin.mjs "$@"'
+
+[tasks.daemon]
+description = "Start the self-updating t3 daemon (detached, survives everything)"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+PID_FILE="$RUNTIME/daemon.pid"
+if [[ -f "$PID_FILE" ]]; then
+  existing=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  if [[ -n "$existing" ]] && kill -0 "$existing" 2>/dev/null; then
+    echo "Daemon already running (PID $existing). Use 'mise run daemon-stop' first."
+    exit 1
+  fi
+  echo "Stale PID file found, removing"
+  rm -f "$PID_FILE"
+fi
+nohup bash "{{config_root}}/scripts/daemon.sh" > "$RUNTIME/daemon.log" 2>&1 < /dev/null &
+disown
+ok=""
+for i in 1 2 3 4 5 6; do
+  [[ -f "$PID_FILE" ]] && { ok=1; break; }
+  sleep 0.5
+done
+if [[ -n "$ok" ]]; then
+  echo "Daemon started (PID $(cat "$PID_FILE")). Logs: mise run daemon-log"
+else
+  echo "ERROR: daemon failed to start - check $RUNTIME/daemon.log"
+  exit 1
+fi
+"""
+
+[tasks.daemon-stop]
+description = "Stop the t3 daemon and the server it supervises"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+PID_FILE="$RUNTIME/daemon.pid"
+if [[ ! -f "$PID_FILE" ]]; then
+  echo "No daemon PID file - nothing to stop."
+  exit 0
+fi
+pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  kill "$pid" 2>/dev/null || true
+  # Wait for the daemon to actually exit (it stops the server on the way out).
+  for i in $(seq 1 40); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "Daemon did not exit in 10s, force killing"
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+fi
+rm -f "$PID_FILE"
+echo "Daemon stopped"
+"""
+
+[tasks.daemon-status]
+description = "Daemon, server, and tier health at a glance"
+run = """
+RUNTIME="${T3_RUNTIME_DIR:-$HOME/.t3/code}"
+PID_FILE="$RUNTIME/daemon.pid"
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  echo "daemon: running (PID $(cat "$PID_FILE"))"
+else
+  echo "daemon: not running (mise run daemon)"
+fi
+if lsof -tiTCP:${T3_PORT:-3773} -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "server: listening on ${T3_PORT:-3773} (PID $(lsof -tiTCP:${T3_PORT:-3773} -sTCP:LISTEN | head -1))"
+else
+  echo "server: not listening"
+fi
+for tier in current bak stable; do
+  if [[ -f "$RUNTIME/dist/$tier/bin.mjs" ]]; then
+    echo "tier $tier: $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$RUNTIME/dist/$tier/bin.mjs")"
+  else
+    echo "tier $tier: empty"
+  fi
+done
+pid=$(lsof -tiTCP:${T3_PORT:-3773} -sTCP:LISTEN 2>/dev/null | head -1 || true)
+if [[ -n "$pid" ]] && lsof -p "$pid" -Fn 2>/dev/null | grep -q '/statev2\\.sqlite$'; then
+  busy=$(sqlite3 -readonly -cmd '.timeout 2000' "$RUNTIME/userdata/statev2.sqlite" < "{{config_root}}/scripts/t3-busy-v2.sql" 2>&1 || echo '?')
+  echo "busy (v2): ${busy:-idle}"
+elif [[ -f "$RUNTIME/userdata/state.sqlite" ]]; then
+  echo "busy sessions (v1): $(sqlite3 "$RUNTIME/userdata/state.sqlite" "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running');" 2>/dev/null || echo '?')"
+fi
+"""
+
+[tasks.daemon-log]
+description = "Tail the daemon management log"
+run = "tail -f ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log"
+
+[tasks.server-log]
+description = "Tail the t3 server log (UTC)"
+run = "tail -f ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log.server"
+
+[tasks.logs]
+description = "Tail both daemon and server logs"
+run = "tail -f ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log ${T3_RUNTIME_DIR:-$HOME/.t3/code}/daemon.log.server"
