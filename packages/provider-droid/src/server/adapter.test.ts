@@ -716,6 +716,38 @@ describe("DroidAdapterV2", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    it.effect(
+      "a mode changed mid-turn reaches the running session once, and the next turn sends nothing",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const opened = yield* openRuntime(fake);
+          const thread = yield* ensure(opened);
+          const setRuntimeMode = opened.runtime.setRuntimeMode;
+          if (setRuntimeMode === undefined) return assert.fail("Droid switches modes in session");
+          yield* startTurn(opened.runtime, thread);
+          yield* fake.current().settle;
+          yield* setRuntimeMode({ providerThread: thread, runtimeMode: "full-access" });
+          yield* setRuntimeMode({ providerThread: thread, runtimeMode: "full-access" });
+          yield* fake.current().emit(completed(1));
+          yield* opened.takeEvent(isTerminal);
+          yield* runTurn(opened, fake, thread, { runOrdinal: 2, runtimeMode: "full-access" });
+
+          assert.deepStrictEqual(methodsOf(fake), [
+            "droid.initialize_session",
+            "droid.add_user_message",
+            "droid.update_session_settings",
+            "droid.add_user_message",
+          ]);
+          assert.deepStrictEqual(requestsOf(fake, "droid.update_session_settings")[0]?.params, {
+            interactionMode: "auto",
+            autonomyLevel: "high",
+            modelId: MODEL,
+            reasoningEffort: "high",
+          });
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect("[VAL-AUTO-005] nothing is re-sent while mode, model, and effort are unchanged", () =>
       Effect.gen(function* () {
         const fake = yield* makeFakeDroid();

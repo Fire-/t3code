@@ -98,6 +98,7 @@ import {
 import {
   droidHoldsSettings,
   droidModelCatalog,
+  droidRaisedRuntimeMode,
   droidSessionSettings,
   droidSettingsParams,
   resolveDroidModelId,
@@ -275,6 +276,11 @@ interface ActiveDroidTurn {
    * the item settles with the turn, whichever way that ends.
    */
   compaction: { readonly ordinal: number; readonly startedAt: DateTime.Utc } | undefined;
+  /**
+   * The user approved a prompt for the rest of the session, so a settings report above the
+   * thread's runtime mode is that approval raising Droid's autonomy, not a stale echo.
+   */
+  approvedForSession: boolean;
 }
 
 type PendingDroidRequestKind =
@@ -1247,6 +1253,21 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         if (state === null) return;
         if (notification.type === "settings_updated") {
           known = withDroidReport(known, notification["settings"], { interactionMode: false });
+          const approving = state.activeTurn?.approvedForSession ? state.activeTurn : null;
+          const raised =
+            approving === null
+              ? undefined
+              : droidRaisedRuntimeMode(asked.runtimePolicy.runtimeMode, notification["settings"]);
+          if (approving !== null && raised !== undefined) {
+            approving.approvedForSession = false;
+            asked = { ...asked, runtimePolicy: { ...asked.runtimePolicy, runtimeMode: raised } };
+            yield* emit({
+              type: "runtime_mode.raised",
+              driver: DROID_PROVIDER,
+              threadId: state.providerThread.appThreadId ?? input.threadId,
+              runtimeMode: raised,
+            });
+          }
           return;
         }
         if (notification.type === "spec_handoff_session_created") {
@@ -1539,6 +1560,22 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           models,
         });
       };
+
+      /** Droid takes autonomy changes mid-turn, so a new mode applies to the work in flight. */
+      const setRuntimeMode = Effect.fnUntraced(function* (
+        providerThread: OrchestrationV2ProviderThread,
+        runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"],
+      ) {
+        const state = threadState;
+        if (state === null || state.providerThread.id !== providerThread.id || ended || closing) {
+          return;
+        }
+        const desired = desiredSettings(
+          { ...asked.runtimePolicy, runtimeMode },
+          asked.modelSelection,
+        );
+        if (settingsOwed || !droidHoldsSettings(known, desired)) yield* sendSettings(desired);
+      });
 
       /** A session answered `initialize_session`: it holds what was sent, as Droid reports it. */
       const noteStartedSession = (sent: DroidSessionSettings, result: unknown) => {
@@ -1841,7 +1878,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
 
         // One frame covers runtime mode, interaction mode, model, and effort, and goes out only
         // when it would change something Droid is known to hold. The runtime mode stays the source
-        // of truth for autonomy, so a level Droid raised on its own is sent back here.
+        // of truth for autonomy: a raise the thread took arrives here as the turn's mode, and any
+        // other level Droid raised on its own is sent back.
         const desired = continuation
           ? undefined
           : desiredSettings(turnInput.runtimePolicy, turnInput.modelSelection);
@@ -1915,6 +1953,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             queuedSteers: new Map(),
             awaitingNative: new Set(),
             compaction: undefined,
+            approvedForSession: false,
           };
           // Installed before the request so nothing Droid sends right after the ack is lost.
           state.activeTurn = turn;
@@ -2096,6 +2135,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           }
           status = decision === "cancel" ? "cancelled" : "resolved";
           outcome = { decision };
+          // Set before the reply: Droid reports the raised autonomy as soon as it has the answer.
+          if (decision === "acceptForSession") pending.turn.approvedForSession = true;
         } else {
           const answered =
             decision === "cancel" || decision === "decline"
@@ -2432,6 +2473,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             queuedSteers: new Map(),
             awaitingNative: new Set(),
             compaction,
+            approvedForSession: false,
           };
           state.activeTurn = compacting;
           yield* emit({
@@ -2661,6 +2703,17 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
                   driver: DROID_PROVIDER,
                   providerThreadId: interruptInput.providerThread.id,
                   providerTurnId: interruptInput.providerTurnId,
+                  cause,
+                }),
+            ),
+          ),
+        setRuntimeMode: ({ providerThread, runtimeMode }) =>
+          setRuntimeMode(providerThread, runtimeMode).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: DROID_PROVIDER,
+                  detail: "Droid did not take the runtime mode change",
                   cause,
                 }),
             ),

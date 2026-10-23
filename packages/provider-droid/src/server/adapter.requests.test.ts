@@ -14,9 +14,10 @@ import {
   runIdFor,
   SESSION_ID,
   terminals,
+  THREAD_ID,
   type BegunTurn,
 } from "./adapterHarness.testkit.ts";
-import { makeFakeDroid } from "./fakeDroid.testkit.ts";
+import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid } from "./fakeDroid.testkit.ts";
 
 const isResponseError = Schema.is(ProviderAdapter.ProviderAdapterRuntimeRequestResponseError);
 
@@ -278,6 +279,45 @@ describe("DroidAdapterV2 permission requests", () => {
         assert.strictEqual(node?.status, "completed");
         const command = turnItems(begun).findLast((item) => item.type === "command_execution");
         assert.strictEqual(command?.status, "completed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "approving for the session raises the thread's runtime mode to the autonomy Droid reports",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const begun = yield* beginTurn(fake);
+        const report = (autonomyLevel: string) =>
+          begun.process.emit(
+            {
+              type: "settings_updated",
+              settings: { ...FAKE_DROID_DEFAULT_SETTINGS, autonomyLevel },
+            },
+            null,
+          );
+        const raises = () =>
+          begun.opened.all.flatMap((event) =>
+            event.type === "runtime_mode.raised" ? [event] : [],
+          );
+
+        // A report nobody approved is not the user's choice; the next turn sends it back.
+        yield* report("high");
+        yield* begun.process.settle;
+        assert.deepStrictEqual(raises(), []);
+
+        yield* begun.process.emit(EXEC_CALL);
+        const requestId = yield* openPermission(begun, "perm-1", EXEC_PERMISSION);
+        yield* respond(begun, requestId, { decision: "acceptForSession" });
+        // Droid can first restate the level it held before the approval.
+        yield* report("off");
+        yield* report("medium");
+        yield* report("high");
+        yield* begun.process.settle;
+        assert.deepStrictEqual(
+          raises().map(({ threadId, runtimeMode }) => ({ threadId, runtimeMode })),
+          [{ threadId: THREAD_ID, runtimeMode: "auto" }],
+        );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

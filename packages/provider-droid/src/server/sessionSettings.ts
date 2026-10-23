@@ -7,8 +7,8 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   ProviderDriverKind,
+  RuntimeMode,
   type ModelSelection,
-  type RuntimeMode,
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as Predicate from "effect/Predicate";
@@ -27,6 +27,22 @@ const AUTONOMY_BY_RUNTIME_MODE = {
 
 const droidAutonomyLevel = (runtimeMode: RuntimeMode): DroidAutonomyLevel =>
   AUTONOMY_BY_RUNTIME_MODE[runtimeMode];
+
+/**
+ * The runtime mode a settings report puts the session at, when that is above `runtimeMode`.
+ * Approving a prompt for the rest of the session raises Droid's autonomy to the prompt's tier.
+ */
+export const droidRaisedRuntimeMode = (
+  runtimeMode: RuntimeMode,
+  settings: unknown,
+): RuntimeMode | undefined => {
+  const level = Predicate.isObject(settings) ? settings["autonomyLevel"] : undefined;
+  const reported = RuntimeMode.literals.find((mode) => AUTONOMY_BY_RUNTIME_MODE[mode] === level);
+  return reported !== undefined &&
+    RuntimeMode.literals.indexOf(reported) > RuntimeMode.literals.indexOf(runtimeMode)
+    ? reported
+    : undefined;
+};
 
 /**
  * Droid takes real model ids only: a selection that names no model, or the placeholder
