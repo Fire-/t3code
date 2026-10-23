@@ -32,6 +32,13 @@ import {
 } from "@t3tools/shared/git";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
+import {
+  DROID_HOME_DIRECTORY,
+  DROID_SESSIONS_DIRECTORY,
+  droidTranscriptMessage,
+  foldDroidTranscriptFields,
+  isDroidSubagentSessionStart,
+} from "@t3tools/provider-droid/server";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -77,6 +84,9 @@ const TranscriptMessage = Schema.Struct({
   role: Schema.optional(Schema.String),
   content: Schema.optional(Schema.Union([Schema.String, Schema.Array(TranscriptContentBlock)])),
   model: Schema.optional(Schema.String),
+  // Droid's; Unknown so another source's same-named field cannot fail its record.
+  modelId: Schema.optional(Schema.Unknown),
+  visibility: Schema.optional(Schema.Unknown),
 });
 
 const CodexTurnMetadata = Schema.Struct({
@@ -93,6 +103,9 @@ const TranscriptRecord = Schema.Struct({
   isSidechain: Schema.optional(Schema.Boolean),
   isMeta: Schema.optional(Schema.Boolean),
   isCompactSummary: Schema.optional(Schema.Boolean),
+  // Droid's; Unknown so another source's same-named field cannot fail its record.
+  id: Schema.optional(Schema.Unknown),
+  title: Schema.optional(Schema.Unknown),
   message: Schema.optional(TranscriptMessage),
   payload: Schema.optional(
     Schema.Struct({
@@ -305,7 +318,9 @@ export function parseAgentSessionTranscript(
   const claudeFields =
     input.source === "claudeAgent"
       ? records.reduce(foldClaudeFields, emptyClaudeFields)
-      : emptyClaudeFields;
+      : input.source === "droid"
+        ? records.reduce(foldDroidTranscriptFields, emptyClaudeFields)
+        : emptyClaudeFields;
   return parseAgentSessionRecords(input, records, claudeFields);
 }
 
@@ -412,6 +427,16 @@ function parseAgentSessionRecords(
   let recordIndex = -1;
   for (const record of records) {
     recordIndex += 1;
+    if (input.source === "droid") {
+      const message = droidTranscriptMessage(record);
+      if (message === null) continue;
+      retainMessage({
+        ...message,
+        createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
+        codexResponseUser: false,
+      });
+      continue;
+    }
     if (input.source === "claudeAgent") {
       if (isHiddenClaudeRecord(record)) continue;
       if (record.type !== "user" && record.type !== "assistant") continue;
@@ -516,6 +541,7 @@ function shouldRetainDecodedRecord(
   source: AgentSessionSource,
   record: DecodedTranscriptRecord,
 ): boolean {
+  if (source === "droid") return droidTranscriptMessage(record) !== null;
   if (source === "claudeAgent") {
     if (isHiddenClaudeRecord(record) || (record.type !== "user" && record.type !== "assistant")) {
       return false;
@@ -566,6 +592,7 @@ function extractCwd(line: string, source: AgentSessionSource): string | null | f
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
+  if (source === "droid" && isDroidSubagentSessionStart(record)) return false;
   if (typeof record.cwd === "string" && record.cwd.trim().length > 0) {
     return record.cwd;
   }
@@ -857,6 +884,8 @@ export const make = Effect.gen(function* () {
                 if (Option.isNone(cwd)) cwd = Option.fromNullOr(extractDecodedCwd(decoded.value));
                 if (source === "claudeAgent") {
                   claudeFields = foldClaudeFields(claudeFields, decoded.value);
+                } else if (source === "droid") {
+                  claudeFields = foldDroidTranscriptFields(claudeFields, decoded.value);
                 }
                 if (shouldRetainDecodedRecord(source, decoded.value)) {
                   records.push(decoded.value);
@@ -923,9 +952,15 @@ export const make = Effect.gen(function* () {
     return path.join(homeDir, ".claude");
   };
 
+  // Droid lays out `<home>/sessions` the same way: a folder per cwd of `<session id>.jsonl` files.
   const discoverClaudeTranscripts = Effect.fn("AgentSessionScanner.discoverClaudeTranscripts")(
-    function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
-      const projectsDir = path.join(homePath, "projects");
+    function* (
+      homePath: string,
+      providerInstanceId: ProviderInstanceId,
+      operationBudget: number,
+      projectsDirectory = "projects",
+    ) {
+      const projectsDir = path.join(homePath, projectsDirectory);
       let operationsRemaining = operationBudget;
       let truncated = false;
       const readDirectory = (directory: string) => {
@@ -1072,14 +1107,17 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    return Array.from(byOwnerAndCwd.values(), (group): RawCandidate => ({
-      cwd: group.cwd,
-      source,
-      providerInstanceId: group.providerInstanceId,
-      threadCount: group.transcripts.length,
-      lastActiveAtMs: group.lastActiveAtMs,
-      transcripts: group.transcripts,
-    }));
+    return Array.from(
+      byOwnerAndCwd.values(),
+      (group): RawCandidate => ({
+        cwd: group.cwd,
+        source,
+        providerInstanceId: group.providerInstanceId,
+        threadCount: group.transcripts.length,
+        lastActiveAtMs: group.lastActiveAtMs,
+        transcripts: group.transcripts,
+      }),
+    );
   });
 
   const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
@@ -1090,7 +1128,7 @@ export const make = Effect.gen(function* () {
     const raw: Array<RawCandidate> = [];
     let truncated = false;
 
-    for (const source of ["claudeAgent", "codex"] as const) {
+    for (const source of ["claudeAgent", "codex", "droid"] as const) {
       const instances: Array<{
         readonly instanceId: ProviderInstanceId;
         readonly config: ProviderInstanceConfig;
@@ -1130,6 +1168,8 @@ export const make = Effect.gen(function* () {
           const config = decodeClaudeSettings(instance.config ?? {});
           if (Option.isNone(config)) continue;
           homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
+        } else if (source === "droid") {
+          homePath = path.join(homeDir, DROID_HOME_DIRECTORY);
         } else {
           const config = decodeCodexSettings(instance.config ?? {});
           if (Option.isNone(config)) continue;
@@ -1162,9 +1202,14 @@ export const make = Effect.gen(function* () {
           truncated = true;
           continue;
         }
-        const discovered = yield* source === "claudeAgent"
-          ? discoverClaudeTranscripts(home.homePath, home.providerInstanceId, operationBudget)
-          : discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget);
+        const discovered = yield* source === "codex"
+          ? discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget)
+          : discoverClaudeTranscripts(
+              home.homePath,
+              home.providerInstanceId,
+              operationBudget,
+              source === "droid" ? DROID_SESSIONS_DIRECTORY : undefined,
+            );
         truncated ||= discovered.truncated;
         transcriptCandidates.push(...discovered.transcripts);
       }

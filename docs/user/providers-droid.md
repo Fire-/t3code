@@ -90,6 +90,9 @@ Each thread is a Droid session, so it also appears in Droid's own session list. 
 after a restart. If Droid cannot resume a session, T3 Code starts a new one and carries the
 conversation over as context.
 
+Sessions you started in Droid's terminal app can be imported with their projects from the welcome
+wizard's **Import your projects** step, and continue in T3 Code.
+
 Rolling back a thread and forking it, from the latest turn or an earlier one, use Droid's own
 session, so Droid remembers the conversation up to that turn. Send `/compact` or use the context
 meter to compact a conversation. Droid cannot stop a compaction partway, so **Stop** during one

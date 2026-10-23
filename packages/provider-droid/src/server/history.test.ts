@@ -1,7 +1,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDriverKind } from "@t3tools/contracts";
 
-import { droidForkRewindMessageId, droidMessageIds, droidRollbackMessageId } from "./history.ts";
+import {
+  droidForkRewindMessageId,
+  droidMessageIds,
+  droidRollbackMessageId,
+  visibleDroidHistory,
+} from "./history.ts";
 
 const text = (value: string) => [{ type: "text", text: value }];
 
@@ -189,5 +194,26 @@ describe("droidMessageIds [VAL-HIST-015]", () => {
       "u1",
     ]);
     assert.deepStrictEqual([...droidMessageIds(undefined)], []);
+  });
+});
+
+describe("visibleDroidHistory", () => {
+  it("keeps what the user saw: no plumbing, tool calls, or reminders Droid added to a message", () => {
+    const reminder = "<system-reminder>\nTodo list is empty\n</system-reminder>";
+    const history = visibleDroidHistory([
+      message("context-u1", "user", null, "injected private context", "llm_only"),
+      { id: "u1", role: "user", content: [...text("Fix the test"), ...text(reminder)] },
+      { id: "u2", role: "user", content: text(reminder) },
+      { id: "u3", role: "user", content: text(`${reminder}\n\nAnd the lint`) },
+      message("u4", "user", "u3", "a task report", "llm_only"),
+      { id: "a1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read" }] },
+      { id: "u5", role: "user", content: [{ type: "tool_result", tool_use_id: "t1" }] },
+      { id: "a2", role: "assistant", content: text("Fixed both"), createdAt: 7 },
+    ]);
+    assert.deepStrictEqual(history, [
+      { role: "user", text: "Fix the test", createdAt: undefined },
+      { role: "user", text: "And the lint", createdAt: undefined },
+      { role: "assistant", text: "Fixed both", createdAt: 7 },
+    ]);
   });
 });

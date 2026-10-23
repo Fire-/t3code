@@ -18,6 +18,9 @@ import * as Predicate from "effect/Predicate";
 import { droidMessageText } from "./protocol.ts";
 
 const PLUMBING_ID_PREFIXES = ["context-", "__internal__system-reminder__"] as const;
+// Droid adds these to a visible user message as text blocks of their own; they are its context, not
+// the user's words.
+const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 
 const isPlumbingId = (id: string): boolean =>
   PLUMBING_ID_PREFIXES.some((prefix) => id.startsWith(prefix));
@@ -32,17 +35,23 @@ export interface DroidHistoryMessage {
   readonly createdAt: number | undefined;
 }
 
+/** One stored message as the user saw it, or `undefined` for plumbing and messages with no text. */
+export function visibleDroidMessage(message: unknown): DroidHistoryMessage | undefined {
+  if (!Predicate.isObject(message)) return undefined;
+  const { id, role, visibility, createdAt } = message;
+  if (role !== "user" && role !== "assistant") return undefined;
+  if (visibility === "llm_only") return undefined;
+  if (Predicate.isString(id) && isPlumbingId(id)) return undefined;
+  const text = droidMessageText(message["content"]).replace(SYSTEM_REMINDER, "").trim();
+  if (text.length === 0) return undefined;
+  return { role, text, createdAt: Predicate.isNumber(createdAt) ? createdAt : undefined };
+}
+
 export function visibleDroidHistory(messages: unknown): ReadonlyArray<DroidHistoryMessage> {
   if (!Array.isArray(messages)) return [];
-  return messages.flatMap((message): ReadonlyArray<DroidHistoryMessage> => {
-    if (!Predicate.isObject(message)) return [];
-    const { id, role, visibility, createdAt } = message;
-    if (role !== "user" && role !== "assistant") return [];
-    if (visibility === "llm_only") return [];
-    if (Predicate.isString(id) && isPlumbingId(id)) return [];
-    const text = droidMessageText(message["content"]);
-    if (text.trim().length === 0) return [];
-    return [{ role, text, createdAt: Predicate.isNumber(createdAt) ? createdAt : undefined }];
+  return messages.flatMap((message) => {
+    const visible = visibleDroidMessage(message);
+    return visible === undefined ? [] : [visible];
   });
 }
 
