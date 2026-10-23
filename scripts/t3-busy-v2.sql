@@ -5,7 +5,9 @@
 -- Mirrors ProjectionStore.getRecoveryThreadIds("runtime") minus two terms:
 -- provider sessions (`ready` is the normal idle state, so counting them pins
 -- the daemon forever) and pending outbox rows (the outbox is durable and
--- resumes after a restart).
+-- resumes after a restart). Work items count only while their run is live:
+-- an item left `running` under a failed or finished run is exactly what
+-- restart recovery settles, so counting it would block that restart forever.
 WITH busy(thread_id, reason) AS (
   SELECT thread_id, 'run' FROM orchestration_v2_projection_runs
    WHERE status IN ('preparing','starting','running','waiting')
@@ -31,7 +33,8 @@ WITH busy(thread_id, reason) AS (
     LEFT JOIN orchestration_v2_projection_runs r ON r.run_id = i.run_id
    WHERE i.type IN ('command_execution','dynamic_tool','subagent')
      AND i.status IN ('pending','running','waiting')
-     AND (i.run_id IS NULL OR r.status IS NOT 'rolled_back')
+     AND (i.run_id IS NULL OR r.status IS NULL
+          OR r.status IN ('preparing','queued','starting','running','waiting'))
   UNION ALL
   SELECT thread_id, 'effect' FROM orchestration_v2_effect_outbox WHERE status = 'running'
 )
