@@ -4168,15 +4168,31 @@ export function subscribeComposerDraftModelReconciliation(input: {
   const matchesAtom = Atom.make((get) => {
     const state = get(draftsAtom);
     const threadKeys = get(threadKeysAtom);
-    const matches: Array<readonly [string, ComposerThreadDraftState]> = [];
+    const matches: Array<
+      readonly [
+        string,
+        ComposerThreadDraftState,
+        { readonly model: boolean; readonly runtimeMode: boolean },
+      ]
+    > = [];
     for (const [key, draft] of Object.entries(state.draftsByThreadKey)) {
       // Local drafts can materialize a shell before their first turn is submitted.
-      if (state.draftThreadsByThreadKey[key] || draft.activeProvider === null) continue;
+      if (state.draftThreadsByThreadKey[key]) continue;
       const ref = parseScopedThreadKey(key);
-      const pick = draft.modelSelectionByProvider[draft.activeProvider];
-      if (!ref || !pick || !threadKeys.has(key)) continue;
+      const pick =
+        draft.activeProvider === null
+          ? undefined
+          : draft.modelSelectionByProvider[draft.activeProvider];
+      if (!ref || (!pick && draft.runtimeMode === null) || !threadKeys.has(key)) continue;
+      // A settled pick is dropped so the composer follows later server-side
+      // changes, such as a provider raising the runtime mode mid-session.
+      const settled = (thread: Pick<EnvironmentThreadShell, "modelSelection" | "runtimeMode">) => ({
+        model: pick !== undefined && draftModelPickMatchesThread(pick, thread.modelSelection),
+        runtimeMode: draft.runtimeMode !== null && draft.runtimeMode === thread.runtimeMode,
+      });
       const thread = get(input.threadShellAtom(ref));
-      if (!thread || !draftModelPickMatchesThread(pick, thread.modelSelection)) continue;
+      const shown = thread ? settled(thread) : null;
+      if (!shown || (!shown.model && !shown.runtimeMode)) continue;
       // Status and selection must come from the same emission; derived atoms can update apart.
       const shell = Option.getOrNull(
         AsyncResult.value(get(input.shellStateAtom(ref.environmentId))),
@@ -4185,11 +4201,11 @@ export function subscribeComposerDraftModelReconciliation(input: {
       const authoritativeThread = Option.getOrNull(shell.snapshot)?.threads.find(
         (candidate) => candidate.id === ref.threadId,
       );
-      if (
-        authoritativeThread &&
-        draftModelPickMatchesThread(pick, authoritativeThread.modelSelection)
-      ) {
-        matches.push([key, draft]);
+      const authoritative = authoritativeThread ? settled(authoritativeThread) : null;
+      const model = shown.model && authoritative?.model === true;
+      const runtimeMode = shown.runtimeMode && authoritative?.runtimeMode === true;
+      if (model || runtimeMode) {
+        matches.push([key, draft, { model, runtimeMode }]);
       }
     }
     return matches;
@@ -4200,10 +4216,15 @@ export function subscribeComposerDraftModelReconciliation(input: {
       if (matches.length === 0) return;
       composerDraftStore.setState((state) => {
         const drafts = { ...state.draftsByThreadKey };
-        for (const [key, matchedDraft] of matches) {
+        for (const [key, matchedDraft, settled] of matches) {
           if (drafts[key] !== matchedDraft) continue;
           const { modelSelectionExplicit: _explicit, ...retained } = matchedDraft;
-          const draft = { ...retained, activeProvider: null, modelSelectionByProvider: {} };
+          const draft: ComposerThreadDraftState = {
+            ...(settled.model
+              ? { ...retained, activeProvider: null, modelSelectionByProvider: {} }
+              : matchedDraft),
+            ...(settled.runtimeMode ? { runtimeMode: null } : {}),
+          };
           if (shouldRemoveDraft(draft)) delete drafts[key];
           else drafts[key] = draft;
         }
