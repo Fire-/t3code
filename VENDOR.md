@@ -84,6 +84,13 @@ unique work. Never run it manually. `rebuild-local` deliberately ends on
 and direct `main` commits become structurally impossible to stumble into.
 Topic commits go on their `overlay/*` branch, never on `local`.
 
+After each deploy, push to the `fork` remote: `overlay/*` branches normally
+(they only fast-forward), and `local` with
+`git push --force-with-lease fork local`. `local` is rebuilt from scratch, so
+it never fast-forwards; the pushed copy is also the only remote record of the
+merge conflict resolutions, since rerere's cache stays local.
+Never force-push an `overlay/*` branch.
+
 ## Runtime (~/.t3/code)
 
 The installed runtime lives outside the vendor dir and survives
