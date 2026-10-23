@@ -552,13 +552,15 @@ export const layer: Layer.Layer<
         ),
       );
 
-    const deleteStaleRefs: CheckpointServiceV2Shape["deleteStaleRefs"] = (input) =>
-      withWorkspaceLock(
+    const deleteStaleRefs: CheckpointServiceV2Shape["deleteStaleRefs"] = (input) => {
+      // A missing checkpoint never wrote its ref, and outside Git there is no repository to clean.
+      const checkpointRefs = input.checkpoints.flatMap((checkpoint) =>
+        checkpoint.status === "missing" ? [] : [checkpoint.ref],
+      );
+      if (checkpointRefs.length === 0) return Effect.void;
+      return withWorkspaceLock(
         input.scope.cwd,
-        checkpointStore.deleteCheckpointRefs({
-          cwd: input.scope.cwd,
-          checkpointRefs: input.checkpoints.map((checkpoint) => checkpoint.ref),
-        }),
+        checkpointStore.deleteCheckpointRefs({ cwd: input.scope.cwd, checkpointRefs }),
       ).pipe(
         Effect.mapError(
           (cause) =>
@@ -569,6 +571,7 @@ export const layer: Layer.Layer<
             }),
         ),
       );
+    };
 
     return CheckpointServiceV2.of({
       prepareRootRunScope: (input) =>

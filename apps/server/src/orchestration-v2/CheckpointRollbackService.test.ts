@@ -347,6 +347,81 @@ it.effect.each([
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect.each([true, false])(
+  "rewinds only the conversation to a checkpoint without a snapshot, restoreFiles=%s",
+  (restoreFiles) => {
+    const threadId = ThreadId.make("thread:rollback-no-snapshot");
+    const providerThreadId = ProviderThreadId.make("provider-thread:rollback-no-snapshot");
+    const providerSessionId = ProviderSessionId.make("provider-session:rollback-no-snapshot");
+    const providerInstanceId = ProviderInstanceId.make("provider_rollback_no_snapshot");
+    const checkpointId = CheckpointId.make("checkpoint:rollback-no-snapshot");
+    const scopeId = CheckpointScopeId.make("checkpoint-scope:rollback-no-snapshot");
+    const calls: string[] = [];
+    const providerThread = { id: providerThreadId, providerSessionId, providerInstanceId };
+    const projection = {
+      thread: {
+        id: threadId,
+        worktreePath: null,
+        branch: null,
+        activeProviderThreadId: providerThreadId,
+        modelSelection: { instanceId: providerInstanceId, model: "test-model" },
+      },
+      providerThread,
+      providerSession: undefined,
+      checkpoint: { id: checkpointId, scopeId, status: "missing", appRunOrdinal: 0 },
+      scope: { id: scopeId, cwd: "/tmp" },
+      runsToRollback: [],
+      targetAttempt: undefined,
+      rolledBackAttemptIds: [],
+      staleCheckpoints: [],
+      rootNodes: [],
+      providerTurns: [],
+    } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
+    const testLayer = layerCheckpointRollbackService.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          ThreadCommandExecutor.layer,
+          Layer.mock(CheckpointService.CheckpointServiceV2)({
+            restore: () => Effect.die("a checkpoint without a snapshot has no files to restore"),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            write: () => Effect.sync(() => (calls.push("projection"), [])),
+          }),
+          IdAllocator.layer,
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThread: () => Effect.succeed(projection.thread),
+            getCheckpointRollbackContext: () => Effect.succeed(projection),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            open: () => Effect.sync(() => (calls.push("session"), {} as never)),
+          }),
+          Layer.mock(RuntimePolicy.RuntimePolicyV2)({
+            resolve: () => Effect.succeed({ cwd: "/tmp" } as never),
+          }),
+        ),
+      ),
+    );
+
+    return Effect.gen(function* () {
+      const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
+      const rollback = service.execute({
+        threadId,
+        providerThreadId,
+        checkpointId,
+        scopeId,
+        restoreFiles,
+      });
+      if (restoreFiles) {
+        assert.equal((yield* Effect.flip(rollback)).reason, "rollback-target-invalid");
+        assert.deepEqual(calls, []);
+      } else {
+        yield* rollback;
+        assert.deepEqual(calls, ["session", "projection"]);
+      }
+    }).pipe(Effect.provide(testLayer));
+  },
+);
+
 const seedRollbackHistory = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
