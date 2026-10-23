@@ -653,6 +653,7 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
   hasFailure: boolean;
 } {
   const toolEntries = entries.filter((entry) => entry.itemType !== "reasoning");
+  const thoughtCount = entries.length - toolEntries.length;
   if (entries.length > 0 && toolEntries.length === 0) {
     return {
       summary: entries.length === 1 ? "Thought" : `Thought (×${entries.length})`,
@@ -723,6 +724,9 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
     entries.length - sourcedCount - selected.reduce((count, group) => count + group.count, 0);
   if (remainingCount > 0) {
     labels.push(`Performed ${remainingCount} other ${remainingCount === 1 ? "action" : "actions"}`);
+  }
+  if (thoughtCount > 0) {
+    labels.push(thoughtCount === 1 ? "Thought once" : `Thought ${thoughtCount} times`);
   }
   const sentenceLabels = labels.map((label, index) =>
     index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1),

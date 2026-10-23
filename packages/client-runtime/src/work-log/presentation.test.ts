@@ -7,6 +7,7 @@ import {
   commandDetailRepeatsCommand,
   extractCommandOutputText,
   resolveWorkEntryToolPresentation,
+  summarizeToolGroup,
   toolItemForDisplay,
   type WorkLogPresentationEntry,
   workEntryIndicatesToolFailure,
@@ -94,6 +95,37 @@ describe("workEntryIndicatesToolFailure", () => {
 
     expect(workEntryIndicatesToolFailure(entry)).toBe(true);
     expect(workEntryDisplayIndicatesToolFailure({ ...entry, detail: "File not found" })).toBe(true);
+  });
+});
+
+describe("summarizeToolGroup", () => {
+  const command = (id: string): WorkLogPresentationEntry => ({
+    id,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    label: "Ran command",
+    tone: "tool",
+    itemType: "command_execution",
+    toolLifecycleStatus: "completed",
+    command: "ls",
+  });
+  const thought = (id: string): WorkLogPresentationEntry => ({
+    id,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    label: "Thinking",
+    tone: "thinking",
+    itemType: "reasoning",
+    toolLifecycleStatus: "completed",
+    detail: "Checking the manifest",
+  });
+
+  it("counts the thoughts a tool group hides", () => {
+    expect(summarizeToolGroup([command("c1"), thought("t1")]).summary).toBe(
+      "Ran 1 command and thought once",
+    );
+    expect(
+      summarizeToolGroup([thought("t1"), command("c1"), thought("t2"), command("c2")]).summary,
+    ).toBe("Ran 2 commands and thought 2 times");
+    expect(summarizeToolGroup([command("c1"), command("c2")]).summary).toBe("Ran 2 commands");
   });
 });
 
