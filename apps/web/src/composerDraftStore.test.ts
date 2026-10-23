@@ -1297,6 +1297,21 @@ describe("composerDraftStore modelSelection", () => {
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });
 
+  it("drops a runtime mode pick once the thread reaches it, so later server changes show", () => {
+    const h = modelReconciliationHarness(TEST_ENVIRONMENT_ID, threadId);
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, "keep this unsent follow-up");
+    store.setRuntimeMode(threadRef, "auto");
+    h.flush();
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.runtimeMode).toBe("auto");
+
+    h.update({ runtimeMode: "auto" });
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      prompt: "keep this unsent follow-up",
+      runtimeMode: null,
+    });
+  });
+
   it("releases an inactive thread pick only after its queued model becomes durable", () => {
     const store = useComposerDraftStore.getState();
     const pick = modelSelection(CODEX_DRIVER, "gpt-5.5", { fastMode: false });
