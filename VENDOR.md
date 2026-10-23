@@ -55,24 +55,24 @@ differ; amend every copy together or none.
 
 ## Mise Tasks
 
-| Task                                          | Purpose                                                                                   |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `mise run sync`                               | Fetch origin/main, re-overlay every `overlay/*` branch onto it, return to original branch |
-| `mise run rebuild-local`                      | Reset `local` to origin/main, re-merge all `overlay/*` branches, end on `local`           |
-| `mise run check-overlays`                     | Fail if a commit cherry-picked into several overlays differs between them                 |
-| `mise run build`                              | Build all workspace packages                                                              |
-| `mise run smoke-test`                         | Boot-check the built server bundle (`bin.mjs --version`)                                  |
-| `mise run swap`                               | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                       |
-| `mise run swap-back`                          | Restore the previous build from bak to current                                            |
-| `mise run setup-stable`                       | Pin the current bak as the stable fallback tier                                           |
-| `mise run generate-runtime`                   | (Re)generate the `~/.t3/code` shim, AGENTS.md, and tier scaffold                          |
-| `mise run update`                             | rebuild-local + install + build + smoke-test + swap                                       |
-| `mise run upgrade`                            | sync + rebuild-local + install + build + smoke-test + swap                                |
-| `mise run serve`                              | Run the built server from the vendor tree (dev mode)                                      |
-| `mise run daemon`                             | Start the self-updating daemon (detached, survives everything)                            |
-| `mise run daemon-stop`                        | Stop the daemon and the server it supervises                                              |
-| `mise run daemon-status`                      | Daemon, server, tier, and busy-session health at a glance                                 |
-| `mise run daemon-log` / `server-log` / `logs` | Tail daemon log / server log / both                                                       |
+| Task                                          | Purpose                                                                                                                                                                                |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mise run sync`                               | Fetch origin/main, re-overlay `overlay/*` branches that lack it, return to original branch; overlays that would conflict are left untouched and listed, so fix those by hand and rerun |
+| `mise run rebuild-local`                      | Reset `local` to origin/main, re-merge all `overlay/*` branches, end on `local`                                                                                                        |
+| `mise run check-overlays`                     | Fail if a commit cherry-picked into several overlays differs between them                                                                                                              |
+| `mise run build`                              | Build all workspace packages                                                                                                                                                           |
+| `mise run smoke-test`                         | Boot-check the built server bundle (`bin.mjs --version`)                                                                                                                               |
+| `mise run swap`                               | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                                                                                                                    |
+| `mise run swap-back`                          | Restore the previous build from bak to current                                                                                                                                         |
+| `mise run setup-stable`                       | Pin the current bak as the stable fallback tier                                                                                                                                        |
+| `mise run generate-runtime`                   | (Re)generate the `~/.t3/code` shim, AGENTS.md, and tier scaffold                                                                                                                       |
+| `mise run update`                             | rebuild-local + install + build + smoke-test + swap                                                                                                                                    |
+| `mise run upgrade`                            | sync + rebuild-local + install + build + smoke-test + swap                                                                                                                             |
+| `mise run serve`                              | Run the built server from the vendor tree (dev mode)                                                                                                                                   |
+| `mise run daemon`                             | Start the self-updating daemon (detached, survives everything)                                                                                                                         |
+| `mise run daemon-stop`                        | Stop the daemon and the server it supervises                                                                                                                                           |
+| `mise run daemon-status`                      | Daemon, server, tier, and busy-session health at a glance                                                                                                                              |
+| `mise run daemon-log` / `server-log` / `logs` | Tail daemon log / server log / both                                                                                                                                                    |
 
 Tasks chain sequentially via `&&` — mise `depends` runs tasks in parallel,
 which races the git operations. Don't convert these to `depends`.

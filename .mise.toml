@@ -8,8 +8,8 @@ node = "26.12.1"
 _.path = ["{{config_root}}/node_modules/.bin"]
 
 [tasks.sync]
-description = "Fetch upstream and re-overlay all overlay/* branches onto origin/main (requires clean worktree)"
-run = """
+description = "Fetch upstream and re-overlay overlay/* branches onto origin/main; skips synced ones, leaves conflicting ones untouched (requires clean worktree)"
+run = '''
 set -eu
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "ERROR: You have uncommitted changes. Commit or stash them first."
@@ -18,11 +18,61 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 branch=$(git branch --show-current)
 git fetch origin main
+
+# Re-overlaying a branch that already contains origin/main only adds an empty
+# merge, so a rerun after fixing one conflict leaves the others alone. A dry-run
+# merge finds conflicts first, so each overlay ends fully synced or unchanged.
+pending=""
+conflicts=""
 for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
+  if git merge-base --is-ancestor origin/main "$b"; then continue; fi
+  if git merge-tree --write-tree --name-only origin/main "$b" >/dev/null; then
+    pending="$pending $b"
+  else
+    conflicts="$conflicts $b"
+  fi
+done
+
+# git-overlay renames and deletes the branch it syncs, which fails in another
+# worktree that has it checked out. Detach those worktrees while syncing.
+tab=$(printf '\t')
+held=$(git worktree list --porcelain | awk -v want=" $pending " '
+  /^worktree /{ wt = substr($0, 10) }
+  /^branch refs\/heads\//{ b = substr($0, 19); if (index(want, " " b " ")) print b "\t" wt }')
+printf '%s\n' "$held" | while IFS="$tab" read -r b wt; do
+  if [ -n "$b" ] && { ! git -C "$wt" diff --quiet || ! git -C "$wt" diff --cached --quiet; }; then
+    echo "ERROR: $b is checked out with uncommitted changes in $wt"
+    exit 1
+  fi
+done
+reattach() {
+  printf '%s\n' "$held" | while IFS="$tab" read -r b wt; do
+    if [ -n "$b" ]; then
+      git -C "$wt" switch -q "$b" || echo "WARNING: $wt is still detached; run: git -C '$wt' switch $b"
+    fi
+  done
+}
+trap reattach EXIT
+printf '%s\n' "$held" | while IFS="$tab" read -r b wt; do
+  if [ -n "$b" ]; then git -C "$wt" switch -q --detach; fi
+done
+
+for b in $pending; do
   bash "$HOME/code/git-overlay/git-overlay" origin/main "$b"
 done
-if [ -n "$branch" ]; then git checkout "$branch"; fi
-"""
+if [ -n "$branch" ]; then git checkout -q "$branch"; fi
+
+if [ -z "$pending$conflicts" ]; then echo "sync: every overlay already contains origin/main"; fi
+if [ -n "$conflicts" ]; then
+  echo "ERROR: these overlays conflict with origin/main and were left untouched:"
+  for b in $conflicts; do
+    echo "  $b"
+    git merge-tree --write-tree --name-only origin/main "$b" | sed -n '2,/^$/p' | sed '/^$/d; s/^/    /'
+  done
+  echo "Overlay each by hand (bash ~/code/git-overlay/git-overlay origin/main <branch>, resolve, --continue), then rerun sync."
+  exit 1
+fi
+'''
 
 [tasks.rebuild-local]
 description = "Reset local to origin/main and re-merge all overlay/* branches (ends on local)"
