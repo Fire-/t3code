@@ -48,12 +48,18 @@ branch and is rebuilt from scratch on every build:
 (`dev-infra` before `prime-agent`). rerere remembers conflict resolutions
 between rebuilds.
 
+When two overlays need the same change, cherry-pick one commit into each and
+keep its subject identical. `mise run check-overlays` (run first by
+`rebuild-local`) matches commits by subject and fails if the copies' patches
+differ; amend every copy together or none.
+
 ## Mise Tasks
 
 | Task                                          | Purpose                                                                                   |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | `mise run sync`                               | Fetch origin/main, re-overlay every `overlay/*` branch onto it, return to original branch |
 | `mise run rebuild-local`                      | Reset `local` to origin/main, re-merge all `overlay/*` branches, end on `local`           |
+| `mise run check-overlays`                     | Fail if a commit cherry-picked into several overlays differs between them                 |
 | `mise run build`                              | Build all workspace packages                                                              |
 | `mise run smoke-test`                         | Boot-check the built server bundle (`bin.mjs --version`)                                  |
 | `mise run swap`                               | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                       |

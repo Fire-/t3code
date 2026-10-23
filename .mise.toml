@@ -33,6 +33,7 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   git status --short
   exit 1
 fi
+mise run check-overlays
 git checkout local
 git reset --hard origin/main
 for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
@@ -43,6 +44,33 @@ for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
 done
 echo "local rebuilt: origin/main + all overlay/* branches (alphabetical order)"
 """
+
+# Overlays never stack, so a change two of them need is cherry-picked into
+# each. Copies that drift apart make the merge into local conflict or blend
+# both versions.
+[tasks.check-overlays]
+description = "Fail if a commit shared by several overlay/* branches (same subject) differs between them"
+run = '''
+set -euo pipefail
+for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
+  git log --no-merges -p origin/main.."$b" | git patch-id --stable |
+    while read -r pid sha; do
+      printf '%s\t%s\t%s\t%s\n' "$(git log -1 --format=%s "$sha")" "$pid" "$b" "$sha"
+    done
+done | awk -F'\t' '
+  { rows[$1] = rows[$1] sprintf("  %-28s %.10s  patch %.10s\n", $3, $4, $2); n[$1]++ }
+  !($1 in pid) { pid[$1] = $2; next }
+  pid[$1] != $2 { bad[$1] = 1 }
+  END {
+    for (s in n) if (n[s] > 1) shared++
+    for (s in bad) drift++
+    if (!drift) { printf "overlays ok: %d shared commit(s), identical in every overlay\n", shared; exit }
+    print "ERROR: commits shared between overlays have drifted (matched by subject):"
+    for (s in bad) printf "%s\n%s", s, rows[s]
+    print "Re-cherry-pick one copy into the other overlays so every copy carries the same patch."
+    exit 1
+  }'
+'''
 
 [tasks.build]
 description = "Build all workspace packages"
