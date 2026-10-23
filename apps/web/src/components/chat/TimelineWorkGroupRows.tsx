@@ -82,9 +82,9 @@ export const WorkGroupSection = memo(function WorkGroupSection({
     return <ReasoningTraceContent entries={nonEmptyEntries} />;
   }
   if (isExpandedToolGroup) {
-    // The rail nests group rows under their header so they don't read as its siblings.
+    // Indenting nests group rows under their header so they don't read as its siblings.
     return (
-      <div className="ms-3.5 border-s border-border/70 ps-1">
+      <div className="ps-5">
         <ExpandedWorkGroupEntries
           key={`${routeThreadKey}:${anchorKey}`}
           anchorKey={anchorKey}
