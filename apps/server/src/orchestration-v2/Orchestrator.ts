@@ -1047,14 +1047,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       )
       .pipe(
-        Effect.map((records): OrchestrationV2ThreadProjection => ({
-          ...records,
-          checkpoints: [],
-          plans: [],
-          contextHandoffs: [],
-          visibleTurnItems: [],
-          updatedAt: records.thread.updatedAt,
-        })),
+        Effect.map(
+          (records): OrchestrationV2ThreadProjection => ({
+            ...records,
+            checkpoints: [],
+            plans: [],
+            contextHandoffs: [],
+            visibleTurnItems: [],
+            updatedAt: records.thread.updatedAt,
+          }),
+        ),
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
       );
 
@@ -2930,7 +2932,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             command.threadId,
             command.type === "thread.model-selection.set" || command.type === "provider.switch"
               ? command.modelSelection.instanceId
-              : undefined,
+              : command.type === "thread.runtime-mode.set"
+                ? thread.providerInstanceId
+                : undefined,
           )
           .pipe(mapDispatchError(command))
       : null;
@@ -3743,6 +3747,44 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
         { concurrency: 1, discard: true },
       );
+    }
+
+    if (command.type === "thread.runtime-mode.set") {
+      const liveSessionIds = new Set(
+        (providerContext?.providerSessions ?? [])
+          .filter(
+            (session) =>
+              session.capabilities.sessions.supportsRuntimeModeSwitchInSession &&
+              session.status !== "stopped" &&
+              session.status !== "error",
+          )
+          .map((session) => session.id),
+      );
+      const liveProviderThreads = (providerContext?.providerThreads ?? []).flatMap(
+        (providerThread) =>
+          providerThread.appThreadId === command.threadId &&
+          providerThread.providerSessionId !== null &&
+          liveSessionIds.has(providerThread.providerSessionId)
+            ? [{ ...providerThread, providerSessionId: providerThread.providerSessionId }]
+            : [],
+      );
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        ...liveProviderThreads.map(
+          (providerThread) =>
+            ({
+              id: `effect:${command.commandId}:provider-session.runtime-mode.set:${providerThread.id}`,
+              commandId: command.commandId,
+              threadId: command.threadId,
+              request: {
+                type: "provider-session.runtime-mode.set",
+                providerSessionId: providerThread.providerSessionId,
+                providerThreadId: providerThread.id,
+                runtimeMode: command.runtimeMode,
+              },
+            }) satisfies PendingOrchestrationEffectV2,
+        ),
+      ]);
     }
 
     if (command.type === "thread.archive") {

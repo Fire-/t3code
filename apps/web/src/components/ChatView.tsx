@@ -84,7 +84,10 @@ import {
   resolveWorkflowOpening,
   workflowOpeningParentThreadId,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  threadSupportsProviderHandoff,
+  threadSwitchesRuntimeModeLive,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
 import {
@@ -2816,6 +2819,14 @@ export default function ChatView(props: ChatViewProps) {
     setPendingServerThreadEnvModeEntry,
     setPendingServerThreadStartFromOriginByThreadId,
     scheduleComposerFocus,
+    applyRuntimeModeLive:
+      serverThread && threadSwitchesRuntimeModeLive(serverProjection)
+        ? (mode) =>
+            void setThreadRuntimeMode({
+              environmentId,
+              input: { threadId: serverThread.id, runtimeMode: mode },
+            })
+        : null,
   });
   const { onResume, isResuming } = useComposerResume({
     environmentId,

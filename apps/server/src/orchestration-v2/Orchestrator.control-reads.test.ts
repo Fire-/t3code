@@ -455,6 +455,102 @@ it.effect("implements a proposed plan that the command projection leaves out", (
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("pushes a runtime mode change into the thread's live sessions", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:live-runtime-mode");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-live-runtime-mode"),
+      threadId,
+      projectId: ProjectId.make("project:live-runtime-mode"),
+      title: "Live runtime mode",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const sessionId = ProviderSessionId.make("session:live-runtime-mode");
+    const providerThreadId = ProviderThreadId.make("provider-thread:live-runtime-mode");
+    const session = {
+      id: sessionId,
+      driver: adapter.driver,
+      providerInstanceId: instanceId,
+      status: "running" as const,
+      cwd: "/repo",
+      model: modelSelection.model,
+      capabilities: CodexProviderCapabilitiesV2,
+      createdAt: now,
+      updatedAt: now,
+      lastError: null,
+    };
+    yield* projections.apply({
+      id: EventId.make("live-runtime-mode:session"),
+      type: "provider-session.attached",
+      threadId,
+      occurredAt: now,
+      payload: session,
+    });
+    yield* projections.apply({
+      id: EventId.make("live-runtime-mode:provider-thread"),
+      type: "provider-thread.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: providerThreadId,
+        driver: adapter.driver,
+        providerInstanceId: instanceId,
+        providerSessionId: sessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "active",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    const setMode = (id: string, runtimeMode: "auto" | "full-access") =>
+      orchestrator
+        .dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make(id),
+          threadId,
+          runtimeMode,
+        })
+        .pipe(
+          Effect.andThen(outbox.listByCommandId(CommandId.make(id))),
+          Effect.map((effects) => effects.map((effect) => effect.request)),
+        );
+    assert.deepEqual(yield* setMode("live-runtime-mode-set", "full-access"), [
+      {
+        type: "provider-session.runtime-mode.set",
+        providerSessionId: sessionId,
+        providerThreadId,
+        runtimeMode: "full-access",
+      },
+    ]);
+    yield* projections.apply({
+      id: EventId.make("live-runtime-mode:session-stopped"),
+      type: "provider-session.updated",
+      threadId,
+      occurredAt: now,
+      payload: { ...session, status: "stopped" },
+    });
+    assert.deepEqual(yield* setMode("stopped-runtime-mode-set", "auto"), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("settles only the stopped run's background work, once", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
