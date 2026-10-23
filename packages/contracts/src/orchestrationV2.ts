@@ -1200,6 +1200,17 @@ export const OrchestrationV2Checkpoint = Schema.Struct({
 });
 export type OrchestrationV2Checkpoint = typeof OrchestrationV2Checkpoint.Type;
 
+/**
+ * Any checkpoint a rollback has not already passed anchors a conversation rewind. Only a ready
+ * one has a file snapshot, so folders without Git can still rewind the chat but not files.
+ */
+export function canRollbackToCheckpoint(
+  status: OrchestrationV2Checkpoint["status"],
+  restoreFiles: boolean,
+): boolean {
+  return restoreFiles ? status === "ready" : status !== "stale";
+}
+
 export const OrchestrationV2CheckpointRollbackRequest = Schema.Struct({
   scopeId: CheckpointScopeId,
   checkpointId: CheckpointId,
