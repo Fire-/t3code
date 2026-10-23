@@ -394,31 +394,48 @@ describe("Prime tool discovery permissions", () => {
 describe("Prime ipython permissions", () => {
   type ToolCallHook = (
     event: { toolName: string; input: unknown },
-    ctx: { ui: { confirm: (title: string) => Promise<boolean> } },
+    ctx: { ui: { confirm: (title: string, detail: string) => Promise<boolean> } },
   ) => Promise<{ block: true; reason: string } | undefined>;
 
   const callTool = async (
     runtimeMode: string,
     toolName: string,
     answer: boolean,
-    options: { readonly unreachable?: boolean } = {},
+    options: { readonly unreachable?: boolean; readonly input?: unknown } = {},
   ) => {
-    const bridge = await loadMcpBridge({ runtimeMode, ...options });
+    const { input = { code: "await bash('rm -rf build')" }, ...bridgeOptions } = options;
+    const bridge = await loadMcpBridge({ runtimeMode, ...bridgeOptions });
     const hook = bridge.handlers.get("tool_call") as unknown as ToolCallHook;
     const confirmations: string[] = [];
+    const details: string[] = [];
     const result = await hook(
-      { toolName, input: { code: "await bash('rm -rf build')" } },
+      { toolName, input },
       {
         ui: {
-          confirm: async (title) => {
+          confirm: async (title, detail) => {
             confirmations.push(title);
+            details.push(detail);
             return answer;
           },
         },
       },
     );
-    return { result, confirmations };
+    return { result, confirmations, details };
   };
+
+  it("shows the ipython cell and bash command themselves for approval", async () => {
+    const code = 'import os\nprint(os.listdir("build"))';
+    const ipython = await callTool("approval-required", "ipython", true, { input: { code } });
+    assert.deepEqual(ipython.details, [code]);
+    const bash = await callTool("approval-required", "bash", true, {
+      input: { command: "rm -rf build", timeout: 30 },
+    });
+    assert.deepEqual(bash.details, ["rm -rf build"]);
+    const write = await callTool("approval-required", "write", true, {
+      input: { path: "a.txt", content: "hi" },
+    });
+    assert.deepEqual(write.details, [JSON.stringify({ path: "a.txt", content: "hi" }, null, 2)]);
+  });
 
   it.each(["approval-required", "auto-accept-edits"])(
     "[VAL-LAUNCH-004] asks before running ipython in %s",

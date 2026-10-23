@@ -67,7 +67,16 @@ function runtimeMode(): RuntimeMode {
     : "full-access";
 }
 
-function toolInputSummary(input: unknown): string {
+// Approvers need the cell or command itself; its JSON wrapper escapes every
+// newline and quote, which makes multi-line code unreadable.
+const TOOL_SOURCE_KEYS = new Map([["ipython", "code"], ["bash", "command"]]);
+
+function toolInputSummary(toolName: string, input: unknown): string {
+  const sourceKey = TOOL_SOURCE_KEYS.get(toolName);
+  if (sourceKey !== undefined && typeof input === "object" && input !== null) {
+    const source = (input as Record<string, unknown>)[sourceKey];
+    if (typeof source === "string") return source.slice(0, 4_000);
+  }
   try {
     return JSON.stringify(input, null, 2).slice(0, 4_000);
   } catch {
@@ -327,7 +336,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     }
     const approved = await ctx.ui.confirm(
       \`Allow \${event.toolName}?\`,
-      toolInputSummary(event.input),
+      toolInputSummary(event.toolName, event.input),
       { signal: ctx.signal },
     );
     if (!approved) {
