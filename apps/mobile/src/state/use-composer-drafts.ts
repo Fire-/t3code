@@ -1486,14 +1486,29 @@ export function subscribeComposerDraftModelReconciliation(input: {
   );
   const matchesAtom = Atom.make((get) => {
     const threadKeys = get(threadKeysAtom);
-    const matches: Array<readonly [string, ComposerDraft]> = [];
+    const matches: Array<
+      readonly [string, ComposerDraft, { readonly model: boolean; readonly runtimeMode: boolean }]
+    > = [];
     for (const [key, draft] of Object.entries(get(draftsAtom))) {
-      if (!draft.modelSelection || isNewTaskDraftKey(key) || isQueuedEditDraftKey(key)) continue;
+      if (
+        (!draft.modelSelection && draft.runtimeMode === undefined) ||
+        isNewTaskDraftKey(key) ||
+        isQueuedEditDraftKey(key)
+      )
+        continue;
       const ref = parseScopedThreadKey(key);
       if (!ref || !threadKeys.has(key)) continue;
+      // A settled pick is dropped so the composer follows later server-side
+      // changes, such as a provider raising the runtime mode mid-session.
+      const settled = (thread: Pick<EnvironmentThreadShell, "modelSelection" | "runtimeMode">) => ({
+        model:
+          draft.modelSelection !== undefined &&
+          draftModelPickMatchesThread(draft.modelSelection, thread.modelSelection),
+        runtimeMode: draft.runtimeMode !== undefined && draft.runtimeMode === thread.runtimeMode,
+      });
       const thread = get(input.threadShellAtom(ref));
-      if (!thread || !draftModelPickMatchesThread(draft.modelSelection, thread.modelSelection))
-        continue;
+      const shown = thread ? settled(thread) : null;
+      if (!shown || (!shown.model && !shown.runtimeMode)) continue;
       // Status and selection must come from the same emission; derived atoms can update apart.
       const shell = Option.getOrNull(
         AsyncResult.value(get(input.shellStateAtom(ref.environmentId))),
@@ -1502,11 +1517,11 @@ export function subscribeComposerDraftModelReconciliation(input: {
       const authoritativeThread = Option.getOrNull(shell.snapshot)?.threads.find(
         (candidate) => candidate.id === ref.threadId,
       );
-      if (
-        authoritativeThread &&
-        draftModelPickMatchesThread(draft.modelSelection, authoritativeThread.modelSelection)
-      ) {
-        matches.push([key, draft]);
+      const authoritative = authoritativeThread ? settled(authoritativeThread) : null;
+      const model = shown.model && authoritative?.model === true;
+      const runtimeMode = shown.runtimeMode && authoritative?.runtimeMode === true;
+      if (model || runtimeMode) {
+        matches.push([key, draft, { model, runtimeMode }]);
       }
     }
     return matches;
@@ -1517,9 +1532,14 @@ export function subscribeComposerDraftModelReconciliation(input: {
       if (matches.length === 0) return;
       updateComposerDrafts((current) => {
         let next = current;
-        for (const [key, matchedDraft] of matches) {
+        for (const [key, matchedDraft, settled] of matches) {
           if (next[key] !== matchedDraft) continue;
-          const { modelSelection: _modelSelection, ...draft } = matchedDraft;
+          const { modelSelection, runtimeMode, ...retained } = matchedDraft;
+          const draft: ComposerDraft = {
+            ...retained,
+            ...(modelSelection && !settled.model ? { modelSelection } : {}),
+            ...(runtimeMode !== undefined && !settled.runtimeMode ? { runtimeMode } : {}),
+          };
           next = withComposerDraft(next, key, draft);
         }
         return next;
@@ -2006,13 +2026,14 @@ export const newTaskComposerDraftsAtom = Atom.make((get): ComposerDraftsByKey =>
 type ComposerDraftUploadSource = Pick<ComposerDraft, "attachments" | "project">;
 // What the upload worker reads: equal while only draft text changes.
 type ComposerDraftUploadSources = Readonly<Record<string, ComposerDraftUploadSource>>;
-export const composerDraftUploadSourcesAtom = Atom.make((get): ComposerDraftUploadSources =>
-  Object.fromEntries(
-    Object.entries(get(composerDraftsAtom)).map(([key, draft]) => [
-      key,
-      { attachments: draft.attachments, project: draft.project },
-    ]),
-  ),
+export const composerDraftUploadSourcesAtom = Atom.make(
+  (get): ComposerDraftUploadSources =>
+    Object.fromEntries(
+      Object.entries(get(composerDraftsAtom)).map(([key, draft]) => [
+        key,
+        { attachments: draft.attachments, project: draft.project },
+      ]),
+    ),
 ).pipe(
   Atom.withEquality((a: ComposerDraftUploadSources, b: ComposerDraftUploadSources) => {
     const keys = Object.keys(a);

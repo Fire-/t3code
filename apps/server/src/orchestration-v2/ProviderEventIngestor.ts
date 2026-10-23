@@ -9,7 +9,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type ModelSelection,
-  type RuntimeMode,
+  RuntimeMode,
   type ProviderInteractionMode,
   ProviderInstanceId,
   ProviderSessionId,
@@ -675,6 +675,23 @@ export const layer: Layer.Layer<
                   runId: plan.runId,
                   nodeId: plan.nodeId,
                   occurredAt,
+                }),
+              ];
+            }
+            case "runtime_mode.raised": {
+              const thread = yield* projections.getThread(input.event.threadId);
+              if (
+                RuntimeMode.literals.indexOf(input.event.runtimeMode) <=
+                RuntimeMode.literals.indexOf(thread.runtimeMode)
+              )
+                return [];
+              const now = yield* DateTime.now;
+              return [
+                yield* makeDomainEvent(input, {
+                  type: "thread.runtime-mode-updated",
+                  threadId: thread.id,
+                  payload: { ...thread, runtimeMode: input.event.runtimeMode, updatedAt: now },
+                  occurredAt: now,
                 }),
               ];
             }

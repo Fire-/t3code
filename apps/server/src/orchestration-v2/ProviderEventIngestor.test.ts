@@ -1926,6 +1926,57 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("raises the thread's runtime mode when its provider widens it, never lowers it", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const rootEvent = yield* threadCreatedEvent(now);
+      if (rootEvent.type !== "thread.created") throw new Error("Expected thread fixture");
+      const threadId = rootEvent.threadId;
+      yield* eventSink.write({
+        events: [
+          { ...rootEvent, payload: { ...rootEvent.payload, runtimeMode: "auto-accept-edits" } },
+        ],
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const outcomes = [];
+      for (const runtimeMode of [
+        "approval-required",
+        "auto-accept-edits",
+        "full-access",
+        "auto",
+      ] as const) {
+        const stored = yield* ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          event: { type: "runtime_mode.raised", driver: CODEX_DRIVER, threadId, runtimeMode },
+        });
+        outcomes.push({
+          offered: runtimeMode,
+          events: stored.map((entry) => entry.event.type),
+          threadMode: (yield* projectionStore.getThread(threadId)).runtimeMode,
+        });
+      }
+      assert.deepEqual(outcomes, [
+        { offered: "approval-required", events: [], threadMode: "auto-accept-edits" },
+        { offered: "auto-accept-edits", events: [], threadMode: "auto-accept-edits" },
+        {
+          offered: "full-access",
+          events: ["thread.runtime-mode-updated"],
+          threadMode: "full-access",
+        },
+        { offered: "auto", events: [], threadMode: "full-access" },
+      ]);
+    }),
+  );
+
   it.effect(
     "recovers a missing Claude child once and preserves saved metadata on later recovery",
     () =>
