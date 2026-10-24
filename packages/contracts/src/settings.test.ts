@@ -211,6 +211,15 @@ describe("ClientSettings quit confirmation", () => {
 });
 
 describe("provider enabled defaults", () => {
+  it("[VAL-REG-004] keeps Droid disabled until a configured instance opts in", () => {
+    const droid = ProviderDriverKind.make("droid");
+    expect(resolveProviderInstanceEnabled({ driver: droid, config: {} })).toBe(false);
+    expect(resolveProviderInstanceEnabled({ driver: droid, enabled: true, config: {} })).toBe(true);
+    expect(
+      resolveProviderInstanceEnabled({ driver: droid, enabled: true, config: { enabled: false } }),
+    ).toBe(false);
+  });
+
   it("resolves instance enabled state with explicit false winning", () => {
     const grok = ProviderDriverKind.make("grok");
     const codex = ProviderDriverKind.make("codex");

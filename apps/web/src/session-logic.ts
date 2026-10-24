@@ -285,7 +285,9 @@ export function deriveActivePlanState(
   };
 }
 
-// Claude's unfinished tasks belong to the provider session, not just the turn.
+// Claude's and Droid's unfinished tasks belong to the provider session, not just the turn.
+const SESSION_TODO_DRIVERS: ReadonlySet<string> = new Set(["claudeAgent", "droid"]);
+
 export function selectComposerTasksPlan(
   projection: ThreadStructure | null,
   plan: ActivePlanState | null,
@@ -302,7 +304,7 @@ export function selectComposerTasksPlan(
   const planDriver = projection.providerThreads.find(
     (providerThread) => providerThread.id === planProviderThreadId,
   )?.driver;
-  if (planDriver !== "claudeAgent") return null;
+  if (planDriver === undefined || !SESSION_TODO_DRIVERS.has(planDriver)) return null;
   let latestStartedRun: OrchestrationV2ThreadProjection["runs"][number] | null = null;
   for (const run of projection.runs) {
     if (

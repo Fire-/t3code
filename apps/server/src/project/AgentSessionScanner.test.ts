@@ -9,6 +9,7 @@ import {
   ProviderInstanceId,
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -715,7 +716,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("skips linked git worktrees and reports the origin of real checkouts", () =>
+    it.effect("merges linked git worktrees into their checkout and reports real origins", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -735,6 +736,10 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const worktreeGitDir = path.join(repo, ".git", "worktrees", "wt");
         yield* fileSystem.makeDirectory(worktreeGitDir, { recursive: true });
         yield* fileSystem.writeFileString(path.join(worktreeGitDir, "commondir"), "../..\n");
+        yield* fileSystem.writeFileString(
+          path.join(worktreeGitDir, "HEAD"),
+          "ref: refs/heads/feature/wt\n",
+        );
         yield* fileSystem.writeFileString(
           path.join(worktree, ".git"),
           `gitdir: ${worktreeGitDir}\n`,
@@ -763,19 +768,85 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
         expect(
-          result.candidates.map((candidate) => ({ path: candidate.path, git: candidate.git })),
+          result.candidates.map((candidate) => ({
+            path: candidate.path,
+            git: candidate.git,
+            threadCount: candidate.threadCount,
+          })),
         ).toEqual([
           {
             path: submodule,
             git: { remoteKey: "github.com/pingdotgg/vendor", repository: "pingdotgg/vendor" },
+            threadCount: 1,
           },
-          { path: noRemote, git: { remoteKey: null, repository: null } },
-          { path: plain, git: null },
+          { path: noRemote, git: { remoteKey: null, repository: null }, threadCount: 1 },
+          { path: plain, git: null, threadCount: 1 },
           {
             path: repo,
             git: { remoteKey: "github.com/pingdotgg/t3code", repository: "pingdotgg/t3code" },
+            threadCount: 2,
           },
         ]);
+      }),
+    );
+
+    it.effect("imports a checkout's linked worktree sessions with their worktree", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const repo = yield* makeTempDir("t3code-workspace-repo-");
+        const worktree = yield* makeTempDir("t3code-workspace-worktree-");
+        yield* fileSystem.makeDirectory(path.join(repo, ".git"));
+        yield* fileSystem.writeFileString(path.join(repo, ".git", "config"), "[core]\n");
+        const worktreeGitDir = path.join(repo, ".git", "worktrees", "wt");
+        yield* fileSystem.makeDirectory(worktreeGitDir, { recursive: true });
+        yield* fileSystem.writeFileString(path.join(worktreeGitDir, "commondir"), "../..\n");
+        yield* fileSystem.writeFileString(
+          path.join(worktreeGitDir, "HEAD"),
+          "ref: refs/heads/feature/wt\n",
+        );
+        yield* fileSystem.writeFileString(
+          path.join(worktree, ".git"),
+          `gitdir: ${worktreeGitDir}\n`,
+        );
+        for (const [index, cwd] of [repo, worktree].entries()) {
+          yield* writeTranscript({
+            filePath: path.join(
+              codexHomePath,
+              "sessions",
+              "2026",
+              "08",
+              "24",
+              `rollout-${index}.jsonl`,
+            ),
+            contents: [
+              encodeTranscriptRecord({
+                type: "session_meta",
+                payload: { id: `session-${index}`, cwd },
+              }),
+              encodeTranscriptRecord({
+                type: "event_msg",
+                payload: { type: "user_message", message: `Work in session ${index}` },
+              }),
+            ].join("\n"),
+            mtimeMs: nowMs - index * 1_000,
+          });
+        }
+
+        const input = { claudeHomePath, codexHomePath };
+        const threads = yield* runRecentThreads({ ...input, workspaceRoot: repo });
+        expect(
+          threads.map((thread) => ({ id: thread.providerSessionId, worktree: thread.worktree })),
+        ).toEqual([
+          { id: "session-0", worktree: undefined },
+          { id: "session-1", worktree: { path: worktree, branch: "feature/wt" } },
+        ]);
+        const worktreeThreads = yield* runRecentThreads({ ...input, workspaceRoot: worktree });
+        expect(worktreeThreads.map((thread) => thread.providerSessionId)).toEqual(["session-1"]);
       }),
     );
 
@@ -1170,6 +1241,370 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("imports Droid sessions from the user's ~/.factory without their subagents", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHome = yield* makeTempDir("t3code-droid-user-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        // Droid's folder name is a lossy spelling of the cwd; session_start holds the real one.
+        const sessionsDir = path.join(userHome, ".factory", "sessions", "-lossy-cwd");
+        const text = (value: string) => [{ type: "text", text: value }];
+        const droidSession = (
+          sessionStart: Record<string, unknown>,
+          messages: ReadonlyArray<readonly [id: string, message: Record<string, unknown>]>,
+        ) =>
+          [
+            { type: "session_start", cwd: workspace, ...sessionStart },
+            ...messages.map(([id, message]) => ({
+              type: "message",
+              id,
+              timestamp: "2026-08-24T10:00:00.000Z",
+              message,
+            })),
+          ]
+            .map((record) => encodeTranscriptRecord(record))
+            .join("\n");
+
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-titled.jsonl"),
+          contents: droidSession({ id: "droid-titled", title: "Fix the flaky test" }, [
+            [
+              "context-1",
+              { role: "user", content: text("Private context"), visibility: "llm_only" },
+            ],
+            ["u1", { role: "user", content: text("Why does CI fail?") }],
+            [
+              "a1",
+              {
+                role: "assistant",
+                modelId: "claude-opus-5-5",
+                content: [
+                  { type: "thinking", thinking: "Run the tests first", signature: "opaque" },
+                  { type: "tool_use", id: "t1", name: "Execute", input: { command: "vp test" } },
+                  {
+                    type: "tool_use",
+                    id: "t2",
+                    name: "Task",
+                    input: { description: "Find the flake", prompt: "Find the flaky test" },
+                  },
+                ],
+              },
+            ],
+            [
+              "u2",
+              {
+                role: "user",
+                content: [
+                  { type: "tool_result", tool_use_id: "t1", content: "1 failed" },
+                  { type: "tool_result", tool_use_id: "t2", content: "task_id: task_1" },
+                ],
+              },
+            ],
+            [
+              "task-completion:task_1",
+              {
+                role: "user",
+                visibility: "llm_only",
+                content: text("Background task completed.\ntask_id: task_1\noutput: setup.ts:12"),
+              },
+            ],
+            [
+              "a2",
+              { role: "assistant", modelId: "claude-sonnet-5-5", content: text("A race in setup") },
+            ],
+          ]),
+          mtimeMs: nowMs - 60_000,
+        });
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-untitled.jsonl"),
+          contents: droidSession({ id: "droid-untitled", title: "New Session" }, [
+            ["u1", { role: "user", content: text("Rename the button\nIt says Submit") }],
+          ]),
+          mtimeMs: nowMs - 120_000,
+        });
+        // Droid writes session_start before the first prompt; quitting then leaves only that.
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-empty.jsonl"),
+          contents: droidSession({ id: "droid-empty", title: "New Session" }, []),
+          mtimeMs: nowMs - 180_000,
+        });
+        // The transcript's last model wins; the settings' effort was for another model.
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-titled.settings.json"),
+          contents: JSON.stringify({ model: "claude-opus-5-5", reasoningEffort: "xhigh" }),
+          mtimeMs: nowMs - 60_000,
+        });
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-untitled.settings.json"),
+          contents: JSON.stringify({ model: "gpt-5.5", reasoningEffort: "medium" }),
+          mtimeMs: nowMs - 120_000,
+        });
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-subagent.jsonl"),
+          contents: droidSession(
+            { id: "droid-subagent", title: "Explore", callingSessionId: "droid-titled" },
+            [["u1", { role: "user", content: text("Find the flaky test") }]],
+          ),
+          mtimeMs: nowMs,
+        });
+
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const scan = yield* scanner.scan;
+          expect
+            .soft(scan.candidates.map(({ sources, threadCount }) => ({ sources, threadCount })))
+            .toEqual([{ sources: ["droid"], threadCount: 3 }]);
+          const outcomes = yield* Stream.runCollect(scanner.recentThreads(workspace));
+          expect(
+            outcomes.map((outcome) => (outcome._tag === "Importable" ? outcome.thread : outcome)),
+          ).toMatchObject([
+            {
+              source: "droid",
+              providerInstanceId: "droid",
+              providerSessionId: "droid-titled",
+              title: "Fix the flaky test",
+              model: "claude-sonnet-5-5",
+              messages: [
+                { role: "user", text: "Why does CI fail?" },
+                { role: "assistant", text: "A race in setup" },
+              ],
+              activities: [
+                { position: 1, activity: { kind: "reasoning", text: "Run the tests first" } },
+                {
+                  position: 1,
+                  activity: {
+                    kind: "tool",
+                    item: {
+                      type: "command_execution",
+                      status: "completed",
+                      input: "vp test",
+                      output: "1 failed",
+                    },
+                  },
+                },
+                {
+                  position: 1,
+                  activity: {
+                    kind: "subagent",
+                    title: "Find the flake",
+                    prompt: "Find the flaky test",
+                    status: "completed",
+                    result: "setup.ts:12",
+                  },
+                },
+              ],
+            },
+            {
+              providerSessionId: "droid-untitled",
+              title: "Rename the button",
+              model: "gpt-5.5",
+              reasoningEffort: "medium",
+              messages: [{ role: "user", text: "Rename the button\nIt says Submit" }],
+              activities: [],
+            },
+            { _tag: "Skipped", reason: "empty" },
+          ]);
+          expect(
+            outcomes.flatMap((outcome) =>
+              outcome._tag === "Importable" ? [outcome.thread.reasoningEffort] : [],
+            ),
+          ).toEqual([undefined, "medium"]);
+
+          // Threads imported before thinking was imported get their history again, once.
+          const sources = outcomes.flatMap((outcome) =>
+            outcome._tag === "Importable" ? [outcome.source] : [],
+          );
+          const tags = (completed: ReadonlyArray<AgentSessionImportSource>) =>
+            Stream.runCollect(scanner.recentThreads(workspace, completed)).pipe(
+              Effect.map((again) =>
+                again.map((outcome) =>
+                  outcome._tag === "Importable"
+                    ? [outcome._tag, outcome.refreshHistory, outcome.source.historyVersion]
+                    : [outcome._tag],
+                ),
+              ),
+            );
+          expect(yield* tags(sources)).toEqual([
+            ["AlreadyImported"],
+            ["AlreadyImported"],
+            ["Skipped"],
+          ]);
+          const { historyVersion: _, ...olderSource } = sources[0]!;
+          expect(yield* tags([olderSource, sources[1]!])).toEqual([
+            ["Importable", true, sources[0]!.historyVersion],
+            ["AlreadyImported"],
+            ["Skipped"],
+          ]);
+        }).pipe(
+          Effect.provide(
+            layerScannerTest({
+              claudeHomePath,
+              codexHomePath,
+              providerInstances: {
+                [ProviderInstanceId.make("droid")]: {
+                  driver: ProviderDriverKind.make("droid"),
+                  enabled: true,
+                },
+              },
+            }),
+          ),
+          Effect.provideService(HostProcess.HomeDirectory, userHome),
+        );
+      }),
+    );
+
+    it.effect("lists the Droid sessions forked or rewound from each session", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHome = yield* makeTempDir("t3code-droid-user-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const sessionsDir = path.join(userHome, ".factory", "sessions", "-workspace");
+        // original -> rewound -> rewound-again, and original -> forked.
+        for (const [id, parent, ageMs] of [
+          ["original", undefined, 4_000],
+          ["rewound", "original", 3_000],
+          ["rewound-again", "rewound", 2_000],
+          ["forked", "original", 1_000],
+        ] as const) {
+          yield* writeTranscript({
+            filePath: path.join(sessionsDir, `${id}.jsonl`),
+            contents: [
+              { type: "session_start", id, cwd: workspace, ...(parent ? { parent } : {}) },
+              {
+                type: "message",
+                id: `${id}-u1`,
+                timestamp: "2026-08-24T10:00:00.000Z",
+                message: { role: "user", content: [{ type: "text", text: "Same prompt" }] },
+              },
+            ]
+              .map((record) => encodeTranscriptRecord(record))
+              .join("\n"),
+            mtimeMs: nowMs - ageMs,
+          });
+        }
+
+        const outcomes = yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          return yield* Stream.runCollect(scanner.recentThreads(workspace));
+        }).pipe(
+          Effect.provide(
+            layerScannerTest({
+              claudeHomePath,
+              codexHomePath,
+              providerInstances: {
+                [ProviderInstanceId.make("droid")]: {
+                  driver: ProviderDriverKind.make("droid"),
+                  enabled: true,
+                },
+              },
+            }),
+          ),
+          Effect.provideService(HostProcess.HomeDirectory, userHome),
+        );
+        expect(
+          Object.fromEntries(
+            outcomes.flatMap((outcome) =>
+              outcome._tag === "Importable"
+                ? [[outcome.thread.providerSessionId, outcome.continuedIn?.toSorted()]]
+                : [],
+            ),
+          ),
+        ).toEqual({
+          forked: undefined,
+          "rewound-again": undefined,
+          rewound: ["rewound-again"],
+          original: ["forked", "rewound", "rewound-again"],
+        });
+      }),
+    );
+
+    it.effect(
+      "keeps a Droid session's first prompt and newest history when it exceeds the budget",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const userHome = yield* makeTempDir("t3code-droid-user-home-");
+          const workspace = yield* makeTempDir("t3code-workspace-");
+          const text = (value: string) => [{ type: "text", text: value }];
+          const message = (id: string, role: string, content: unknown) =>
+            encodeTranscriptRecord({
+              type: "message",
+              id,
+              timestamp: "2026-08-24T10:00:00.000Z",
+              message: { role, content },
+            });
+          // Each number is several reader tokens, so these small records exceed the real 128 MiB budget in aggregate.
+          const bulkyInput = { pattern: Array.from({ length: 1_000 }, () => 1) };
+          yield* writeTranscript({
+            filePath: path.join(userHome, ".factory", "sessions", "-cwd", "droid-long.jsonl"),
+            contents: [
+              encodeTranscriptRecord({ type: "session_start", id: "droid-long", cwd: workspace }),
+              message("u1", "user", text("First prompt")),
+              message("a1", "assistant", text("First reply")),
+              ...Array.from({ length: 1_000 }, (_, index) =>
+                message(`old-${index}`, "assistant", [
+                  { type: "tool_use", id: `grep-${index}`, name: "Grep", input: bulkyInput },
+                ]),
+              ),
+              message("u2", "user", text("Latest prompt")),
+              message("a2", "assistant", [
+                ...text("Latest reply"),
+                { type: "tool_use", id: "ls", name: "Execute", input: { command: "ls" } },
+              ]),
+              message("r2", "user", [{ type: "tool_result", tool_use_id: "ls", content: "a.ts" }]),
+            ].join("\n"),
+            mtimeMs: nowMs,
+          });
+
+          const outcomes = yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            return yield* Stream.runCollect(scanner.recentThreads(workspace));
+          }).pipe(
+            Effect.provide(
+              layerScannerTest({
+                claudeHomePath,
+                codexHomePath,
+                providerInstances: {
+                  [ProviderInstanceId.make("droid")]: {
+                    driver: ProviderDriverKind.make("droid"),
+                    enabled: true,
+                  },
+                },
+              }),
+            ),
+            Effect.provideService(HostProcess.HomeDirectory, userHome),
+          );
+
+          const thread = outcomes[0]?._tag === "Importable" ? outcomes[0].thread : undefined;
+          expect(thread?.messages.map(({ role, text }) => [role, text])).toEqual([
+            ["user", "First prompt"],
+            ["user", "Latest prompt"],
+            ["assistant", "Latest reply"],
+          ]);
+          const activities = thread?.activities ?? [];
+          expect(activities[0]).toMatchObject({ position: 1, activity: { kind: "notice" } });
+          expect(activities.at(-1)).toMatchObject({
+            position: 3,
+            activity: { kind: "tool", item: { type: "command_execution", output: "a.ts" } },
+          });
+          const keptOldTools = activities.length - 2;
+          expect(keptOldTools).toBeGreaterThan(0);
+          expect(keptOldTools).toBeLessThan(1_000);
+        }),
+    );
+
     it.effect("suppresses duplicate session copies without reporting a skipped import", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
@@ -1255,6 +1690,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           workspaceRoot: workspace,
         });
         expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Skipped", "Importable"]);
+        expect(outcomes[0]).toEqual({ _tag: "Skipped", reason: "too-large" });
         expect(outcomes[1]).toMatchObject({ thread: { providerSessionId: "older" } });
       }),
     );
@@ -1347,7 +1783,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                     thread: { messages: [{ text: "Replacement prompt" }] },
                   });
                 } else {
-                  expect(outcomes).toEqual([{ _tag: "Skipped" }]);
+                  expect(outcomes).toEqual([{ _tag: "Skipped", reason: "other-folder" }]);
                 }
               }).pipe(Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })));
             }),
@@ -1570,7 +2006,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         expect(transcriptOpenCount).toBe(2);
         expect(fullReadBytes).toBe(new TextEncoder().encode(contents).byteLength);
-        expect(outcomes).toEqual([{ _tag: "Skipped" }]);
+        expect(outcomes).toEqual([{ _tag: "Skipped", reason: "changed" }]);
       }),
     );
 

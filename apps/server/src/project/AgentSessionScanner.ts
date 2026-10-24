@@ -7,12 +7,14 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
+  type AgentSessionImportSkipReason,
   type AgentSessionImportSource,
   type AgentSessionProjectCandidate,
   type AgentSessionProjectGit,
   type AgentSessionScanResult,
   type ProviderInstanceConfig,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -32,6 +34,17 @@ import {
 } from "@t3tools/shared/git";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
+import {
+  DROID_HOME_DIRECTORY,
+  DROID_SESSIONS_DIRECTORY,
+  droidSessionParentId,
+  droidTranscriptEntries,
+  droidTranscriptMessage,
+  foldDroidTranscriptFields,
+  isDroidSubagentSessionStart,
+  isDroidTranscriptHistoryRecord,
+  type DroidTranscriptActivity,
+} from "@t3tools/provider-droid/server";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -64,6 +77,13 @@ const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_IMPORTED_TRANSCRIPT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORTED_MESSAGES = 200;
 const MAX_IMPORT_HISTORY_BYTES = 32 * 1024 * 1024;
+/**
+ * Droid sessions import whole, tool calls included, so the user can continue where they were.
+ * Past this budget the oldest history is dropped (the first prompt stays) instead of the session.
+ */
+const MAX_DROID_IMPORT_HISTORY_BYTES = 128 * 1024 * 1024;
+// A tool row shows only the last 8,000 characters, but an edit's +/- counts parse its whole result.
+const MAX_DROID_TOOL_RESULT_CHARS = 64 * 1024;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
@@ -77,6 +97,9 @@ const TranscriptMessage = Schema.Struct({
   role: Schema.optional(Schema.String),
   content: Schema.optional(Schema.Union([Schema.String, Schema.Array(TranscriptContentBlock)])),
   model: Schema.optional(Schema.String),
+  // Droid's; Unknown so another source's same-named field cannot fail its record.
+  modelId: Schema.optional(Schema.Unknown),
+  visibility: Schema.optional(Schema.Unknown),
 });
 
 const CodexTurnMetadata = Schema.Struct({
@@ -93,6 +116,9 @@ const TranscriptRecord = Schema.Struct({
   isSidechain: Schema.optional(Schema.Boolean),
   isMeta: Schema.optional(Schema.Boolean),
   isCompactSummary: Schema.optional(Schema.Boolean),
+  // Droid's; Unknown so another source's same-named field cannot fail its record.
+  id: Schema.optional(Schema.Unknown),
+  title: Schema.optional(Schema.Unknown),
   message: Schema.optional(TranscriptMessage),
   payload: Schema.optional(
     Schema.Struct({
@@ -109,12 +135,62 @@ const TranscriptRecord = Schema.Struct({
   ),
 });
 
+// Droid keeps tool calls and results as content blocks; only Droid imports read them.
+const DroidTranscriptRecord = Schema.Struct({
+  ...TranscriptRecord.fields,
+  message: Schema.optional(
+    Schema.Struct({
+      ...TranscriptMessage.fields,
+      content: Schema.optional(
+        Schema.Union([
+          Schema.String,
+          Schema.Array(
+            Schema.Struct({
+              ...TranscriptContentBlock.fields,
+              id: Schema.optional(Schema.Unknown),
+              name: Schema.optional(Schema.Unknown),
+              input: Schema.optional(Schema.Unknown),
+              tool_use_id: Schema.optional(Schema.Unknown),
+              is_error: Schema.optional(Schema.Unknown),
+              thinking: Schema.optional(Schema.String),
+              // Typed, not Unknown, so image data in a result is never read.
+              content: Schema.optional(
+                Schema.Union([Schema.String, Schema.Array(TranscriptContentBlock)]),
+              ),
+            }),
+          ),
+        ]),
+      ),
+    }),
+  ),
+});
+
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
+const decodeDroidTranscriptRecord = Schema.decodeUnknownOption(
+  Schema.fromJsonString(DroidTranscriptRecord),
+);
 const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
+const decodeDroidTranscriptValue = Schema.decodeUnknownOption(DroidTranscriptRecord);
 const selectTranscriptPath = createTranscriptJsonSelector(TranscriptRecord);
+const selectDroidTranscriptPath = createTranscriptJsonSelector(DroidTranscriptRecord);
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
+// Droid keeps a session's model and reasoning effort beside its transcript, not in it.
+const decodeDroidSessionSettings = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      model: Schema.optional(Schema.String),
+      reasoningEffort: Schema.optional(Schema.String),
+    }),
+  ),
+);
+const MAX_DROID_SESSION_SETTINGS_BYTES = 1024 * 1024;
+
+const droidStringLimit = (path: ReadonlyArray<string | number | null>) =>
+  path[0] === "message" && path[1] === "content" && path[3] === "content"
+    ? MAX_DROID_TOOL_RESULT_CHARS
+    : Number.POSITIVE_INFINITY;
 
 type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
 
@@ -131,26 +207,65 @@ export interface AgentSessionThreadMessage {
   readonly createdAt: string;
 }
 
+/** Work shown between messages: Droid's tool calls, subagents, and notices, or a note about the import. */
+export interface AgentSessionThreadActivity {
+  /** How many of the thread's messages come before it. */
+  readonly position: number;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly activity: DroidTranscriptActivity;
+}
+
+export interface AgentSessionWorktree {
+  readonly path: string;
+  readonly branch: string | null;
+}
+
 export interface AgentSessionThread {
   readonly source: AgentSessionSource;
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerSessionId: string;
   readonly title: string;
   readonly model: string | null;
+  /** The effort the session ran `model` at, when the provider records one. */
+  readonly reasoningEffort?: string;
+  /** The linked worktree of the project the session ran in. */
+  readonly worktree?: AgentSessionWorktree;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly messages: ReadonlyArray<AgentSessionThreadMessage>;
+  readonly activities: ReadonlyArray<AgentSessionThreadActivity>;
 }
+
+const TRIMMED_HISTORY_NOTICE =
+  "Earlier history was too large to import. The conversation continues from its most recent part.";
+
+// Raised when a Droid import starts showing more of a session (2: thinking). Threads imported
+// with an older version get their history again on the next import.
+const DROID_HISTORY_VERSION = 2;
+
+const historyVersionFor = (provider: AgentSessionSource) =>
+  provider === "droid" ? DROID_HISTORY_VERSION : 1;
+
+const hasCurrentHistory = (source: AgentSessionImportSource) =>
+  (source.historyVersion ?? 1) >= historyVersionFor(source.provider);
 
 export type AgentSessionRecentThread =
   | {
       readonly _tag: "Importable";
       readonly thread: AgentSessionThread;
       readonly source: AgentSessionImportSource;
+      /** The transcript was imported before, with less of its history than an import shows now. */
+      readonly refreshHistory: boolean;
+      /** Sessions forked or rewound from this one, directly or through each other. */
+      readonly continuedIn?: ReadonlyArray<string>;
     }
   | { readonly _tag: "AlreadyImported"; readonly source: AgentSessionImportSource }
   | { readonly _tag: "Duplicate"; readonly source: AgentSessionImportSource }
-  | { readonly _tag: "Skipped" };
+  | { readonly _tag: "Skipped"; readonly reason: AgentSessionSkipReason };
+
+/** Why a session was not imported; "empty" sessions had no conversation to import. */
+export type AgentSessionSkipReason = AgentSessionImportSkipReason | "empty";
 
 export class AgentSessionScanner extends Context.Service<
   AgentSessionScanner,
@@ -174,6 +289,8 @@ interface RawCandidate {
   readonly transcripts: ReadonlyArray<{
     readonly filePath: string;
     readonly mtimeMs: number | null;
+    /** Droid: the session this one was forked or rewound from. */
+    readonly parentSessionId?: string;
   }>;
 }
 
@@ -301,11 +418,16 @@ export function parseAgentSessionTranscript(
   lines = splitTranscriptRecords(input.contents, MAX_IMPORT_RECORDS + 1),
 ): AgentSessionThread | null {
   if (lines.length > MAX_IMPORT_RECORDS) return null;
-  const records = lines.flatMap((line) => Option.toArray(decodeTranscriptRecord(line)));
+  const decode = input.source === "droid" ? decodeDroidTranscriptRecord : decodeTranscriptRecord;
+  const records = lines.flatMap(
+    (line): ReadonlyArray<DecodedTranscriptRecord> => Option.toArray(decode(line)),
+  );
   const claudeFields =
     input.source === "claudeAgent"
       ? records.reduce(foldClaudeFields, emptyClaudeFields)
-      : emptyClaudeFields;
+      : input.source === "droid"
+        ? records.reduce(foldDroidTranscriptFields, emptyClaudeFields)
+        : emptyClaudeFields;
   return parseAgentSessionRecords(input, records, claudeFields);
 }
 
@@ -313,6 +435,7 @@ function parseAgentSessionRecords(
   input: AgentSessionTranscriptMetadata,
   records: ReadonlyArray<DecodedTranscriptRecord>,
   claudeFields: ClaudeFields,
+  omittedRecords = 0,
 ): AgentSessionThread | null {
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
@@ -390,8 +513,40 @@ function parseAgentSessionRecords(
       derivedTitle = deriveTitle(input.source, message.text);
     }
     messages.push(message);
-    if (messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
+    if (input.source !== "droid" && messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
   };
+
+  const activities: Array<AgentSessionThreadActivity> = [];
+  if (input.source === "droid") {
+    for (const entry of droidTranscriptEntries(records)) {
+      if (entry.type === "message") {
+        retainMessage({
+          role: entry.role,
+          text: entry.text,
+          createdAt: normalizeTimestamp(entry.timestamp, fallbackTimestamp),
+          codexResponseUser: false,
+        });
+        continue;
+      }
+      activities.push({
+        position: messages.length,
+        startedAt: normalizeTimestamp(entry.startedAt, fallbackTimestamp),
+        completedAt: normalizeTimestamp(entry.completedAt, fallbackTimestamp),
+        activity: entry.activity,
+      });
+    }
+    if (omittedRecords > 0 && messages.length > 0) {
+      // The first prompt is always kept; the note sits where the dropped history was.
+      const at = messages[0]!.createdAt;
+      const index = activities.findIndex((activity) => activity.position >= 1);
+      activities.splice(index === -1 ? activities.length : index, 0, {
+        position: 1,
+        startedAt: at,
+        completedAt: at,
+        activity: { kind: "notice", message: TRIMMED_HISTORY_NOTICE },
+      });
+    }
+  }
 
   const hasMatchingCodexEventInTurn = (text: string) => {
     const comparisonText = text.trim();
@@ -410,7 +565,7 @@ function parseAgentSessionRecords(
   };
 
   let recordIndex = -1;
-  for (const record of records) {
+  for (const record of input.source === "droid" ? [] : records) {
     recordIndex += 1;
     if (input.source === "claudeAgent") {
       if (isHiddenClaudeRecord(record)) continue;
@@ -504,6 +659,7 @@ function parseAgentSessionRecords(
     createdAt: retainedMessages[0]?.createdAt ?? fallbackTimestamp,
     updatedAt: fallbackTimestamp,
     messages: retainedMessages,
+    activities,
   };
 }
 
@@ -516,6 +672,7 @@ function shouldRetainDecodedRecord(
   source: AgentSessionSource,
   record: DecodedTranscriptRecord,
 ): boolean {
+  if (source === "droid") return isDroidTranscriptHistoryRecord(record);
   if (source === "claudeAgent") {
     if (isHiddenClaudeRecord(record) || (record.type !== "user" && record.type !== "assistant")) {
       return false;
@@ -555,8 +712,21 @@ function isT3ManagedWorktree(
   );
 }
 
+interface ProjectPlacement {
+  readonly projectPath: string;
+  /** The project directory's identity. */
+  readonly key: string;
+  readonly git: AgentSessionProjectGit | null;
+  readonly worktree?: AgentSessionWorktree;
+}
+
+interface TranscriptStart {
+  readonly cwd: string;
+  readonly parentSessionId?: string;
+}
+
 // false stops metadata scanning for an excluded rollout, even if later records contain a cwd.
-function extractCwd(line: string, source: AgentSessionSource): string | null | false {
+function extractCwd(line: string, source: AgentSessionSource): TranscriptStart | null | false {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -566,8 +736,10 @@ function extractCwd(line: string, source: AgentSessionSource): string | null | f
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
+  if (source === "droid" && isDroidSubagentSessionStart(record)) return false;
   if (typeof record.cwd === "string" && record.cwd.trim().length > 0) {
-    return record.cwd;
+    const parentSessionId = source === "droid" ? droidSessionParentId(record) : undefined;
+    return { cwd: record.cwd, ...(parentSessionId === undefined ? {} : { parentSessionId }) };
   }
   const payload = record.payload;
   if (typeof payload === "object" && payload !== null) {
@@ -584,7 +756,7 @@ function extractCwd(line: string, source: AgentSessionSource): string | null | f
     }
     const nested = (payload as Record<string, unknown>).cwd;
     if (typeof nested === "string" && nested.trim().length > 0) {
-      return nested;
+      return { cwd: nested };
     }
   }
   return null;
@@ -673,6 +845,40 @@ export const make = Effect.gen(function* () {
   const statOption = (target: string) =>
     fileSystem.stat(target).pipe(Effect.asSome, Effect.orElseSucceed(Option.none));
 
+  const readDroidSessionSettings = Effect.fn("AgentSessionScanner.readDroidSessionSettings")(
+    function* (transcriptPath: string) {
+      const settingsPath = transcriptPath.replace(/\.jsonl$/u, ".settings.json");
+      const stats = yield* statOption(settingsPath);
+      if (
+        Option.isNone(stats) ||
+        stats.value.type !== "File" ||
+        Number(stats.value.size) > MAX_DROID_SESSION_SETTINGS_BYTES
+      ) {
+        return Option.none();
+      }
+      return yield* fileSystem.readFileString(settingsPath).pipe(
+        Effect.map(decodeDroidSessionSettings),
+        Effect.orElseSucceed(() => Option.none()),
+      );
+    },
+  );
+
+  /** Droid's model and effort for a session, keeping the transcript's model when it names one. */
+  const withDroidSessionSettings = Effect.fn("AgentSessionScanner.withDroidSessionSettings")(
+    function* (thread: AgentSessionThread, transcriptPath: string) {
+      const settings = yield* readDroidSessionSettings(transcriptPath);
+      if (Option.isNone(settings)) return thread;
+      const { model: settingsModel, reasoningEffort } = settings.value;
+      const model = thread.model ?? settingsModel ?? null;
+      // The effort belongs to the settings' model; another model may not take it.
+      const effortApplies =
+        reasoningEffort !== undefined &&
+        model !== null &&
+        (settingsModel === undefined || settingsModel === model);
+      return { ...thread, model, ...(effortApplies ? { reasoningEffort } : {}) };
+    },
+  );
+
   const directoryIdentity = Effect.fn("AgentSessionScanner.directoryIdentity")(function* (
     target: string,
     knownStats?: FileSystem.File.Info,
@@ -692,7 +898,12 @@ export const make = Effect.gen(function* () {
     directory: string,
   ): Effect.fn.Return<
     | { readonly _tag: "Repository"; readonly git: AgentSessionProjectGit | null }
-    | { readonly _tag: "Worktree" }
+    | {
+        readonly _tag: "Worktree";
+        /** The checkout the worktree was added from, when its repository sits in `<checkout>/.git`. */
+        readonly mainCheckout: string | null;
+        readonly branch: string | null;
+      }
     | { readonly _tag: "NotGit" }
   > {
     const gitPath = path.join(directory, ".git");
@@ -709,18 +920,28 @@ export const make = Effect.gen(function* () {
     }
     const linkedWorktree =
       gitStats.value.type !== "Directory" && /[\\/]worktrees[\\/][^\\/]+[\\/]?$/.test(gitDir);
+    let branch: string | null = null;
     if (linkedWorktree) {
+      const head = yield* fileSystem
+        .readFileString(path.join(gitDir, "HEAD"))
+        .pipe(Effect.orElseSucceed(() => ""));
+      branch = /^ref:\s*refs\/heads\/(.+)$/m.exec(head)?.[1]?.trim() || null;
       const commonDir = yield* fileSystem
         .readFileString(path.join(gitDir, "commondir"))
         .pipe(Effect.orElseSucceed(() => ""));
-      if (commonDir.trim().length === 0) return { _tag: "Worktree" } as const;
+      if (commonDir.trim().length === 0) {
+        return { _tag: "Worktree", mainCheckout: null, branch } as const;
+      }
       gitDir = path.resolve(gitDir, commonDir.trim());
     }
     const configText = yield* fileSystem
       .readFileString(path.join(gitDir, "config"))
       .pipe(Effect.orElseSucceed(() => ""));
     // Bare repositories have no main checkout, so offer their linked worktrees independently.
-    if (linkedWorktree && !isBareGitConfig(configText)) return { _tag: "Worktree" } as const;
+    if (linkedWorktree && !isBareGitConfig(configText)) {
+      const mainCheckout = path.basename(gitDir) === ".git" ? path.dirname(gitDir) : null;
+      return { _tag: "Worktree", mainCheckout, branch } as const;
+    }
     const originUrl = parseOriginUrlFromGitConfig(configText);
     return {
       _tag: "Repository",
@@ -729,6 +950,46 @@ export const make = Effect.gen(function* () {
         repository: parseGitHubRepositoryNameWithOwnerFromRemoteUrl(originUrl),
       },
     } as const;
+  });
+
+  const readCheckout = Effect.fnUntraced(function* (directory: string) {
+    if (isExcludedProjectPath(directory)) return undefined;
+    const stats = yield* statOption(directory);
+    if (Option.isNone(stats) || stats.value.type !== "Directory") return undefined;
+    const realPath = yield* fileSystem
+      .realPath(directory)
+      .pipe(Effect.orElseSucceed(() => directory));
+    // A symlink can point into the worktrees directory even when its own
+    // spelling doesn't; check again with links resolved.
+    if (isExcludedProjectPath(realPath)) return undefined;
+    return { stats: stats.value, gitIdentity: yield* readGitIdentity(directory) };
+  });
+
+  /** The project that sessions run in `directory` belong to, if any. */
+  const projectPlacement = Effect.fn("AgentSessionScanner.projectPlacement")(function* (
+    directory: string,
+  ): Effect.fn.Return<ProjectPlacement | undefined> {
+    const checkout = yield* readCheckout(directory);
+    if (checkout === undefined) return undefined;
+    const { gitIdentity } = checkout;
+    if (gitIdentity._tag !== "Worktree") {
+      return {
+        projectPath: directory,
+        key: yield* directoryIdentity(directory, checkout.stats),
+        git: gitIdentity._tag === "Repository" ? gitIdentity.git : null,
+      };
+    }
+    // A linked worktree's sessions belong to the checkout it was added from, and their threads
+    // keep working in the worktree.
+    if (gitIdentity.mainCheckout === null) return undefined;
+    const main = yield* readCheckout(gitIdentity.mainCheckout);
+    if (main === undefined || main.gitIdentity._tag === "Worktree") return undefined;
+    return {
+      projectPath: gitIdentity.mainCheckout,
+      key: yield* directoryIdentity(gitIdentity.mainCheckout, main.stats),
+      git: main.gitIdentity._tag === "Repository" ? main.gitIdentity.git : null,
+      worktree: { path: directory, branch: gitIdentity.branch },
+    };
   });
 
   const readCwd = Effect.fn("AgentSessionScanner.readCwd")(function* (
@@ -820,31 +1081,64 @@ export const make = Effect.gen(function* () {
     recordLimit: number,
     source: AgentSessionSource,
   ) {
-    if (expected.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return null;
+    const skip = (reason: AgentSessionSkipReason): AgentSessionSkipReason => reason;
+    // Past the records left in this import; with none used yet, the transcript alone is too big.
+    const overRecordLimit = () =>
+      skip(recordLimit < MAX_IMPORT_RECORDS ? "import-limit" : "too-large");
+    if (expected.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return skip("too-large");
 
     return yield* Effect.scoped(
       fileSystem.open(filePath, { flag: "r" }).pipe(
         Effect.flatMap((file) =>
           Effect.gen(function* () {
             if (!sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))) {
-              return null;
+              return skip("changed");
             }
-            const records: Array<DecodedTranscriptRecord> = [];
+            const droid = source === "droid";
+            const historyBudget = droid ? MAX_DROID_IMPORT_HISTORY_BYTES : MAX_IMPORT_HISTORY_BYTES;
+            const decodeValue = droid ? decodeDroidTranscriptValue : decodeTranscriptValue;
+            // Slots of dropped records become undefined; `firstPrompt` is never dropped.
+            const retained: Array<
+              { readonly record: DecodedTranscriptRecord; readonly bytes: number } | undefined
+            > = [];
+            let firstPrompt: number | undefined;
+            let nextToDrop = 0;
+            let omittedRecords = 0;
             let cwd = Option.none<string>();
             let claudeFields = emptyClaudeFields;
             let historyBytes = 0;
             let recordBytes = 0;
             let recordCount = 0;
             let bytesRead = 0;
+            const dropOldest = () => {
+              for (; nextToDrop < retained.length; nextToDrop++) {
+                const entry = retained[nextToDrop];
+                if (entry === undefined || nextToDrop === firstPrompt) continue;
+                retained[nextToDrop] = undefined;
+                historyBytes -= entry.bytes;
+                omittedRecords += 1;
+                nextToDrop += 1;
+                return true;
+              }
+              return false;
+            };
             const reserve = (bytes: number) => {
               recordBytes += bytes;
-              if (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES) {
-                throw new TranscriptJsonLimitError(
-                  "Transcript selected history exceeds the 32 MiB memory budget",
-                );
+              while (historyBytes + recordBytes > historyBudget) {
+                if (!droid || !dropOldest()) {
+                  throw new TranscriptJsonLimitError(
+                    `Transcript selected history exceeds the ${historyBudget / 1024 / 1024} MiB memory budget`,
+                  );
+                }
               }
             };
-            let reader = createTranscriptJsonReader(reserve, selectTranscriptPath);
+            const newReader = () =>
+              droid
+                ? createTranscriptJsonReader(reserve, selectDroidTranscriptPath, {
+                    stringLimit: droidStringLimit,
+                  })
+                : createTranscriptJsonReader(reserve, selectTranscriptPath);
+            let reader = newReader();
             let decoder = new TextDecoder();
             let recordStarted = false;
 
@@ -852,19 +1146,28 @@ export const make = Effect.gen(function* () {
               reader.write(decoder.decode());
               recordCount += 1;
               if (recordCount > recordLimit) return false;
-              const decoded = decodeTranscriptValue(reader.finish());
+              const decoded: Option.Option<DecodedTranscriptRecord> = decodeValue(reader.finish());
               if (Option.isSome(decoded)) {
                 if (Option.isNone(cwd)) cwd = Option.fromNullOr(extractDecodedCwd(decoded.value));
                 if (source === "claudeAgent") {
                   claudeFields = foldClaudeFields(claudeFields, decoded.value);
+                } else if (droid) {
+                  claudeFields = foldDroidTranscriptFields(claudeFields, decoded.value);
                 }
                 if (shouldRetainDecodedRecord(source, decoded.value)) {
-                  records.push(decoded.value);
+                  if (
+                    droid &&
+                    firstPrompt === undefined &&
+                    droidTranscriptMessage(decoded.value)?.role === "user"
+                  ) {
+                    firstPrompt = retained.length;
+                  }
+                  retained.push({ record: decoded.value, bytes: recordBytes });
                   historyBytes += recordBytes;
                 }
               }
               recordBytes = 0;
-              reader = createTranscriptJsonReader(reserve, selectTranscriptPath);
+              reader = newReader();
               decoder = new TextDecoder();
               recordStarted = false;
               return true;
@@ -875,7 +1178,7 @@ export const make = Effect.gen(function* () {
                 Math.min(TRANSCRIPT_PREFIX_BYTES, expected.size - bytesRead),
               );
               if (Option.isNone(next)) {
-                return null;
+                return skip("changed");
               }
 
               bytesRead += next.value.byteLength;
@@ -892,20 +1195,29 @@ export const make = Effect.gen(function* () {
                 }
                 return true;
               });
-              if (!withinBudget) return null;
+              if (!withinBudget) return overRecordLimit();
             }
 
-            if (recordStarted && !(yield* Effect.try(finishRecord))) return null;
+            if (recordStarted && !(yield* Effect.try(finishRecord))) return overRecordLimit();
+            const records = retained.flatMap((entry) =>
+              entry === undefined ? [] : [entry.record],
+            );
             return sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))
-              ? { records, recordCount, cwd, claudeFields }
-              : null;
+              ? { records, recordCount, cwd, claudeFields, omittedRecords }
+              : skip("changed");
           }),
         ),
       ),
     ).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("Could not read imported transcript", { filePath, cause }).pipe(
-          Effect.as(null),
+          Effect.as(
+            skip(
+              Cause.isUnknownError(cause) && cause.cause instanceof TranscriptJsonLimitError
+                ? "too-large"
+                : "unreadable",
+            ),
+          ),
         ),
       ),
     );
@@ -923,9 +1235,15 @@ export const make = Effect.gen(function* () {
     return path.join(homeDir, ".claude");
   };
 
+  // Droid lays out `<home>/sessions` the same way: a folder per cwd of `<session id>.jsonl` files.
   const discoverClaudeTranscripts = Effect.fn("AgentSessionScanner.discoverClaudeTranscripts")(
-    function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
-      const projectsDir = path.join(homePath, "projects");
+    function* (
+      homePath: string,
+      providerInstanceId: ProviderInstanceId,
+      operationBudget: number,
+      projectsDirectory = "projects",
+    ) {
+      const projectsDir = path.join(homePath, projectsDirectory);
       let operationsRemaining = operationBudget;
       let truncated = false;
       const readDirectory = (directory: string) => {
@@ -1050,36 +1368,45 @@ export const make = Effect.gen(function* () {
         cwd: string;
         providerInstanceId: ProviderInstanceId;
         lastActiveAtMs: number;
-        transcripts: Array<{ filePath: string; mtimeMs: number }>;
+        transcripts: Array<RawCandidate["transcripts"][number]>;
       }
     >();
 
     for (const transcript of transcripts) {
-      const cwd = yield* readCwd(source, transcript, budget);
-      if (cwd === null || cwd === false) continue;
+      const start = yield* readCwd(source, transcript, budget);
+      if (start === null || start === false) continue;
+      const { cwd, parentSessionId } = start;
+      const entry = {
+        filePath: transcript.filePath,
+        mtimeMs: transcript.mtimeMs,
+        ...(parentSessionId === undefined ? {} : { parentSessionId }),
+      };
       const key = `${transcript.providerInstanceId}\0${cwd}`;
       const existing = byOwnerAndCwd.get(key);
       if (existing) {
         existing.lastActiveAtMs = Math.max(existing.lastActiveAtMs, transcript.mtimeMs);
-        existing.transcripts.push(transcript);
+        existing.transcripts.push(entry);
       } else {
         byOwnerAndCwd.set(key, {
           cwd,
           providerInstanceId: transcript.providerInstanceId,
           lastActiveAtMs: transcript.mtimeMs,
-          transcripts: [transcript],
+          transcripts: [entry],
         });
       }
     }
 
-    return Array.from(byOwnerAndCwd.values(), (group): RawCandidate => ({
-      cwd: group.cwd,
-      source,
-      providerInstanceId: group.providerInstanceId,
-      threadCount: group.transcripts.length,
-      lastActiveAtMs: group.lastActiveAtMs,
-      transcripts: group.transcripts,
-    }));
+    return Array.from(
+      byOwnerAndCwd.values(),
+      (group): RawCandidate => ({
+        cwd: group.cwd,
+        source,
+        providerInstanceId: group.providerInstanceId,
+        threadCount: group.transcripts.length,
+        lastActiveAtMs: group.lastActiveAtMs,
+        transcripts: group.transcripts,
+      }),
+    );
   });
 
   const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
@@ -1090,7 +1417,7 @@ export const make = Effect.gen(function* () {
     const raw: Array<RawCandidate> = [];
     let truncated = false;
 
-    for (const source of ["claudeAgent", "codex"] as const) {
+    for (const source of ["claudeAgent", "codex", "droid"] as const) {
       const instances: Array<{
         readonly instanceId: ProviderInstanceId;
         readonly config: ProviderInstanceConfig;
@@ -1130,6 +1457,8 @@ export const make = Effect.gen(function* () {
           const config = decodeClaudeSettings(instance.config ?? {});
           if (Option.isNone(config)) continue;
           homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
+        } else if (source === "droid") {
+          homePath = path.join(homeDir, DROID_HOME_DIRECTORY);
         } else {
           const config = decodeCodexSettings(instance.config ?? {});
           if (Option.isNone(config)) continue;
@@ -1162,9 +1491,14 @@ export const make = Effect.gen(function* () {
           truncated = true;
           continue;
         }
-        const discovered = yield* source === "claudeAgent"
-          ? discoverClaudeTranscripts(home.homePath, home.providerInstanceId, operationBudget)
-          : discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget);
+        const discovered = yield* source === "codex"
+          ? discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget)
+          : discoverClaudeTranscripts(
+              home.homePath,
+              home.providerInstanceId,
+              operationBudget,
+              source === "droid" ? DROID_SESSIONS_DIRECTORY : undefined,
+            );
         truncated ||= discovered.truncated;
         transcriptCandidates.push(...discovered.transcripts);
       }
@@ -1206,49 +1540,25 @@ export const make = Effect.gen(function* () {
         git: AgentSessionProjectGit | null;
       }
     >();
-    const directoryKeys = new Map<string, string>();
-    const gitIdentities = new Map<string, AgentSessionProjectGit | null>();
+    const placements = new Map<string, ProjectPlacement | undefined>();
 
     for (const candidate of raw) {
       const expanded = expandHomePath(candidate.cwd.trim(), homeDir);
       if (!path.isAbsolute(expanded)) continue;
       const resolved = path.resolve(expanded);
-      if (isExcludedProjectPath(resolved)) continue;
-      let key = directoryKeys.get(resolved);
-      if (key === undefined) {
-        const stats = yield* statOption(resolved);
-        if (Option.isNone(stats) || stats.value.type !== "Directory") {
-          directoryKeys.set(resolved, "");
-          continue;
-        }
-        const realPath = yield* fileSystem
-          .realPath(resolved)
-          .pipe(Effect.orElseSucceed(() => resolved));
-        // A symlink can point into the worktrees directory even when its own
-        // spelling doesn't; check again with links resolved.
-        if (isExcludedProjectPath(realPath)) {
-          key = "";
-        } else {
-          const gitIdentity = yield* readGitIdentity(resolved);
-          if (gitIdentity._tag === "Worktree") {
-            key = "";
-          } else {
-            key = yield* directoryIdentity(resolved, stats.value);
-            gitIdentities.set(key, gitIdentity._tag === "Repository" ? gitIdentity.git : null);
-          }
-        }
-        directoryKeys.set(resolved, key);
-      }
-      if (key === "") continue;
+      if (!placements.has(resolved)) placements.set(resolved, yield* projectPlacement(resolved));
+      const placement = placements.get(resolved);
+      if (placement === undefined) continue;
+      const key = placement.key;
 
       const existing = merged.get(key);
       if (!existing) {
         merged.set(key, {
-          path: resolved,
+          path: placement.projectPath,
           sources: [candidate.source],
           threadCount: candidate.threadCount,
           lastActiveAtMs: candidate.lastActiveAtMs,
-          git: gitIdentities.get(key) ?? null,
+          git: placement.git,
         });
         continue;
       }
@@ -1327,6 +1637,25 @@ export const make = Effect.gen(function* () {
     const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
     cachedCandidates = candidates;
 
+    const worktreePlacements = new Map<
+      string,
+      { readonly worktree: AgentSessionWorktree } | null
+    >();
+    /** How sessions run in `directory` belong to this project; undefined when they do not. */
+    const placeInProject = Effect.fnUntraced(function* (directory: string) {
+      if ((yield* directoryIdentity(directory)) === rootIdentity) return {};
+      let placement = worktreePlacements.get(directory);
+      if (placement === undefined) {
+        const found = yield* projectPlacement(directory);
+        placement =
+          found?.key === rootIdentity && found.worktree !== undefined
+            ? { worktree: found.worktree }
+            : null;
+        worktreePlacements.set(directory, placement);
+      }
+      return placement ?? undefined;
+    });
+
     const eligibleTranscripts: Array<{
       readonly candidate: RawCandidate;
       readonly transcript: RawCandidate["transcripts"][number] & { readonly mtimeMs: number };
@@ -1334,8 +1663,7 @@ export const make = Effect.gen(function* () {
     for (const candidate of candidates) {
       const expanded = expandHomePath(candidate.cwd.trim(), homeDir);
       if (!path.isAbsolute(expanded)) continue;
-      const resolved = path.resolve(expanded);
-      if ((yield* directoryIdentity(resolved)) !== rootIdentity) continue;
+      if ((yield* placeInProject(path.resolve(expanded))) === undefined) continue;
 
       for (const transcript of candidate.transcripts) {
         if (
@@ -1359,6 +1687,31 @@ export const make = Effect.gen(function* () {
       return left.transcript.filePath.localeCompare(right.transcript.filePath);
     });
 
+    // Droid names each transcript after its session.
+    const childSessions = new Map<string, Array<string>>();
+    for (const candidate of candidates) {
+      for (const { filePath, parentSessionId } of candidate.transcripts) {
+        if (parentSessionId === undefined) continue;
+        const key = `${candidate.providerInstanceId}\0${parentSessionId}`;
+        childSessions.set(key, [
+          ...(childSessions.get(key) ?? []),
+          path.basename(filePath, ".jsonl"),
+        ]);
+      }
+    }
+    const continuedIn = (providerInstanceId: ProviderInstanceId, sessionId: string) => {
+      const found = new Set<string>();
+      const pending = [sessionId];
+      for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+        for (const child of childSessions.get(`${providerInstanceId}\0${next}`) ?? []) {
+          if (child === sessionId || found.has(child)) continue;
+          found.add(child);
+          pending.push(child);
+        }
+      }
+      return Array.from(found);
+    };
+
     const completedByFile = Map.groupBy(
       completedSources,
       (source) => `${source.providerInstanceId}\0${source.filePath}`,
@@ -1367,6 +1720,8 @@ export const make = Effect.gen(function* () {
     let bytesRemaining = MAX_IMPORT_BYTES;
     let transcriptsRemaining = MAX_IMPORT_TRANSCRIPTS;
     let recordsRemaining = MAX_IMPORT_RECORDS;
+    const skipped = (reason: AgentSessionSkipReason) =>
+      Option.some<AgentSessionRecentThread>({ _tag: "Skipped", reason });
     return Stream.fromIteratorSucceed(eligibleTranscripts.values(), 1).pipe(
       Stream.mapEffect(({ candidate, transcript }) =>
         Effect.gen(function* () {
@@ -1377,18 +1732,18 @@ export const make = Effect.gen(function* () {
             completed === undefined &&
             (transcriptsRemaining === 0 || bytesRemaining === 0 || recordsRemaining === 0)
           ) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            return skipped("import-limit");
           }
           const stats = yield* statOption(transcript.filePath);
           if (Option.isNone(stats) || stats.value.type !== "File") {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            return skipped("unreadable");
           }
           const identity = transcriptIdentity(transcript.filePath, stats.value);
           const completedSource = completed?.find(
             (source) =>
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
           );
-          if (completedSource !== undefined) {
+          if (completedSource !== undefined && hasCurrentHistory(completedSource)) {
             const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
             if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
             importedSessions.add(sessionKey);
@@ -1397,13 +1752,13 @@ export const make = Effect.gen(function* () {
               source: completedSource,
             });
           }
+          if (identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return skipped("too-large");
           if (
             transcriptsRemaining === 0 ||
             recordsRemaining === 0 ||
-            identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES ||
             identity.size > bytesRemaining
           ) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            return skipped("import-limit");
           }
           transcriptsRemaining -= 1;
           bytesRemaining -= identity.size;
@@ -1413,21 +1768,17 @@ export const make = Effect.gen(function* () {
             recordsRemaining,
             candidate.source,
           );
-          if (snapshot === null) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-          }
+          if (typeof snapshot === "string") return skipped(snapshot);
           recordsRemaining -= snapshot.recordCount;
 
           if (Option.isNone(snapshot.cwd)) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            return skipped(snapshot.records.length === 0 ? "empty" : "unreadable");
           }
           const expandedCwd = expandHomePath(snapshot.cwd.value.trim(), homeDir);
-          if (
-            !path.isAbsolute(expandedCwd) ||
-            (yield* directoryIdentity(path.resolve(expandedCwd))) !== rootIdentity
-          ) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-          }
+          const placement = path.isAbsolute(expandedCwd)
+            ? yield* placeInProject(path.resolve(expandedCwd))
+            : undefined;
+          if (placement === undefined) return skipped("other-folder");
 
           const parsedThread = parseAgentSessionRecords(
             {
@@ -1438,26 +1789,38 @@ export const make = Effect.gen(function* () {
             },
             snapshot.records,
             snapshot.claudeFields,
+            snapshot.omittedRecords,
           );
-          if (parsedThread === null) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-          }
+          if (parsedThread === null) return skipped("empty");
 
+          const historyVersion = historyVersionFor(parsedThread.source);
           const source: AgentSessionImportSource = {
             ...identity,
             provider: parsedThread.source,
             providerInstanceId: parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,
+            ...(historyVersion > 1 ? { historyVersion } : {}),
           };
           const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
           if (importedSessions.has(sessionKey)) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
           }
           importedSessions.add(sessionKey);
+          const previous = completed?.filter((entry) => entry.provider === candidate.source) ?? [];
+          const continuations = continuedIn(
+            parsedThread.providerInstanceId,
+            parsedThread.providerSessionId,
+          );
+          const thread =
+            candidate.source === "droid"
+              ? yield* withDroidSessionSettings(parsedThread, transcript.filePath)
+              : parsedThread;
           return Option.some<AgentSessionRecentThread>({
             _tag: "Importable",
-            thread: parsedThread,
+            thread: { ...thread, ...placement },
             source,
+            refreshHistory: previous.length > 0 && !previous.some(hasCurrentHistory),
+            ...(continuations.length > 0 ? { continuedIn: continuations } : {}),
           });
         }).pipe(importReadLock.withPermits(1)),
       ),

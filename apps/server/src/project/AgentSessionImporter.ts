@@ -10,12 +10,14 @@ import {
   AgentSessionSource,
   EventId,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ThreadId,
   TurnItemId,
   type AgentSessionImportInput,
   type AgentSessionImportResult,
+  type AgentSessionImportSkipReason,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
@@ -86,12 +88,16 @@ function dateTime(value: string): DateTime.Utc {
   return DateTime.makeUnsafe(value);
 }
 
+const importThreadId = (providerInstanceId: string, providerSessionId: string) =>
+  ThreadId.make(`import:${providerInstanceId}:${providerSessionId}`);
+
 function messageEvents(input: {
   readonly threadId: ThreadId;
   readonly index: number;
+  readonly ordinal: number;
   readonly message: AgentSessionScanner.AgentSessionThreadMessage;
 }): ReadonlyArray<OrchestrationV2DomainEvent> {
-  const ordinal = input.index + 1;
+  const ordinal = input.ordinal;
   const suffix = String(input.index).padStart(6, "0");
   const messageId = MessageId.make(`${input.threadId}:${suffix}`);
   const turnItemId = TurnItemId.make(
@@ -165,6 +171,128 @@ function messageEvents(input: {
   ];
 }
 
+function activityEvent(input: {
+  readonly threadId: ThreadId;
+  readonly thread: AgentSessionScanner.AgentSessionThread;
+  /** Thinking is numbered apart from other activity, so the ids of threads imported before it stay put. */
+  readonly kindIndex: number;
+  readonly ordinal: number;
+  readonly entry: AgentSessionScanner.AgentSessionThreadActivity;
+}): OrchestrationV2DomainEvent {
+  const { activity } = input.entry;
+  const key = `${input.threadId}:${activity.kind === "reasoning" ? "reasoning" : "activity"}:${String(input.kindIndex).padStart(6, "0")}`;
+  const startedAt = dateTime(input.entry.startedAt);
+  const completedAt = dateTime(input.entry.completedAt);
+  const common = {
+    id: TurnItemId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${key}`),
+    threadId: input.threadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: input.ordinal,
+    startedAt,
+    completedAt,
+    updatedAt: completedAt,
+  };
+  const turnItem: OrchestrationV2TurnItem =
+    activity.kind === "tool"
+      ? { ...common, ...activity.item }
+      : activity.kind === "subagent"
+        ? {
+            ...common,
+            type: "subagent",
+            status: activity.status,
+            title: activity.title,
+            // Clients fall back to the item's own fields when no subagent record exists.
+            subagentId: NodeId.make(`${IMPORT_EVENT_PREFIX}:subagent:${key}`),
+            origin: "provider_native",
+            driver: ProviderDriverKind.make(input.thread.source),
+            providerInstanceId: input.thread.providerInstanceId,
+            childThreadId: null,
+            prompt: activity.prompt,
+            result: activity.result,
+          }
+        : activity.kind === "reasoning"
+          ? {
+              ...common,
+              type: "reasoning",
+              status: "completed",
+              title: null,
+              text: activity.text,
+              streaming: false,
+            }
+          : {
+              ...common,
+              type: "system_notice",
+              status: "completed",
+              title: activity.message,
+              message: activity.message,
+            };
+  return {
+    id: EventId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${key}`),
+    type: "turn-item.updated",
+    threadId: input.threadId,
+    occurredAt: completedAt,
+    payload: turnItem,
+  };
+}
+
+/** Messages and the activity between them, in transcript order. */
+function historyEvents(
+  threadId: ThreadId,
+  thread: AgentSessionScanner.AgentSessionThread,
+): ReadonlyArray<OrchestrationV2DomainEvent> {
+  const events: Array<OrchestrationV2DomainEvent> = [];
+  let ordinal = 0;
+  let activityIndex = 0;
+  let reasoningCount = 0;
+  let otherActivityCount = 0;
+  const emitActivitiesBefore = (position: number) => {
+    for (
+      let entry = thread.activities[activityIndex];
+      entry !== undefined && entry.position <= position;
+      entry = thread.activities[++activityIndex]
+    ) {
+      const kindIndex =
+        entry.activity.kind === "reasoning" ? reasoningCount++ : otherActivityCount++;
+      events.push(activityEvent({ threadId, thread, kindIndex, ordinal: ++ordinal, entry }));
+    }
+  };
+  thread.messages.forEach((message, index) => {
+    emitActivitiesBefore(index);
+    events.push(...messageEvents({ threadId, index, ordinal: ++ordinal, message }));
+  });
+  emitActivitiesBefore(Number.POSITIVE_INFINITY);
+  return events;
+}
+
+/** The session's history before T3 took it over. Its later records are the thread's own runs. */
+function historyBefore(
+  thread: AgentSessionScanner.AgentSessionThread,
+  takeover: DateTime.DateTime | undefined,
+): AgentSessionScanner.AgentSessionThread {
+  if (takeover === undefined) return thread;
+  const before = (at: string) => DateTime.isLessThan(dateTime(at), takeover);
+  const firstLater = thread.messages.findIndex((message) => !before(message.createdAt));
+  const messageCount = firstLater === -1 ? thread.messages.length : firstLater;
+  const firstLaterActivity = thread.activities.findIndex(
+    (entry) =>
+      entry.position > messageCount ||
+      (entry.position === messageCount && !before(entry.startedAt)),
+  );
+  return {
+    ...thread,
+    messages: thread.messages.slice(0, messageCount),
+    activities:
+      firstLaterActivity === -1
+        ? thread.activities
+        : thread.activities.slice(0, firstLaterActivity),
+  };
+}
+
 const make = Effect.gen(function* () {
   const scanner = yield* AgentSessionScanner.AgentSessionScanner;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -214,18 +342,21 @@ const make = Effect.gen(function* () {
     const outcomes = scanner.recentThreads(project.workspaceRoot, completedSources);
     const importedThreadIds = new Set<ThreadId>();
     let importedCount = 0;
-    let skippedCount = 0;
+    let emptyCount = 0;
+    const skippedByReason = new Map<AgentSessionImportSkipReason, number>();
+    const skip = (reason: AgentSessionImportSkipReason) => {
+      skippedByReason.set(reason, (skippedByReason.get(reason) ?? 0) + 1);
+    };
 
     yield* Stream.runForEach(outcomes, (outcome) =>
       Effect.gen(function* () {
         if (outcome._tag === "Skipped") {
-          skippedCount += 1;
+          if (outcome.reason === "empty") emptyCount += 1;
+          else skip(outcome.reason);
           return;
         }
         const source = outcome.source;
-        const threadId = ThreadId.make(
-          `import:${source.providerInstanceId}:${source.providerSessionId}`,
-        );
+        const threadId = importThreadId(source.providerInstanceId, source.providerSessionId);
         if (outcome._tag === "AlreadyImported") {
           importedThreadIds.add(threadId);
           importedCount += 1;
@@ -267,17 +398,34 @@ const make = Effect.gen(function* () {
             },
             { onConflict: "ignore" },
           );
-          const existing = yield* Effect.option(orchestrator.getThreadRecords(threadId, []));
+          const existing = yield* Effect.option(orchestrator.getThreadRecords(threadId, ["runs"]));
           if (Option.isSome(existing)) {
-            if (existing.value.thread.projectId !== input.projectId) {
+            const { thread: current, runs } = existing.value;
+            if (current.projectId !== input.projectId) {
               return yield* new AgentSessionThreadProjectConflictError({
                 threadId,
                 expectedProjectId: input.projectId,
-                actualProjectId: existing.value.thread.projectId,
+                actualProjectId: current.projectId,
               });
             }
-            if (existing.value.thread.historyOrigin !== "v1_import") {
+            if (current.historyOrigin !== "v1_import") {
               return yield* new AgentSessionThreadModifiedError({ threadId });
+            }
+            if (outcome.refreshHistory && current.deletedAt === null) {
+              const requested = runs.map((run) => run.requestedAt);
+              const takeover =
+                requested.length === 0
+                  ? undefined
+                  : requested.reduce((earliest, at) => DateTime.min(earliest, at));
+              // Same item ids as the first import, so its items are updated and moved, not duplicated.
+              // The events themselves are new, and event ids must be unique in the store.
+              const refreshId = yield* idAllocator.allocate.event({ threadId });
+              yield* eventSink.write({
+                repositionTurnItems: true,
+                events: historyEvents(threadId, historyBefore(thread, takeover)).map(
+                  (event, index) => ({ ...event, id: EventId.make(`${refreshId}:${index}`) }),
+                ),
+              });
             }
             yield* persistRuntime;
             yield* runtimes.recordImportedTranscript({ threadId, source });
@@ -299,11 +447,17 @@ const make = Effect.gen(function* () {
             projectId: input.projectId,
             title: thread.title.trim() === "" ? "Untitled thread" : thread.title,
             providerInstanceId: thread.providerInstanceId,
-            modelSelection: { instanceId: thread.providerInstanceId, model },
+            modelSelection: {
+              instanceId: thread.providerInstanceId,
+              model,
+              ...(thread.reasoningEffort === undefined
+                ? {}
+                : { options: [{ id: "reasoningEffort", value: thread.reasoningEffort }] }),
+            },
             runtimeMode: DEFAULT_RUNTIME_MODE,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            branch: null,
-            worktreePath: null,
+            branch: thread.worktree?.branch ?? null,
+            worktreePath: thread.worktree?.path ?? null,
             linkedPullRequest: null,
             branchPullRequest: null,
             activeProviderThreadId: providerThreadId,
@@ -352,7 +506,21 @@ const make = Effect.gen(function* () {
           };
 
           const committed = yield* eventSink.write({
-            unlessNativeThreadOwned: providerThread,
+            unlessNativeThreadOwned: {
+              ...providerThread,
+              ...(outcome.continuedIn === undefined
+                ? {}
+                : {
+                    continuations: {
+                      nativeIds: outcome.continuedIn,
+                      // A fork imported as its own thread is a separate conversation, not a
+                      // T3 thread that rewound this one.
+                      ownersToIgnore: outcome.continuedIn.map((sessionId) =>
+                        importThreadId(thread.providerInstanceId, sessionId),
+                      ),
+                    },
+                  }),
+            },
             events: [
               {
                 id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${threadId}:created`),
@@ -362,9 +530,7 @@ const make = Effect.gen(function* () {
                 occurredAt: createdAt,
                 payload: appThread,
               },
-              ...thread.messages.flatMap((message, index) =>
-                messageEvents({ threadId, index, message }),
-              ),
+              ...historyEvents(threadId, thread),
               {
                 id: EventId.make(`${IMPORT_EVENT_PREFIX}:provider-thread:${providerThreadId}`),
                 type: "provider-thread.updated",
@@ -393,12 +559,18 @@ const make = Effect.gen(function* () {
           importedThreadIds.add(threadId);
           importedCount += 1;
         } else if (imported === false) {
-          skippedCount += 1;
+          skip("failed");
         }
       }),
     );
 
-    return { importedCount, skippedCount } satisfies AgentSessionImportResult;
+    const skippedReasons = Array.from(skippedByReason, ([reason, count]) => ({ reason, count }));
+    return {
+      importedCount,
+      skippedCount: skippedReasons.reduce((total, { count }) => total + count, 0),
+      ...(emptyCount > 0 ? { emptyCount } : {}),
+      ...(skippedReasons.length > 0 ? { skippedReasons } : {}),
+    } satisfies AgentSessionImportResult;
   });
 
   return { importRecentAgentThreads };
