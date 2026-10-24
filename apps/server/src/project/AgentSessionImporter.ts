@@ -170,12 +170,13 @@ function messageEvents(input: {
 function activityEvent(input: {
   readonly threadId: ThreadId;
   readonly thread: AgentSessionScanner.AgentSessionThread;
-  readonly index: number;
+  /** Thinking is numbered apart from other activity, so the ids of threads imported before it stay put. */
+  readonly kindIndex: number;
   readonly ordinal: number;
   readonly entry: AgentSessionScanner.AgentSessionThreadActivity;
 }): OrchestrationV2DomainEvent {
   const { activity } = input.entry;
-  const key = `${input.threadId}:activity:${String(input.index).padStart(6, "0")}`;
+  const key = `${input.threadId}:${activity.kind === "reasoning" ? "reasoning" : "activity"}:${String(input.kindIndex).padStart(6, "0")}`;
   const startedAt = dateTime(input.entry.startedAt);
   const completedAt = dateTime(input.entry.completedAt);
   const common = {
@@ -210,13 +211,22 @@ function activityEvent(input: {
             prompt: activity.prompt,
             result: activity.result,
           }
-        : {
-            ...common,
-            type: "system_notice",
-            status: "completed",
-            title: activity.message,
-            message: activity.message,
-          };
+        : activity.kind === "reasoning"
+          ? {
+              ...common,
+              type: "reasoning",
+              status: "completed",
+              title: null,
+              text: activity.text,
+              streaming: false,
+            }
+          : {
+              ...common,
+              type: "system_notice",
+              status: "completed",
+              title: activity.message,
+              message: activity.message,
+            };
   return {
     id: EventId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${key}`),
     type: "turn-item.updated",
@@ -234,15 +244,17 @@ function historyEvents(
   const events: Array<OrchestrationV2DomainEvent> = [];
   let ordinal = 0;
   let activityIndex = 0;
+  let reasoningCount = 0;
+  let otherActivityCount = 0;
   const emitActivitiesBefore = (position: number) => {
     for (
       let entry = thread.activities[activityIndex];
       entry !== undefined && entry.position <= position;
       entry = thread.activities[++activityIndex]
     ) {
-      events.push(
-        activityEvent({ threadId, thread, index: activityIndex, ordinal: ++ordinal, entry }),
-      );
+      const kindIndex =
+        entry.activity.kind === "reasoning" ? reasoningCount++ : otherActivityCount++;
+      events.push(activityEvent({ threadId, thread, kindIndex, ordinal: ++ordinal, entry }));
     }
   };
   thread.messages.forEach((message, index) => {
@@ -251,6 +263,30 @@ function historyEvents(
   });
   emitActivitiesBefore(Number.POSITIVE_INFINITY);
   return events;
+}
+
+/** The session's history before T3 took it over. Its later records are the thread's own runs. */
+function historyBefore(
+  thread: AgentSessionScanner.AgentSessionThread,
+  takeover: DateTime.DateTime | undefined,
+): AgentSessionScanner.AgentSessionThread {
+  if (takeover === undefined) return thread;
+  const before = (at: string) => DateTime.isLessThan(dateTime(at), takeover);
+  const firstLater = thread.messages.findIndex((message) => !before(message.createdAt));
+  const messageCount = firstLater === -1 ? thread.messages.length : firstLater;
+  const firstLaterActivity = thread.activities.findIndex(
+    (entry) =>
+      entry.position > messageCount ||
+      (entry.position === messageCount && !before(entry.startedAt)),
+  );
+  return {
+    ...thread,
+    messages: thread.messages.slice(0, messageCount),
+    activities:
+      firstLaterActivity === -1
+        ? thread.activities
+        : thread.activities.slice(0, firstLaterActivity),
+  };
 }
 
 const make = Effect.gen(function* () {
@@ -355,17 +391,34 @@ const make = Effect.gen(function* () {
             },
             { onConflict: "ignore" },
           );
-          const existing = yield* Effect.option(orchestrator.getThreadRecords(threadId, []));
+          const existing = yield* Effect.option(orchestrator.getThreadRecords(threadId, ["runs"]));
           if (Option.isSome(existing)) {
-            if (existing.value.thread.projectId !== input.projectId) {
+            const { thread: current, runs } = existing.value;
+            if (current.projectId !== input.projectId) {
               return yield* new AgentSessionThreadProjectConflictError({
                 threadId,
                 expectedProjectId: input.projectId,
-                actualProjectId: existing.value.thread.projectId,
+                actualProjectId: current.projectId,
               });
             }
-            if (existing.value.thread.historyOrigin !== "v1_import") {
+            if (current.historyOrigin !== "v1_import") {
               return yield* new AgentSessionThreadModifiedError({ threadId });
+            }
+            if (outcome.refreshHistory && current.deletedAt === null) {
+              const requested = runs.map((run) => run.requestedAt);
+              const takeover =
+                requested.length === 0
+                  ? undefined
+                  : requested.reduce((earliest, at) => DateTime.min(earliest, at));
+              // Same item ids as the first import, so its items are updated and moved, not duplicated.
+              // The events themselves are new, and event ids must be unique in the store.
+              const refreshId = yield* idAllocator.allocate.event({ threadId });
+              yield* eventSink.write({
+                repositionTurnItems: true,
+                events: historyEvents(threadId, historyBefore(thread, takeover)).map(
+                  (event, index) => ({ ...event, id: EventId.make(`${refreshId}:${index}`) }),
+                ),
+              });
             }
             yield* persistRuntime;
             yield* runtimes.recordImportedTranscript({ threadId, source });

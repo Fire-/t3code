@@ -17,6 +17,8 @@ export const AgentSessionImportSource = Schema.Struct({
   // records stored a number.
   inode: Schema.NullOr(Schema.Union([Schema.String, Schema.Number])),
   birthtimeMs: Schema.NullOr(Schema.Number),
+  // Which history format imported the transcript; absent means the first.
+  historyVersion: Schema.optional(NonNegativeInt),
 });
 export type AgentSessionImportSource = typeof AgentSessionImportSource.Type;
 

@@ -1213,7 +1213,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                 role: "assistant",
                 modelId: "claude-opus-5-5",
                 content: [
-                  { type: "thinking", thinking: "Not imported" },
+                  { type: "thinking", thinking: "Run the tests first", signature: "opaque" },
                   { type: "tool_use", id: "t1", name: "Execute", input: { command: "vp test" } },
                   {
                     type: "tool_use",
@@ -1288,6 +1288,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                 { role: "assistant", text: "A race in setup" },
               ],
               activities: [
+                { position: 1, activity: { kind: "reasoning", text: "Run the tests first" } },
                 {
                   position: 1,
                   activity: {
@@ -1319,6 +1320,27 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
               messages: [{ role: "user", text: "Rename the button\nIt says Submit" }],
               activities: [],
             },
+          ]);
+
+          // Threads imported before thinking was imported get their history again, once.
+          const sources = outcomes.flatMap((outcome) =>
+            outcome._tag === "Importable" ? [outcome.source] : [],
+          );
+          const tags = (completed: ReadonlyArray<AgentSessionImportSource>) =>
+            Stream.runCollect(scanner.recentThreads(workspace, completed)).pipe(
+              Effect.map((again) =>
+                again.map((outcome) =>
+                  outcome._tag === "Importable"
+                    ? [outcome._tag, outcome.refreshHistory, outcome.source.historyVersion]
+                    : [outcome._tag],
+                ),
+              ),
+            );
+          expect(yield* tags(sources)).toEqual([["AlreadyImported"], ["AlreadyImported"]]);
+          const { historyVersion: _, ...olderSource } = sources[0]!;
+          expect(yield* tags([olderSource, sources[1]!])).toEqual([
+            ["Importable", true, sources[0]!.historyVersion],
+            ["AlreadyImported"],
           ]);
         }).pipe(
           Effect.provide(

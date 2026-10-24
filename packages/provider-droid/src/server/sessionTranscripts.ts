@@ -99,7 +99,8 @@ export type DroidTranscriptActivity =
       readonly status: DroidSubagentOutcome["status"];
       readonly result: string | null;
     }
-  | { readonly kind: "notice"; readonly message: string };
+  | { readonly kind: "notice"; readonly message: string }
+  | { readonly kind: "reasoning"; readonly text: string };
 
 export type DroidTranscriptEntry =
   | {
@@ -128,13 +129,24 @@ function storedTaskCompletion(record: DroidTranscriptRecord) {
     : undefined;
 }
 
-/** Whether the record holds history the importer shows: a visible message or notice, tool traffic, or a task report. */
+// Some models keep their thinking private and store only its signature.
+function thinkingText(block: Readonly<Record<string, unknown>>): string | undefined {
+  const text = block["thinking"];
+  return block["type"] === "thinking" && Predicate.isString(text) && text.trim() !== ""
+    ? text
+    : undefined;
+}
+
+/** Whether the record holds history the importer shows: a visible message or notice, thinking, tool traffic, or a task report. */
 export function isDroidTranscriptHistoryRecord(record: DroidTranscriptRecord): boolean {
   return (
     droidTranscriptMessage(record) !== null ||
     droidTranscriptNotice(record) !== undefined ||
     blocksOf(record).some(
-      (block) => block["type"] === "tool_use" || block["type"] === "tool_result",
+      (block) =>
+        block["type"] === "tool_use" ||
+        block["type"] === "tool_result" ||
+        thinkingText(block) !== undefined,
     ) ||
     storedTaskCompletion(record) !== undefined
   );
@@ -164,9 +176,9 @@ interface PendingTask {
 }
 
 /**
- * A stored session as the user saw it live: the visible messages, Droid's notices, each tool call
- * settled by its result, and each Task as a subagent with its report. Thinking and plumbing are
- * left out.
+ * A stored session as the user saw it live: the visible messages, the model's thinking, Droid's
+ * notices, each tool call settled by its result, and each Task as a subagent with its report.
+ * Plumbing is left out.
  */
 export function droidTranscriptEntries(
   records: Iterable<DroidTranscriptRecord>,
@@ -183,6 +195,17 @@ export function droidTranscriptEntries(
         task.outcome = { ...droidTaskCompletionOutcome(completion), at };
       }
       continue;
+    }
+    // Droid streams a reply's thinking before its text, so it goes ahead of the message.
+    for (const block of blocksOf(record)) {
+      const text = thinkingText(block);
+      if (text === undefined) continue;
+      order.push({
+        type: "activity",
+        startedAt: at,
+        completedAt: at,
+        activity: { kind: "reasoning", text },
+      });
     }
     const message = droidTranscriptMessage(record);
     if (message !== null) order.push({ type: "message", ...message, timestamp: at });

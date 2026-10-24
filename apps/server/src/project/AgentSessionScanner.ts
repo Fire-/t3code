@@ -149,6 +149,7 @@ const DroidTranscriptRecord = Schema.Struct({
               input: Schema.optional(Schema.Unknown),
               tool_use_id: Schema.optional(Schema.Unknown),
               is_error: Schema.optional(Schema.Unknown),
+              thinking: Schema.optional(Schema.String),
               // Typed, not Unknown, so image data in a result is never read.
               content: Schema.optional(
                 Schema.Union([Schema.String, Schema.Array(TranscriptContentBlock)]),
@@ -217,11 +218,23 @@ export interface AgentSessionThread {
 const TRIMMED_HISTORY_NOTICE =
   "Earlier history was too large to import. The conversation continues from its most recent part.";
 
+// Raised when a Droid import starts showing more of a session (2: thinking). Threads imported
+// with an older version get their history again on the next import.
+const DROID_HISTORY_VERSION = 2;
+
+const historyVersionFor = (provider: AgentSessionSource) =>
+  provider === "droid" ? DROID_HISTORY_VERSION : 1;
+
+const hasCurrentHistory = (source: AgentSessionImportSource) =>
+  (source.historyVersion ?? 1) >= historyVersionFor(source.provider);
+
 export type AgentSessionRecentThread =
   | {
       readonly _tag: "Importable";
       readonly thread: AgentSessionThread;
       readonly source: AgentSessionImportSource;
+      /** The transcript was imported before, with less of its history than an import shows now. */
+      readonly refreshHistory: boolean;
     }
   | { readonly _tag: "AlreadyImported"; readonly source: AgentSessionImportSource }
   | { readonly _tag: "Duplicate"; readonly source: AgentSessionImportSource }
@@ -1561,7 +1574,7 @@ export const make = Effect.gen(function* () {
             (source) =>
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
           );
-          if (completedSource !== undefined) {
+          if (completedSource !== undefined && hasCurrentHistory(completedSource)) {
             const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
             if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
             importedSessions.add(sessionKey);
@@ -1617,21 +1630,25 @@ export const make = Effect.gen(function* () {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
 
+          const historyVersion = historyVersionFor(parsedThread.source);
           const source: AgentSessionImportSource = {
             ...identity,
             provider: parsedThread.source,
             providerInstanceId: parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,
+            ...(historyVersion > 1 ? { historyVersion } : {}),
           };
           const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
           if (importedSessions.has(sessionKey)) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
           }
           importedSessions.add(sessionKey);
+          const previous = completed?.filter((entry) => entry.provider === candidate.source) ?? [];
           return Option.some<AgentSessionRecentThread>({
             _tag: "Importable",
             thread: parsedThread,
             source,
+            refreshHistory: previous.length > 0 && !previous.some(hasCurrentHistory),
           });
         }).pipe(importReadLock.withPermits(1)),
       ),

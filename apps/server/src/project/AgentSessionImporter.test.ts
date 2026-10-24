@@ -1,10 +1,13 @@
 import { expect, it } from "@effect/vitest";
 import {
   EventId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RunId,
   ThreadId,
+  TurnItemId,
   type ApplicationStoredEvent,
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
@@ -50,12 +53,13 @@ const persistence = Layer.mergeAll(
 function candidate(
   modelSelection: typeof CODEX_MODEL_SELECTION,
   providerSessionId: string,
-  provider: "codex" | "claudeAgent" = "codex",
+  provider: "codex" | "claudeAgent" | "droid" = "codex",
   activities: ReadonlyArray<AgentSessionScanner.AgentSessionThreadActivity> = [],
 ) {
   const providerInstanceId = modelSelection.instanceId;
   return {
     _tag: "Importable" as const,
+    refreshHistory: false,
     source: {
       provider,
       providerInstanceId,
@@ -164,7 +168,7 @@ const seedOwner = Effect.fn(function* (
 });
 
 const makeImporter = Effect.fn(function* (
-  candidates: ReadonlyArray<ReturnType<typeof candidate>>,
+  candidates: ReadonlyArray<AgentSessionScanner.AgentSessionRecentThread>,
   beforeTransaction: Effect.Effect<void> = Effect.void,
 ) {
   const sql = yield* SqlClient.SqlClient;
@@ -397,6 +401,7 @@ it.effect("imports activity between messages as settled turn items in transcript
     const at = { startedAt: timestamp, completedAt: timestamp };
     const source = candidate(CODEX_MODEL_SELECTION, "with-activity", "codex", [
       { position: 1, ...at, activity: { kind: "notice", message: "Earlier history was trimmed" } },
+      { position: 1, ...at, activity: { kind: "reasoning", text: "Run the tests" } },
       {
         position: 1,
         ...at,
@@ -448,10 +453,11 @@ it.effect("imports activity between messages as settled turn items in transcript
     ).toEqual([
       [1, "user_message", "completed", null],
       [2, "system_notice", "completed", null],
-      [3, "command_execution", "completed", null],
-      [4, "subagent", "completed", null],
-      [5, "assistant_message", "completed", null],
-      [6, "dynamic_tool", "interrupted", null],
+      [3, "reasoning", "completed", null],
+      [4, "command_execution", "completed", null],
+      [5, "subagent", "completed", null],
+      [6, "assistant_message", "completed", null],
+      [7, "dynamic_tool", "interrupted", null],
     ]);
     expect(turnItems.find((item) => item.type === "subagent")).toMatchObject({
       title: "Find the flake",
@@ -459,5 +465,162 @@ it.effect("imports activity between messages as settled turn items in transcript
       result: "setup.ts",
       childThreadId: null,
     });
+    expect(turnItems.find((item) => item.type === "reasoning")).toMatchObject({
+      text: "Run the tests",
+      streaming: false,
+      title: null,
+    });
   }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect(
+  "refreshes a thread imported before its thinking was, in place and up to the thread's first run",
+  () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const sink = yield* EventSink.EventSinkV2;
+      const at = (second: number) => `2026-09-01T10:00:${String(second).padStart(2, "0")}.000Z`;
+      const message = (role: "user" | "assistant", text: string, second: number) => ({
+        role,
+        text,
+        createdAt: at(second),
+      });
+      const activity = (
+        position: number,
+        second: number,
+        value: AgentSessionScanner.AgentSessionThreadActivity["activity"],
+      ) => ({ position, startedAt: at(second), completedAt: at(second), activity: value });
+      const tool = {
+        kind: "tool",
+        item: {
+          status: "completed",
+          title: "Execute",
+          type: "command_execution",
+          input: "vp test",
+          output: "ok",
+        },
+      } as const;
+      const droid = { instanceId: ProviderInstanceId.make("droid"), model: "claude-opus-5-5" };
+      const base = candidate(droid, "droid-session", "droid");
+      const threadId = importId(base);
+      const original = {
+        ...base,
+        thread: {
+          ...base.thread,
+          messages: [message("user", "Fix it", 0), message("assistant", "Fixed", 3)],
+          activities: [activity(1, 2, tool)],
+        },
+      };
+      expect(yield* (yield* makeImporter([original])).run).toEqual({
+        importedCount: 1,
+        skippedCount: 0,
+      });
+      const importedIds = (yield* projections.getThreadRecords(threadId, ["turnItems"])).turnItems
+        .map((item) => item.id)
+        .toSorted();
+
+      // The user continues the thread in T3; the session file grows with that run.
+      const runId = RunId.make("run:refresh:1");
+      const runAt = DateTime.makeUnsafe(at(10));
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:refresh:run"),
+            type: "run.created",
+            threadId,
+            runId,
+            occurredAt: runAt,
+            payload: {
+              id: runId,
+              threadId,
+              ordinal: 1,
+              providerInstanceId: droid.instanceId,
+              modelSelection: droid,
+              providerThreadId: null,
+              userMessageId: MessageId.make("message:refresh:run"),
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "completed",
+              requestedAt: runAt,
+              startedAt: runAt,
+              completedAt: runAt,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+          {
+            id: EventId.make("event:refresh:reply"),
+            type: "turn-item.updated",
+            threadId,
+            runId,
+            occurredAt: runAt,
+            payload: {
+              id: TurnItemId.make("turn-item:refresh:reply"),
+              threadId,
+              runId,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 0,
+              status: "completed",
+              title: null,
+              startedAt: runAt,
+              completedAt: runAt,
+              updatedAt: runAt,
+              type: "assistant_message",
+              messageId: MessageId.make("message:refresh:reply"),
+              text: "Live reply",
+              streaming: false,
+            },
+          },
+        ],
+      });
+
+      const refreshed = {
+        ...original,
+        refreshHistory: true,
+        source: { ...original.source, size: 200, historyVersion: 2 },
+        thread: {
+          ...original.thread,
+          messages: [
+            ...original.thread.messages,
+            message("user", "Live prompt", 11),
+            message("assistant", "Live reply", 12),
+          ],
+          activities: [
+            activity(1, 1, { kind: "reasoning", text: "Check the tests" }),
+            activity(1, 2, tool),
+            activity(1, 3, { kind: "reasoning", text: "They pass" }),
+            activity(3, 12, { kind: "reasoning", text: "Thinking during the run" }),
+          ],
+        },
+      };
+      expect(yield* (yield* makeImporter([refreshed])).run).toEqual({
+        importedCount: 1,
+        skippedCount: 0,
+      });
+
+      const { turnItems } = yield* projections.getThreadRecords(threadId, ["turnItems"]);
+      const ordered = turnItems.toSorted((left, right) => left.ordinal - right.ordinal);
+      expect(
+        ordered.map((item) => [item.type, "text" in item ? item.text : item.title, item.runId]),
+      ).toEqual([
+        ["user_message", "Fix it", null],
+        ["reasoning", "Check the tests", null],
+        ["command_execution", "Execute", null],
+        ["reasoning", "They pass", null],
+        ["assistant_message", "Fixed", null],
+        ["assistant_message", "Live reply", runId],
+      ]);
+      expect(ordered.at(-1)?.ordinal).toBe(1_000_001);
+      expect(
+        importedIds.every((id) => turnItems.some((item) => item.id === id && item.runId === null)),
+      ).toBe(true);
+      expect(
+        Option.getOrThrow(yield* runtimes.getByThreadId({ threadId })).runtimePayload,
+      ).toMatchObject({ importedTranscripts: [refreshed.source] });
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
 );

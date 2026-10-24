@@ -1,6 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
 
-import { droidTranscriptEntries, type DroidTranscriptRecord } from "./sessionTranscripts.ts";
+import {
+  droidTranscriptEntries,
+  isDroidTranscriptHistoryRecord,
+  type DroidTranscriptEntry,
+  type DroidTranscriptRecord,
+} from "./sessionTranscripts.ts";
 
 const text = (value: string) => [{ type: "text", text: value }];
 
@@ -32,6 +37,18 @@ const toolResult = (id: string, content: unknown, isError = false) => ({
   content,
   ...(isError ? { is_error: true } : {}),
 });
+const thinking = (value: string) => ({ type: "thinking", thinking: value, signature: "sig" });
+
+const summary = (entry: DroidTranscriptEntry) =>
+  entry.type === "message"
+    ? [entry.role, entry.text]
+    : entry.activity.kind === "tool"
+      ? [entry.activity.item.type, entry.activity.item.status]
+      : entry.activity.kind === "subagent"
+        ? ["subagent", entry.activity.title, entry.activity.status, entry.activity.result]
+        : entry.activity.kind === "reasoning"
+          ? ["reasoning", entry.activity.text]
+          : ["notice", entry.activity.message];
 
 describe("droidTranscriptEntries", () => {
   it("pairs tool calls with their results and Tasks with their reports, in transcript order", () => {
@@ -39,7 +56,7 @@ describe("droidTranscriptEntries", () => {
     const entries = droidTranscriptEntries([
       record("u1", "user", text("Why does CI fail?")),
       record("a1", "assistant", [
-        { type: "thinking", thinking: "hidden" },
+        thinking("hidden"),
         ...text("Checking."),
         toolUse("t-exec", "Execute", { command: "vp test" }),
         toolUse("t-edit", "Edit", { file_path: "/w/a.ts", old_str: "a", new_str: "b" }),
@@ -71,29 +88,19 @@ describe("droidTranscriptEntries", () => {
       record("a3", "assistant", text("A race in setup.")),
     ]);
 
-    assert.deepStrictEqual(
-      entries.map((entry) =>
-        entry.type === "message"
-          ? [entry.role, entry.text]
-          : entry.activity.kind === "tool"
-            ? [entry.activity.item.type, entry.activity.item.status]
-            : entry.activity.kind === "subagent"
-              ? ["subagent", entry.activity.title, entry.activity.status, entry.activity.result]
-              : ["notice", entry.activity.message],
-      ),
-      [
-        ["user", "Why does CI fail?"],
-        ["assistant", "Checking."],
-        ["command_execution", "completed"],
-        ["file_change", "failed"],
-        ["subagent", "Read logs", "completed", "The logs show a timeout."],
-        ["subagent", "Find flake", "completed", "setup races the server"],
-        ["subagent", "Never reported", "interrupted", null],
-        ["dynamic_tool", "interrupted"],
-        ["assistant", "A race in setup."],
-      ],
-    );
-    const execute = entries[2];
+    assert.deepStrictEqual(entries.map(summary), [
+      ["user", "Why does CI fail?"],
+      ["reasoning", "hidden"],
+      ["assistant", "Checking."],
+      ["command_execution", "completed"],
+      ["file_change", "failed"],
+      ["subagent", "Read logs", "completed", "The logs show a timeout."],
+      ["subagent", "Find flake", "completed", "setup races the server"],
+      ["subagent", "Never reported", "interrupted", null],
+      ["dynamic_tool", "interrupted"],
+      ["assistant", "A race in setup."],
+    ]);
+    const execute = entries[3];
     assert.deepStrictEqual(execute?.type === "activity" ? execute.activity : undefined, {
       kind: "tool",
       item: {
@@ -109,7 +116,7 @@ describe("droidTranscriptEntries", () => {
       execute?.type === "activity" ? [execute.startedAt, execute.completedAt] : undefined,
       ["2026-08-24T10:00:01.000Z", "2026-08-24T10:00:02.000Z"],
     );
-    const background = entries[5];
+    const background = entries[6];
     assert.strictEqual(
       background?.type === "activity" ? background.completedAt : undefined,
       "2026-08-24T10:00:05.000Z",
@@ -136,5 +143,26 @@ describe("droidTranscriptEntries", () => {
       kind: "notice",
       message: "BYOK Error: 405",
     });
+  });
+
+  it("keeps the model's thinking ahead of its reply and skips signature-only blocks", () => {
+    const record = recorder();
+    const records = [
+      record("u1", "user", text("Plan it")),
+      record("a1", "assistant", [thinking("First idea."), thinking("Second idea.")]),
+      record("a2", "assistant", [thinking("  "), ...text("Done.")]),
+      record("a3", "assistant", [thinking("")]),
+    ];
+
+    assert.deepStrictEqual(
+      records.map((entry) => isDroidTranscriptHistoryRecord(entry)),
+      [true, true, true, false],
+    );
+    assert.deepStrictEqual(droidTranscriptEntries(records).map(summary), [
+      ["user", "Plan it"],
+      ["reasoning", "First idea."],
+      ["reasoning", "Second idea."],
+      ["assistant", "Done."],
+    ]);
   });
 });
