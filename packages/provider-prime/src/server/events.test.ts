@@ -1,0 +1,1220 @@
+import { assert, describe, it } from "@effect/vitest";
+
+import {
+  primeAgentEndErrorMessage,
+  primeAutonomousContinuation,
+  primeAutonomousNotice,
+  primeCustomMessageHidden,
+  primeCustomMessageNotice,
+  primeDiscardedHistory,
+  primeForkBoundary,
+  primeForkMessages,
+  primeHeartbeatNotification,
+  primeIpythonFileChange,
+  primeMessageLead,
+  primeProviderGoal,
+  primeIpythonUpdate,
+  primeRlmChildSignature,
+  primeRlmChildView,
+  primeSessionForkReader,
+  primeToolItem,
+  primeTurnEntries,
+  primeTurnFingerprint,
+  primeUserEntryHash,
+  type PrimeTurnLead,
+} from "./events.ts";
+import type { PrimeRlmChild } from "./rpc.ts";
+
+describe("primeAgentEndErrorMessage", () => {
+  it("[VAL-TURN-009] takes the first non-blank errorMessage among agent_end messages", () => {
+    const errorMessage =
+      'Mistral API error (400): {"message":"Invalid request payload: Expected at most one leading ThinkChunk, got 2","code":"3051"}';
+    assert.equal(
+      primeAgentEndErrorMessage({
+        type: "agent_end",
+        messages: [
+          { role: "user", content: "did something happen?" },
+          { role: "assistant", content: [], errorMessage: "  " },
+          { role: "assistant", content: [], stopReason: "error", errorMessage },
+          { role: "assistant", content: [], stopReason: "error", errorMessage: "later error" },
+        ],
+      }),
+      errorMessage,
+    );
+  });
+
+  it.each([
+    { name: "a clean stop", messages: [{ role: "assistant", content: [], stopReason: "stop" }] },
+    { name: "no messages", messages: [] },
+    {
+      name: "a whitespace-only errorMessage",
+      messages: [{ role: "assistant", errorMessage: "  " }],
+    },
+    { name: "a missing messages array", messages: undefined },
+  ])("[VAL-TURN-009] gives no detail for $name", ({ messages }) => {
+    assert.isUndefined(primeAgentEndErrorMessage({ type: "agent_end", messages }));
+  });
+});
+
+describe("primeToolItem", () => {
+  const ipythonCode = "import pathlib\nprint(pathlib.Path('a.py').read_text())\n1 + 1";
+
+  it("[VAL-TOOL-001] maps ipython to a command execution with the code as command and output from details", () => {
+    assert.deepEqual(
+      primeToolItem({
+        toolName: "ipython",
+        args: { code: ipythonCode },
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "content text is not preferred" }],
+          details: { status: "ok", stdout: "hello\n", stderr: "warning: slow\n", result: "2" },
+        },
+      }),
+      { type: "command_execution", input: ipythonCode, output: "hello\nwarning: slow\n2" },
+    );
+  });
+
+  it("[VAL-TOOL-001] falls back to the result text when ipython details carry no output", () => {
+    assert.deepEqual(
+      primeToolItem({
+        toolName: "ipython",
+        args: { code: "print(h)" },
+        isError: false,
+        result: { content: [{ type: "text", text: "BashResult(exit_code=0)" }] },
+      }),
+      { type: "command_execution", input: "print(h)", output: "BashResult(exit_code=0)" },
+    );
+  });
+
+  it("[VAL-TOOL-003] a failed ipython cell is a failed command execution that shows the error text", () => {
+    const item = primeToolItem({
+      toolName: "ipython",
+      args: { code: "1 / 0" },
+      isError: true,
+      result: {
+        content: [{ type: "text", text: "ignored" }],
+        details: {
+          status: "error",
+          stdout: "before\n",
+          errorEname: "ZeroDivisionError",
+          error: {
+            ename: "ZeroDivisionError",
+            evalue: "division by zero",
+            traceback: [
+              "Traceback (most recent call last):",
+              '  File "<cell>", line 1, in <module>',
+              "ZeroDivisionError: division by zero",
+            ],
+          },
+        },
+      },
+    });
+    assert.equal(item?.type, "command_execution");
+    if (item?.type !== "command_execution") return;
+    assert.equal(item.status, "failed");
+    assert.equal(
+      item.output,
+      'before\nTraceback (most recent call last):\n  File "<cell>", line 1, in <module>\nZeroDivisionError: division by zero',
+    );
+  });
+
+  it("[VAL-TOOL-003] a failed ipython cell without a traceback shows ename and evalue", () => {
+    const item = primeToolItem({
+      toolName: "ipython",
+      args: { code: "kernel()" },
+      isError: true,
+      result: {
+        details: {
+          status: "error",
+          error: { ename: "KernelError", evalue: "kernel died", traceback: [] },
+        },
+      },
+    });
+    assert.deepEqual(item, {
+      type: "command_execution",
+      input: "kernel()",
+      output: "KernelError: kernel died",
+      status: "failed",
+    });
+  });
+
+  it("[VAL-TOOL-001] an aborted ipython cell is interrupted", () => {
+    const item = primeToolItem({
+      toolName: "ipython",
+      args: { code: "await asyncio.sleep(60)" },
+      isError: true,
+      result: { details: { status: "aborted", stdout: "started\n" } },
+    });
+    assert.deepEqual(item, {
+      type: "command_execution",
+      input: "await asyncio.sleep(60)",
+      output: "started\n",
+      status: "interrupted",
+    });
+  });
+
+  it.each([
+    {
+      name: "structured exit code",
+      result: {
+        content: [{ type: "text", text: "hello" }],
+        structuredContent: { exit_code: 2 },
+        details: { exitCode: 99 },
+      },
+      exitCode: 2,
+    },
+    {
+      name: "legacy details exit code",
+      result: { content: [{ type: "text", text: "hello" }], details: { exitCode: 0 } },
+      exitCode: 0,
+    },
+  ])("[VAL-TOOL-004] maps bash to a command execution ($name)", ({ result, exitCode }) => {
+    assert.deepEqual(
+      primeToolItem({ toolName: "bash", args: { command: "echo hello" }, isError: false, result }),
+      { type: "command_execution", input: "echo hello", output: "hello", exitCode },
+    );
+  });
+
+  it("[VAL-TOOL-005] converts an edit's numbered details.diff into a unified patch", () => {
+    const diff = [
+      "  1 import a",
+      "- 2 old line",
+      "+ 2 new line",
+      "+ 3 added line",
+      "  3 keep",
+      "    ...",
+      " 11 ctx",
+      "-12 gone",
+      " 13 tail",
+    ].join("\n");
+    assert.deepEqual(
+      primeToolItem({
+        toolName: "edit",
+        args: { path: "src/a.ts", edits: [{ oldText: "old line", newText: "new line" }] },
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/a.ts." }],
+          details: { diff, firstChangedLine: 2 },
+        },
+      }),
+      {
+        type: "file_change",
+        fileName: "src/a.ts",
+        diffStr: [
+          "--- src/a.ts",
+          "+++ src/a.ts",
+          "@@ -1,3 +1,4 @@",
+          " import a",
+          "-old line",
+          "+new line",
+          "+added line",
+          " keep",
+          "@@ -11,3 +12,2 @@",
+          " ctx",
+          "-gone",
+          " tail",
+          "",
+        ].join("\n"),
+      },
+    );
+  });
+
+  it("[VAL-TOOL-005] keeps an edit's ready patch and a failed edit's error text", () => {
+    const patch = "--- a.ts\n+++ a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    assert.deepEqual(
+      primeToolItem({
+        toolName: "edit",
+        args: { path: "a.ts" },
+        isError: false,
+        result: { details: { diff: "-1 old\n+1 new", patch } },
+      }),
+      { type: "file_change", fileName: "a.ts", diffStr: patch },
+    );
+    assert.deepEqual(
+      primeToolItem({
+        toolName: "edit",
+        args: { path: "c.ts" },
+        isError: true,
+        result: { content: [{ type: "text", text: "Could not find the text in c.ts." }] },
+      }),
+      { type: "file_change", fileName: "c.ts", diffStr: "Could not find the text in c.ts." },
+    );
+  });
+
+  it("[VAL-TOOL-005] maps write to a file change carrying the new content", () => {
+    assert.deepEqual(
+      primeToolItem({
+        toolName: "write",
+        args: { path: "b.ts", content: "export {};\n" },
+        isError: false,
+        result: { content: [{ type: "text", text: "Successfully wrote to b.ts" }] },
+      }),
+      { type: "file_change", fileName: "b.ts", newStr: "export {};\n" },
+    );
+  });
+
+  it.each([
+    { name: "camelCase", args: { oldPath: "old/name.ts", newPath: "new/name.ts" } },
+    { name: "snake_case", args: { old_path: "old/name.ts", new_path: "new/name.ts" } },
+    { name: "from/to", args: { from: "old/name.ts", to: "new/name.ts" } },
+  ])("[VAL-TOOL-006] maps rename with both paths ($name) to a file change", ({ args }) => {
+    assert.deepEqual(
+      primeToolItem({ toolName: "rename", args, isError: false, result: undefined }),
+      {
+        type: "file_change",
+        fileName: "new/name.ts",
+        changes: [{ operation: "rename", path: "new/name.ts", oldPath: "old/name.ts" }],
+      },
+    );
+  });
+
+  it.each([
+    { name: "no args", args: undefined },
+    { name: "only the new path", args: { newPath: "new/name.ts" } },
+    { name: "a session rename", args: { name: "my session" } },
+  ])("[VAL-TOOL-006] leaves rename with $name to the dynamic tool mapping", ({ args }) => {
+    assert.isUndefined(primeToolItem({ toolName: "rename", args, isError: false, result: {} }));
+  });
+
+  it.each(["stdout", "image_generate", "mcp__weather__get_weather"])(
+    "[VAL-TOOL-007] leaves %s to the dynamic tool mapping",
+    (toolName) => {
+      assert.isUndefined(
+        primeToolItem({
+          toolName,
+          args: { text: "hello" },
+          isError: false,
+          result: { content: [{ type: "text", text: "hello" }] },
+        }),
+      );
+    },
+  );
+});
+
+describe("primeIpythonFileChange", () => {
+  it("[VAL-TOOL-002] turns details.diffs into one file change covering each path", () => {
+    assert.deepEqual(
+      primeIpythonFileChange({
+        details: {
+          status: "ok",
+          diffs: [
+            { path: "src/a.py", oldStr: "x = 1\ny = 2\n", newStr: "x = 10\n", startLine: 3 },
+            { path: "src/b.py", oldStr: "", newStr: "print('new')\n" },
+            { path: "src/a.py", oldStr: "z = 3", newStr: "z = 30", startLine: 9 },
+          ],
+        },
+      }),
+      {
+        type: "file_change",
+        fileName: "src/a.py",
+        changes: [
+          { operation: "update", path: "src/a.py" },
+          { operation: "update", path: "src/b.py" },
+        ],
+        diffStr: [
+          "--- src/a.py",
+          "+++ src/a.py",
+          "@@ -3,2 +3,1 @@",
+          "-x = 1",
+          "-y = 2",
+          "+x = 10",
+          "--- src/b.py",
+          "+++ src/b.py",
+          "@@ -0,0 +1,1 @@",
+          "+print('new')",
+          "--- src/a.py",
+          "+++ src/a.py",
+          "@@ -9,1 +9,1 @@",
+          "-z = 3",
+          "+z = 30",
+          "",
+        ].join("\n"),
+      },
+    );
+  });
+
+  it.each([
+    { name: "no details", result: { content: [] } },
+    { name: "empty diffs", result: { details: { status: "ok", diffs: [] } } },
+    { name: "malformed diffs", result: { details: { diffs: [{ path: "a.py" }] } } },
+  ])("[VAL-TOOL-002] produces no file change for $name", ({ result }) => {
+    assert.isUndefined(primeIpythonFileChange(result));
+  });
+});
+
+describe("primeIpythonUpdate", () => {
+  it("[VAL-TOOL-001] treats the 30 s heartbeat and kernel start-up as progress, not output", () => {
+    assert.deepEqual(
+      primeIpythonUpdate({
+        content: [{ type: "text", text: "partial\n[ipython cell still running (30s elapsed)]" }],
+        details: { status: "ok" },
+      }),
+      { type: "progress" },
+    );
+    assert.deepEqual(
+      primeIpythonUpdate({
+        content: [{ type: "text", text: "Starting Python kernel..." }],
+        details: { status: "starting" },
+      }),
+      { type: "progress" },
+    );
+  });
+
+  it("[VAL-TOOL-001] treats a streamed chunk as new output", () => {
+    assert.deepEqual(
+      primeIpythonUpdate({
+        content: [{ type: "text", text: "line 1\n" }],
+        details: { status: "ok" },
+      }),
+      { type: "output", text: "line 1\n" },
+    );
+  });
+});
+
+describe("primeProviderGoal", () => {
+  const goal = (status: string, active = status === "active") => ({
+    active,
+    status,
+    objective: "  ship the release  ",
+    tokensUsed: 1_200,
+    tokenBudget: 50_000,
+    timeUsedSeconds: 42,
+    continuationsUsed: 1,
+  });
+
+  it.each([
+    { status: "active", expected: "active" },
+    { status: "paused", expected: "paused" },
+    { status: "budget_limited", expected: "budget_limited" },
+    { status: "complete", expected: "complete" },
+    { status: "error", expected: "blocked" },
+  ] as const)("[VAL-CONT-005] maps Prime status $status to $expected", ({ status, expected }) => {
+    assert.deepEqual(primeProviderGoal(goal(status)), {
+      objective: "ship the release",
+      status: expected,
+      tokensUsed: 1_200,
+      tokenBudget: 50_000,
+      timeUsedSeconds: 42,
+    });
+  });
+
+  it.each([
+    { name: "an idle goal", state: goal("idle") },
+    {
+      name: "an inactive goal without an objective",
+      state: {
+        active: false,
+        status: "paused",
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        continuationsUsed: 0,
+      },
+    },
+    { name: "a blank objective", state: { ...goal("active"), objective: "   " } },
+  ])("[VAL-CONT-005] maps $name to no goal", ({ state }) => {
+    assert.isNull(primeProviderGoal(state));
+  });
+
+  it("[VAL-CONT-005] reports a missing token budget as null", () => {
+    const { tokenBudget: _tokenBudget, ...unbudgeted } = goal("active");
+    assert.isNull(primeProviderGoal(unbudgeted)?.tokenBudget);
+  });
+});
+
+describe("primeHeartbeatNotification", () => {
+  it("[VAL-CONT-009] reads the schedule and prompt of Prime's heartbeat injection", () => {
+    assert.deepEqual(
+      primeHeartbeatNotification({
+        role: "custom",
+        customType: "heartbeat_prompt",
+        content: "[heartbeat: */5 * * * * run#3]\n\nCheck the build",
+        display: true,
+        details: { jobId: "job-1", schedule: "*/5 * * * *", status: "active" },
+      }),
+      {
+        source: { kind: "monitor" },
+        outcome: "updated",
+        summary: "Heartbeat */5 * * * *",
+        detail: "Check the build",
+      },
+    );
+  });
+
+  it("[VAL-CONT-009] ignores other custom messages", () => {
+    assert.isUndefined(
+      primeHeartbeatNotification({ role: "custom", customType: "goal_context", content: "x" }),
+    );
+  });
+});
+
+describe("primeAutonomousContinuation", () => {
+  const userText = (text: string, flagged: boolean) => ({
+    role: "user",
+    content: [{ type: "text", text }],
+    ...(flagged ? { isAutonomousContinuation: true } : {}),
+  });
+  const gateFailed =
+    "[autonomous-continuation: gate-failed]\n\nAutonomous quality gate failed (attempt 1/3): `npm test` exited 1.\n\nOutput:\nFAIL src/x.test.ts\n\nContinue working. Fix the failure, then produce terminal evidence.";
+
+  it("[VAL-AUTO-002] reads the gate-failed reason from a flagged continuation", () => {
+    assert.deepEqual(primeAutonomousContinuation(userText(gateFailed, true)), {
+      reason: "gate-failed",
+      title: "Autonomous gate failed",
+      text: gateFailed,
+    });
+  });
+
+  it("[VAL-AUTO-002] a plain marker is a generic continuation", () => {
+    const text = "[autonomous-continuation]\n\nNo human input is available in autonomous mode.";
+    assert.deepEqual(primeAutonomousContinuation(userText(text, true)), {
+      reason: null,
+      title: "Autonomous continuation",
+      text,
+    });
+  });
+
+  it("[VAL-AUTO-002] the text marker without the flag is still a continuation", () => {
+    assert.equal(primeAutonomousContinuation(userText(gateFailed, false))?.reason, "gate-failed");
+    assert.deepEqual(
+      primeAutonomousContinuation({
+        role: "user",
+        content: "[autonomous-continuation: subagent-keep-alive]\n\nCheck on the subagents.",
+      }),
+      {
+        reason: "subagent-keep-alive",
+        title: "Autonomous continuation",
+        text: "[autonomous-continuation: subagent-keep-alive]\n\nCheck on the subagents.",
+      },
+    );
+  });
+
+  it("[VAL-AUTO-002] the flag alone marks a continuation without a text marker", () => {
+    assert.deepEqual(primeAutonomousContinuation(userText("Keep going.", true)), {
+      reason: null,
+      title: "Autonomous continuation",
+      text: "Keep going.",
+    });
+  });
+
+  it("[VAL-AUTO-002] ignores ordinary user messages and other roles", () => {
+    assert.isUndefined(primeAutonomousContinuation(userText("Hello prime-agent", false)));
+    assert.isUndefined(
+      primeAutonomousContinuation(userText("see [autonomous-continuation] above", false)),
+    );
+    assert.isUndefined(
+      primeAutonomousContinuation({
+        role: "assistant",
+        content: [{ type: "text", text: "[autonomous-continuation]" }],
+      }),
+    );
+  });
+});
+
+describe("primeAutonomousNotice", () => {
+  it.each([
+    ["autonomous_gate_started", "Autonomous gate: running `npm test` (attempt 1/3)…"],
+    ["autonomous_gate_failed", "Autonomous gate failed (attempt 1/3): `npm test` exited 1."],
+    ["autonomous_gate_passed", "Autonomous gate passed: `npm test`."],
+    ["autonomous_stopped", "Autonomous run complete: quality gates passed."],
+    ["autonomous_status", "[autonomous-status: on]\n\nContinuations: 0/3."],
+  ])("[VAL-AUTO-003] %s becomes a notice with its text", (customType, content) => {
+    assert.equal(
+      primeAutonomousNotice({ role: "custom", customType, content, display: true, details: {} }),
+      content,
+    );
+  });
+
+  it("[VAL-AUTO-003] ignores other custom messages and blank content", () => {
+    assert.isUndefined(
+      primeAutonomousNotice({ role: "custom", customType: "session_slash_command", content: "/x" }),
+    );
+    assert.isUndefined(
+      primeAutonomousNotice({ role: "custom", customType: "autonomous_stopped", content: " " }),
+    );
+  });
+});
+describe("Prime custom messages", () => {
+  const custom = (customType: string, content: unknown, display = true, details: unknown = {}) => ({
+    role: "custom",
+    customType,
+    content,
+    display,
+    details,
+  });
+
+  it.each([
+    { name: "the session-command echo", message: custom("session_slash_command", "/goal status") },
+    {
+      name: "goal steering",
+      message: custom("goal_context", "[goal: continuation]\n\nContinue working."),
+    },
+    { name: "a display:false row", message: custom("prime_future_notice", "secret", false) },
+    {
+      name: "the compaction kernel note",
+      message: custom("ipython_state", "[python-state]\n\nYour kernel persisted.", false),
+    },
+    { name: "a display:false gate row", message: custom("autonomous_status", "on", false) },
+  ])("[VAL-MSG-001] hides $name", ({ message }) => {
+    assert.isTrue(primeCustomMessageHidden(message));
+    assert.isUndefined(primeCustomMessageNotice(message));
+  });
+
+  it("[VAL-MSG-002] RESTORE_KERNEL collapses the restored names into one line", () => {
+    const content =
+      "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: df, model, helpers.";
+    assert.equal(
+      primeCustomMessageNotice(custom("ipython_state_restored", content, true, { restored: true })),
+      "Python kernel state restored — 3 names revived.",
+    );
+  });
+
+  it.each([
+    {
+      name: "one name",
+      content:
+        "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: df.",
+      notice: "Python kernel state restored — 1 name revived.",
+    },
+    {
+      name: "a failed revive",
+      content:
+        "[python-state-restored]\n\nYour previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.",
+      notice: "Python kernel state could not be revived — the kernel is starting fresh.",
+    },
+    {
+      name: "no name list",
+      content: "[python-state-restored]\n\nSomething else.",
+      notice: "Python kernel state restored.",
+    },
+  ])("[VAL-MSG-002] the kernel restore with $name is one line", ({ content, notice }) => {
+    assert.equal(primeCustomMessageNotice(custom("ipython_state_restored", content)), notice);
+  });
+
+  it.each([
+    { customType: "session_slash_command_result", content: "No active goal." },
+    { customType: "prime_future_notice", content: "Something Prime wants shown." },
+    { customType: "async_bash_completion", content: '[bash-done pid:1 exit:0]\n\nCommand: "ls"' },
+  ])("[VAL-MSG-003] a displayed $customType becomes a notice with its text", (input) => {
+    assert.equal(primeCustomMessageNotice(custom(input.customType, input.content)), input.content);
+  });
+
+  it.each([
+    { name: "autonomous_status", message: custom("autonomous_status", "[autonomous-status: on]") },
+    {
+      name: "heartbeat_prompt",
+      message: custom("heartbeat_prompt", "[heartbeat: */5 * * * * run#1]\n\nCheck"),
+    },
+    {
+      name: "a failed session-command result",
+      message: custom("session_slash_command_result", "Command failed: nope", true, {
+        success: false,
+        error: "nope",
+      }),
+    },
+    { name: "a blank row", message: custom("prime_future_notice", "  ") },
+  ])("[VAL-MSG-003] leaves $name to its own mapping", ({ message }) => {
+    assert.isFalse(primeCustomMessageHidden(message));
+    assert.isUndefined(primeCustomMessageNotice(message));
+  });
+});
+
+describe("primeRlmChildView", () => {
+  const child = (fields: Partial<PrimeRlmChild>): PrimeRlmChild => ({
+    id: "child-1",
+    label: "repo-scout",
+    sessionDir: "/tmp/session/sub-1",
+    status: "queued",
+    ...fields,
+  });
+
+  it.each([
+    { status: "queued", mapped: "waiting", terminal: false },
+    { status: "running", mapped: "running", terminal: false },
+    { status: "done", mapped: "completed", terminal: true },
+    { status: "error", mapped: "failed", terminal: true },
+    { status: "cancelled", mapped: "cancelled", terminal: true },
+  ])("[VAL-RLM-001][VAL-RLM-003] maps $status to $mapped", ({ status, mapped, terminal }) => {
+    const view = primeRlmChildView(child({ status }));
+    assert.equal(view?.status, mapped);
+    assert.equal(view?.terminal, terminal);
+  });
+
+  it("[VAL-RLM-001] ignores a status Prime does not define", () => {
+    assert.isUndefined(primeRlmChildView(child({ status: "paused" })));
+  });
+
+  it("[VAL-RLM-001] titles the child by its label, falling back to the session name", () => {
+    assert.equal(primeRlmChildView(child({ sessionName: "scout" }))?.title, "repo-scout");
+    assert.equal(primeRlmChildView(child({ label: " ", sessionName: "scout" }))?.title, "scout");
+  });
+
+  it("[VAL-RLM-001] a running child reports its answer preview, else its activity, as progress", () => {
+    assert.equal(
+      primeRlmChildView(
+        child({ status: "running", activity: { kind: "executing", toolName: "bash" } }),
+      )?.progress,
+      "Running bash",
+    );
+    assert.equal(
+      primeRlmChildView(
+        child({
+          status: "running",
+          answerPreview: "half done",
+          activity: { kind: "writing" },
+        }),
+      )?.progress,
+      "half done",
+    );
+    assert.isNull(primeRlmChildView(child({ status: "running" }))?.result);
+  });
+
+  it("[VAL-RLM-001] a done child's result is its answer preview", () => {
+    const view = primeRlmChildView(
+      child({ status: "done", answerPreview: "155 repos found", toolUseCount: 9 }),
+    );
+    assert.equal(view?.result, "155 repos found");
+    assert.isUndefined(view?.progress);
+  });
+
+  it.each([
+    { status: "error", error: "kernel died", result: "kernel died" },
+    { status: "cancelled", error: "Cancelled by user", result: "Cancelled by user" },
+    { status: "cancelled", error: undefined, result: null },
+  ])("[VAL-RLM-003] a $status child carries its error text as the result", (input) => {
+    assert.equal(
+      primeRlmChildView(
+        child({
+          status: input.status,
+          ...(input.error === undefined ? {} : { error: input.error }),
+        }),
+      )?.result,
+      input.result,
+    );
+  });
+});
+
+describe("primeRlmChildSignature", () => {
+  const base: PrimeRlmChild = {
+    id: "child-1",
+    label: "repo-scout",
+    sessionDir: "/tmp/session/sub-1",
+    status: "running",
+    answerPreview: "half done",
+    toolUseCount: 7,
+  };
+
+  it("[VAL-RLM-002] an identical snapshot has the same signature", () => {
+    assert.equal(primeRlmChildSignature(base), primeRlmChildSignature({ ...base }));
+  });
+
+  it.each<{ name: string; change: Partial<PrimeRlmChild> }>([
+    { name: "status", change: { status: "done" } },
+    { name: "label", change: { label: "other" } },
+    { name: "activity", change: { activity: { kind: "executing", toolName: "bash" } } },
+    { name: "toolUseCount", change: { toolUseCount: 8 } },
+    { name: "answerPreview", change: { answerPreview: "more" } },
+    { name: "error", change: { error: "boom" } },
+  ])("[VAL-RLM-002] changes when $name changes", ({ change }) => {
+    assert.notEqual(primeRlmChildSignature(base), primeRlmChildSignature({ ...base, ...change }));
+  });
+});
+
+describe("primeForkBoundary", () => {
+  const turn = (
+    ordinal: number,
+    texts: ReadonlyArray<string> | undefined,
+    lead: PrimeTurnLead = texts !== undefined && texts.length > 0 ? "user" : "none",
+  ) => ({
+    ordinal,
+    nativeTurnRef:
+      texts === undefined
+        ? { fingerprint: undefined }
+        : { fingerprint: primeTurnFingerprint({ lead, hashes: texts.map(primeUserEntryHash) }) },
+  });
+  const messages = (...texts: ReadonlyArray<string>) =>
+    texts.map((text, index) => ({ entryId: `entry-${index}`, text }));
+
+  it("round-trips the turn entries fingerprint and ignores foreign refs", () => {
+    const hashes = ["alpha", "bravo"].map(primeUserEntryHash);
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "user", hashes })), {
+      lead: "user",
+      hashes,
+    });
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "none", hashes: [] })), {
+      lead: "none",
+      hashes: [],
+    });
+    assert.isUndefined(primeTurnEntries("u1"));
+    assert.isUndefined(primeTurnEntries(undefined));
+    assert.notEqual(primeUserEntryHash("alpha"), primeUserEntryHash("alphb"));
+  });
+
+  it("[VAL-FORK-002] records the turn's leading history kind and rejects refs without it", () => {
+    const hash = primeUserEntryHash("steer");
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "heartbeat", hashes: [] })), {
+      lead: "heartbeat",
+      hashes: [],
+    });
+    assert.deepEqual(primeTurnEntries(primeTurnFingerprint({ lead: "goal", hashes: [hash] })), {
+      lead: "goal",
+      hashes: [hash],
+    });
+    // The first format carried no leading-history marker.
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v1:${hash}`));
+    assert.isUndefined(primeTurnEntries("prime-user-entries:v1:none"));
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v2:${hash}`));
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v2:sideways:${hash}`));
+    // A user lead needs a user entry; a turn with none added no user entry.
+    assert.isUndefined(primeTurnEntries("prime-user-entries:v2:user:none"));
+    assert.isUndefined(primeTurnEntries(`prime-user-entries:v2:none:${hash}`));
+  });
+
+  it.each<{ name: string; message: Record<string, unknown>; lead: PrimeTurnLead | undefined }>([
+    { name: "a user prompt", message: { role: "user", content: "hi" }, lead: "user" },
+    {
+      name: "an image-only user message",
+      message: { role: "user", content: [{ type: "image", data: "", mimeType: "image/png" }] },
+      lead: "output",
+    },
+    { name: "an assistant reply", message: { role: "assistant", content: [] }, lead: "output" },
+    { name: "a tool result", message: { role: "toolResult", content: [] }, lead: "output" },
+    {
+      name: "a heartbeat prompt",
+      message: { role: "custom", customType: "heartbeat_prompt", display: true },
+      lead: "heartbeat",
+    },
+    {
+      name: "a goal context",
+      message: { role: "custom", customType: "goal_context", display: true },
+      lead: "goal",
+    },
+    {
+      name: "an autonomous status row",
+      message: { role: "custom", customType: "autonomous_status", display: true },
+      lead: "autonomous",
+    },
+    {
+      name: "a hidden ipython state notice",
+      message: { role: "custom", customType: "ipython_state", display: false },
+      lead: "notice",
+    },
+    {
+      name: "a refinement notice",
+      message: { role: "custom", customType: "refinement_notice", display: false },
+      lead: "notice",
+    },
+    {
+      name: "a session command echo",
+      message: { role: "custom", customType: "session_slash_command", display: true },
+      lead: undefined,
+    },
+    {
+      name: "a session command result",
+      message: { role: "custom", customType: "session_slash_command_result", display: true },
+      lead: undefined,
+    },
+    {
+      name: "a compaction outcome",
+      message: { role: "custom", customType: "compaction_outcome", display: true },
+      lead: undefined,
+    },
+    {
+      name: "an MCP connection outcome",
+      message: { role: "custom", customType: "mcp_connection_outcome", display: true },
+      lead: undefined,
+    },
+    {
+      name: "a refinement outcome",
+      message: { role: "custom", customType: "refinement_outcome", display: true },
+      lead: undefined,
+    },
+    {
+      name: "the harness digest",
+      message: { role: "custom", customType: "harness_digest", display: false },
+      lead: undefined,
+    },
+    {
+      name: "a bash execution kept out of context",
+      message: { role: "bashExecution", excludeFromContext: true },
+      lead: undefined,
+    },
+    { name: "a bash execution", message: { role: "bashExecution" }, lead: "output" },
+  ])("[VAL-FORK-002] classifies $name by whether it reaches the model", ({ message, lead }) => {
+    assert.equal(primeMessageLead(message), lead);
+  });
+
+  it("[VAL-FORK-002] plans rollback from the first discarded turn that added model-visible history", () => {
+    const turns = [turn(1, ["a"]), turn(2, ["b", "steer"]), turn(3, [])];
+    assert.deepEqual(primeDiscardedHistory(turns, 1), { type: "fork" });
+    assert.deepEqual(primeDiscardedHistory(turns, 2), { type: "none" });
+    assert.deepEqual(primeDiscardedHistory([...turns, turn(4, undefined)], 1), {
+      type: "unknown",
+      ordinal: 4,
+    });
+    const heartbeat = turn(3, [], "heartbeat");
+    assert.deepEqual(primeDiscardedHistory([turn(1, ["a"]), turn(2, ["b"]), heartbeat], 1), {
+      type: "fork",
+    });
+    assert.deepEqual(primeDiscardedHistory([turn(1, ["a"]), turn(2, []), heartbeat], 1), {
+      type: "stranded",
+      ordinal: 3,
+      lead: "heartbeat",
+    });
+    assert.deepEqual(
+      primeDiscardedHistory([turn(1, ["a"]), turn(2, ["goal steer"], "goal"), turn(3, ["c"])], 1),
+      { type: "stranded", ordinal: 2, lead: "goal" },
+    );
+  });
+
+  it("[VAL-FORK-002] refuses a cut that would keep a discarded turn's history before its first user entry", () => {
+    // Trailing heartbeat: no user entry to cut at, so keep_all would retain it.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a"),
+        turns: [turn(1, ["a"]), turn(2, [], "heartbeat")],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "stranded", ordinal: 2, lead: "heartbeat" },
+    );
+    // A cut before turn 3's prompt would keep turn 2's heartbeat history.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a", "c"),
+        turns: [turn(1, ["a"]), turn(2, [], "heartbeat"), turn(3, ["c"])],
+        boundaryOrdinal: 1,
+        skipUnmatched: true,
+      }),
+      { type: "stranded", ordinal: 2, lead: "heartbeat" },
+    );
+    // A user entry after the turn's leading history is no clean cut either.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a", "steer"),
+        turns: [turn(1, ["a"]), turn(2, ["steer"], "goal")],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "stranded", ordinal: 2, lead: "goal" },
+    );
+    // A heartbeat after the first discarded prompt goes with the cut.
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("a", "b"),
+        turns: [turn(1, ["a"]), turn(2, ["b"]), turn(3, [], "heartbeat")],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "fork", entryId: "entry-1" },
+    );
+  });
+
+  it("reads get_fork_messages and rejects a malformed reply", () => {
+    assert.deepEqual(primeForkMessages({ messages: [{ entryId: "4c2b59bf", text: "alpha" }] }), [
+      { entryId: "4c2b59bf", text: "alpha" },
+    ]);
+    assert.isUndefined(primeForkMessages({ messages: [{ entryId: "4c2b59bf" }] }));
+    assert.isUndefined(primeForkMessages(undefined));
+  });
+
+  it("forks before the first discarded turn's prompt, counting steers and command-only turns", () => {
+    const turns = [turn(1, ["a"]), turn(2, ["b", "steer"]), turn(3, []), turn(4, ["c"])];
+    const history = messages("a", "b", "steer", "c");
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 1, skipUnmatched: false }),
+      { type: "fork", entryId: "entry-1" },
+    );
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 3, skipUnmatched: false }),
+      { type: "fork", entryId: "entry-3" },
+    );
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 4, skipUnmatched: false }),
+      { type: "keep_all" },
+    );
+  });
+
+  it("keeps a forked session's inherited history when rolling back to thread start", () => {
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: messages("inherited", "a", "b"),
+        turns: [turn(1, ["a"]), turn(2, ["b"])],
+        boundaryOrdinal: 0,
+        skipUnmatched: false,
+      }),
+      { type: "fork", entryId: "entry-1" },
+    );
+  });
+
+  it("fails rollback when the session no longer matches or a turn has no fingerprint", () => {
+    const history = messages("a", "b");
+    assert.equal(
+      primeForkBoundary({
+        messages: history,
+        turns: [turn(1, ["a"]), turn(2, ["changed"])],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }).type,
+      "error",
+    );
+    assert.deepEqual(
+      primeForkBoundary({
+        messages: history,
+        turns: [turn(1, ["a"]), turn(2, undefined)],
+        boundaryOrdinal: 1,
+        skipUnmatched: false,
+      }),
+      { type: "error", message: "Prime turn 2 has no recorded session entries" },
+    );
+  });
+
+  it("skips a fork source's rolled-back turns but still checks the boundary turn", () => {
+    const turns = [turn(1, ["a"]), turn(2, ["rolled back"]), turn(3, ["c"])];
+    const history = messages("a", "c");
+    assert.deepEqual(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 1, skipUnmatched: true }),
+      { type: "fork", entryId: "entry-1" },
+    );
+    assert.equal(
+      primeForkBoundary({ messages: history, turns, boundaryOrdinal: 1, skipUnmatched: false })
+        .type,
+      "error",
+    );
+    // A rolled-back turn repeating the boundary turn's prompt would swallow it.
+    assert.equal(
+      primeForkBoundary({
+        messages: messages("same", "same"),
+        turns: [turn(1, ["same"]), turn(2, ["same"]), turn(3, ["same"])],
+        boundaryOrdinal: 1,
+        skipUnmatched: true,
+      }).type,
+      "error",
+    );
+  });
+});
+
+describe("primeSessionForkReader", () => {
+  const read = (lines: ReadonlyArray<unknown>) => {
+    const reader = primeSessionForkReader();
+    for (const line of lines) reader.line(typeof line === "string" ? line : JSON.stringify(line));
+    return reader.result();
+  };
+  const header = (version: number | undefined = 3) => ({
+    type: "session",
+    ...(version === undefined ? {} : { version }),
+    id: "019a0000-0000-7000-8000-000000000001",
+    timestamp: "2026-10-17T10:00:00.000Z",
+    cwd: "/workspace",
+  });
+  const entry = (id: string, parentId: string | null, body: Record<string, unknown>) => ({
+    id,
+    parentId,
+    timestamp: "2026-10-17T10:00:01.000Z",
+    ...body,
+  });
+  const message = (id: string, parentId: string | null, value: Record<string, unknown>) =>
+    entry(id, parentId, { type: "message", message: { timestamp: 1, ...value } });
+
+  it("[VAL-FORK-002] lists the user entries Prime's get_fork_messages would return, from real entry shapes", () => {
+    const lines = [
+      header(),
+      entry("m0", null, { type: "model_change", provider: "mistral", modelId: "zai-glm-5-3" }),
+      entry("d0", "m0", {
+        type: "custom_message",
+        customType: "harness_digest",
+        content: "<harness-digest>",
+        display: false,
+      }),
+      message("u1", "d0", { role: "user", content: "plain text prompt" }),
+      message("a1", "u1", {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "plan" },
+          { type: "text", text: "reply" },
+          { type: "toolCall", id: "call-1", name: "ipython", arguments: { code: "1" } },
+        ],
+        stopReason: "toolUse",
+      }),
+      message("t1", "a1", {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "ipython",
+        content: [{ type: "text", text: "1" }],
+        isError: false,
+      }),
+      message("u2", "t1", {
+        role: "user",
+        content: [
+          { type: "text", text: "multi " },
+          { type: "image", data: "aGk=", mimeType: "image/png" },
+          { type: "text", text: "part" },
+        ],
+      }),
+      message("u3", "u2", { role: "user", content: [] }),
+      message("u4", "u3", {
+        role: "user",
+        content: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+      }),
+      message("u5", "u4", { role: "user", content: "" }),
+      entry("g1", "u5", {
+        type: "custom_message",
+        customType: "goal_context",
+        content: "Goal: ship it",
+        display: true,
+      }),
+      message("c1", "g1", { role: "custom", customType: "heartbeat_prompt", content: "tick" }),
+      entry("x1", "c1", { type: "custom", customType: "t3", data: { role: "user" } }),
+      entry("l1", "x1", { type: "label", targetId: "u1", label: "user" }),
+      entry("s1", "l1", { type: "session_info", name: "named" }),
+      entry("k1", "s1", { type: "agent_status", status: { summary: "ok" } }),
+      "",
+      "   ",
+      message("u6", "k1", { role: "user", content: "after a blank line" }),
+    ];
+    assert.deepEqual(read(lines), {
+      type: "messages",
+      messages: [
+        { entryId: "u1", text: "plain text prompt" },
+        { entryId: "u2", text: "multi part" },
+        { entryId: "u6", text: "after a blank line" },
+      ],
+    });
+    // Prime would skip a torn line, but the reader cannot tell a torn line from
+    // a format it does not know, so it gives up rather than guess.
+    assert.deepEqual(read([...lines.slice(0, -1), "{ not json", lines.at(-1)]), {
+      type: "untrusted",
+      reason: "line 19 is not JSON",
+    });
+  });
+
+  it("[VAL-FORK-002] keeps entries from abandoned branches, as Prime's getEntries does", () => {
+    assert.deepEqual(
+      read([
+        header(),
+        message("u1", null, { role: "user", content: "one" }),
+        message("u2", "u1", { role: "user", content: "branch a" }),
+        message("u3", "u1", { role: "user", content: "branch b" }),
+      ]),
+      {
+        type: "messages",
+        messages: [
+          { entryId: "u1", text: "one" },
+          { entryId: "u2", text: "branch a" },
+          { entryId: "u3", text: "branch b" },
+        ],
+      },
+    );
+  });
+
+  it("[VAL-FORK-002] reads a v2 session like v3, since migration only renames hook messages", () => {
+    assert.deepEqual(
+      read([
+        header(2),
+        message("h1", null, { role: "hookMessage", customType: "x", content: "hook" }),
+        message("u1", "h1", { role: "user", content: "one" }),
+      ]),
+      { type: "messages", messages: [{ entryId: "u1", text: "one" }] },
+    );
+  });
+
+  const SENTINEL = "sentinel-session-content";
+  const user = (content: unknown) => message("u1", null, { role: "user", content });
+  const untrustedCases: ReadonlyArray<{
+    readonly label: string;
+    readonly lines: ReadonlyArray<unknown>;
+  }> = [
+    { label: "an empty file", lines: [] },
+    { label: "only blank lines", lines: ["", "  "] },
+    { label: "a torn first line", lines: [`{ "type": "session", "id": "${SENTINEL}`] },
+    {
+      label: "a first entry that is not a session header",
+      lines: [message("u1", null, { role: "user", content: SENTINEL }), header()],
+    },
+    { label: "a header without an id", lines: [{ type: "session", version: 3, cwd: SENTINEL }] },
+    {
+      label: "a v1 session, whose entries Prime gives fresh ids",
+      lines: [{ ...header(), version: undefined }, user("one")],
+    },
+    {
+      label: "a session format newer than Prime 1.0.0's",
+      lines: [header(4), message("u1", null, { role: "user", content: SENTINEL })],
+    },
+    { label: "a version that is not a number", lines: [{ ...header(), version: SENTINEL }] },
+    {
+      label: "a user entry without an id",
+      lines: [header(), { type: "message", message: { role: "user", content: SENTINEL } }],
+    },
+    {
+      label: "a non-blank line that does not parse",
+      lines: [header(), `{ ${SENTINEL}`, user("one")],
+    },
+    { label: "a line that is not an object", lines: [header(), JSON.stringify(SENTINEL)] },
+    { label: "an entry without a string type", lines: [header(), { id: SENTINEL, type: 7 }] },
+    {
+      label: "an entry type outside Prime's session entry union",
+      lines: [header(), entry("f1", null, { type: SENTINEL })],
+    },
+    { label: "a second session header", lines: [header(), header()] },
+    {
+      label: "a message entry without a message",
+      lines: [header(), entry("m1", null, { type: "message", message: SENTINEL })],
+    },
+    {
+      label: "a message role Prime does not define",
+      lines: [header(), message("m1", null, { role: SENTINEL, content: "one" })],
+    },
+    {
+      label: "a hookMessage role in a v3 session, which migration renamed",
+      lines: [header(), message("m1", null, { role: "hookMessage", content: SENTINEL })],
+    },
+    { label: "user content that is neither text nor parts", lines: [header(), user({ SENTINEL })] },
+    {
+      label: "a user content part of an unknown type",
+      lines: [header(), user([{ type: SENTINEL, text: SENTINEL }])],
+    },
+    {
+      label: "a user text part without string text",
+      lines: [header(), user([{ type: "text", value: SENTINEL }])],
+    },
+    {
+      label: "assistant content that is not a part list",
+      lines: [header(), message("a1", null, { role: "assistant", content: SENTINEL })],
+    },
+    {
+      label: "a tool result with a thinking part",
+      lines: [
+        header(),
+        message("t1", null, {
+          role: "toolResult",
+          content: [{ type: "thinking", thinking: SENTINEL }],
+        }),
+      ],
+    },
+  ];
+
+  it.each(untrustedCases)("[VAL-FORK-002] does not trust $label", ({ lines }) => {
+    assert.equal(read(lines).type, "untrusted");
+  });
+
+  it("[VAL-FORK-002] never puts session file content in an untrusted reason", () => {
+    for (const { label, lines } of untrustedCases) {
+      const result = read(lines);
+      assert.equal(result.type, "untrusted", label);
+      if (result.type !== "untrusted") continue;
+      assert.notInclude(result.reason, SENTINEL, label);
+      assert.notInclude(result.reason, "019a0000", label);
+      assert.notInclude(result.reason, "/workspace", label);
+    }
+  });
+
+  it("[VAL-FORK-002] names the line and version, and keeps the first reason", () => {
+    assert.deepEqual(read([header(4), "{ torn"]), {
+      type: "untrusted",
+      reason: "the session uses format version 4, and T3 reads versions 2 to 3",
+    });
+    assert.deepEqual(read([header(), user("one"), "", entry("f1", null, { type: "x" }), "{"]), {
+      type: "untrusted",
+      reason: "line 4 has an entry type T3 does not recognise",
+    });
+  });
+});
