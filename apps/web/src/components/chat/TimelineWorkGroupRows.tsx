@@ -14,7 +14,7 @@ import { memo, use, useEffect, useLayoutEffect, useRef, useState, type ReactNode
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { workEntryDisplayIndicatesToolFailure } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
-import { Minimize2Icon, XIcon } from "lucide-react";
+import { ChevronRightIcon, Minimize2Icon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import {
@@ -82,14 +82,17 @@ export const WorkGroupSection = memo(function WorkGroupSection({
     return <ReasoningTraceContent entries={nonEmptyEntries} />;
   }
   if (isExpandedToolGroup) {
+    // Indenting nests group rows under their header so they don't read as its siblings.
     return (
-      <ExpandedWorkGroupEntries
-        key={`${routeThreadKey}:${anchorKey}`}
-        anchorKey={anchorKey}
-        disclosureAnchorKey={disclosureAnchorKey}
-        entries={nonEmptyEntries}
-        workspaceRoot={workspaceRoot}
-      />
+      <div className="ps-5">
+        <ExpandedWorkGroupEntries
+          key={`${routeThreadKey}:${anchorKey}`}
+          anchorKey={anchorKey}
+          disclosureAnchorKey={disclosureAnchorKey}
+          entries={nonEmptyEntries}
+          workspaceRoot={workspaceRoot}
+        />
+      </div>
     );
   }
 
@@ -131,6 +134,7 @@ function WorkingTimer({ createdAt }: { createdAt: string }) {
 }
 
 const compactWorkEntryHeight = 24;
+const workGroupListContentStyle = { paddingBottom: 1 };
 
 function ExpandedWorkGroupEntries({
   anchorKey,
@@ -249,6 +253,10 @@ function ExpandedWorkGroupEntries({
           keyExtractor={workEntryKey}
           renderItem={renderEntry}
           estimatedItemSize={compactWorkEntryHeight}
+          // LegendList rounds measured rows to whole pixels, so at non-default font
+          // sizes the last row overhangs by up to half a pixel and Chrome shows a
+          // scrollbar for a list that fits.
+          contentContainerStyle={workGroupListContentStyle}
           drawDistance={240}
           recycleItems
           {...(initialScrollIndex ? { initialScrollIndex } : {})}
@@ -628,8 +636,19 @@ function WorkGroupHeader(props: {
         />
       }
       label={
-        <span className={cn("block truncate", props.active && !props.failed && "live-tool-shine")}>
-          {props.label}
+        // A chevron beside the label sets group headers apart from tool rows,
+        // whose disclosure chevron sits at the trailing edge.
+        <span className="flex min-w-0 items-center gap-1">
+          <span className={cn("truncate", props.active && !props.failed && "live-tool-shine")}>
+            {props.label}
+          </span>
+          <ChevronRightIcon
+            aria-hidden
+            className={cn(
+              "size-3.5 shrink-0 text-icon-muted transition-transform duration-200",
+              props.expanded && "rotate-90",
+            )}
+          />
         </span>
       }
       trailing={
