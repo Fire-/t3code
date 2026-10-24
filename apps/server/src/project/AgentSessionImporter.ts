@@ -10,6 +10,7 @@ import {
   AgentSessionSource,
   EventId,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ThreadId,
@@ -89,9 +90,10 @@ function dateTime(value: string): DateTime.Utc {
 function messageEvents(input: {
   readonly threadId: ThreadId;
   readonly index: number;
+  readonly ordinal: number;
   readonly message: AgentSessionScanner.AgentSessionThreadMessage;
 }): ReadonlyArray<OrchestrationV2DomainEvent> {
-  const ordinal = input.index + 1;
+  const ordinal = input.ordinal;
   const suffix = String(input.index).padStart(6, "0");
   const messageId = MessageId.make(`${input.threadId}:${suffix}`);
   const turnItemId = TurnItemId.make(
@@ -163,6 +165,92 @@ function messageEvents(input: {
       payload: turnItem,
     },
   ];
+}
+
+function activityEvent(input: {
+  readonly threadId: ThreadId;
+  readonly thread: AgentSessionScanner.AgentSessionThread;
+  readonly index: number;
+  readonly ordinal: number;
+  readonly entry: AgentSessionScanner.AgentSessionThreadActivity;
+}): OrchestrationV2DomainEvent {
+  const { activity } = input.entry;
+  const key = `${input.threadId}:activity:${String(input.index).padStart(6, "0")}`;
+  const startedAt = dateTime(input.entry.startedAt);
+  const completedAt = dateTime(input.entry.completedAt);
+  const common = {
+    id: TurnItemId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${key}`),
+    threadId: input.threadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: input.ordinal,
+    startedAt,
+    completedAt,
+    updatedAt: completedAt,
+  };
+  const turnItem: OrchestrationV2TurnItem =
+    activity.kind === "tool"
+      ? { ...common, ...activity.item }
+      : activity.kind === "subagent"
+        ? {
+            ...common,
+            type: "subagent",
+            status: activity.status,
+            title: activity.title,
+            // Clients fall back to the item's own fields when no subagent record exists.
+            subagentId: NodeId.make(`${IMPORT_EVENT_PREFIX}:subagent:${key}`),
+            origin: "provider_native",
+            driver: ProviderDriverKind.make(input.thread.source),
+            providerInstanceId: input.thread.providerInstanceId,
+            childThreadId: null,
+            prompt: activity.prompt,
+            result: activity.result,
+          }
+        : {
+            ...common,
+            type: "system_notice",
+            status: "completed",
+            title: activity.message,
+            message: activity.message,
+          };
+  return {
+    id: EventId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${key}`),
+    type: "turn-item.updated",
+    threadId: input.threadId,
+    occurredAt: completedAt,
+    payload: turnItem,
+  };
+}
+
+/** Messages and the activity between them, in transcript order. */
+function historyEvents(
+  threadId: ThreadId,
+  thread: AgentSessionScanner.AgentSessionThread,
+): ReadonlyArray<OrchestrationV2DomainEvent> {
+  const events: Array<OrchestrationV2DomainEvent> = [];
+  let ordinal = 0;
+  let activityIndex = 0;
+  const emitActivitiesBefore = (position: number) => {
+    for (
+      let entry = thread.activities[activityIndex];
+      entry !== undefined && entry.position <= position;
+      entry = thread.activities[++activityIndex]
+    ) {
+      events.push(
+        activityEvent({ threadId, thread, index: activityIndex, ordinal: ++ordinal, entry }),
+      );
+    }
+  };
+  thread.messages.forEach((message, index) => {
+    emitActivitiesBefore(index);
+    events.push(...messageEvents({ threadId, index, ordinal: ++ordinal, message }));
+  });
+  emitActivitiesBefore(Number.POSITIVE_INFINITY);
+  return events;
 }
 
 const make = Effect.gen(function* () {
@@ -362,9 +450,7 @@ const make = Effect.gen(function* () {
                 occurredAt: createdAt,
                 payload: appThread,
               },
-              ...thread.messages.flatMap((message, index) =>
-                messageEvents({ threadId, index, message }),
-              ),
+              ...historyEvents(threadId, thread),
               {
                 id: EventId.make(`${IMPORT_EVENT_PREFIX}:provider-thread:${providerThreadId}`),
                 type: "provider-thread.updated",

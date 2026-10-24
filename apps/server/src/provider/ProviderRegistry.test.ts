@@ -1055,6 +1055,104 @@ it.layer(
       );
     });
 
+    describe("Droid model inventories", () => {
+      const previousProvider = {
+        instanceId: ProviderInstanceId.make("droid"),
+        driver: ProviderDriverKind.make("droid"),
+        status: "ready",
+        enabled: true,
+        installed: true,
+        auth: { status: "unknown" },
+        checkedAt: "2026-10-15T00:00:00.000Z",
+        version: "0.244.0",
+        models: [
+          { slug: "auto", name: "Auto", isCustom: false, capabilities: null },
+          { slug: "claude-opus-5-5", name: "Opus 5.5 (1.6x)", isCustom: false, capabilities: null },
+          { slug: "retired-model", name: "Retired Model", isCustom: false, capabilities: null },
+        ],
+        slashCommands: [],
+        skills: [],
+      } as const satisfies ServerProvider;
+
+      it("[VAL-STATUS-010] replaces the model list on a ready probe so retired slugs disappear", () => {
+        const refreshedProvider = {
+          ...previousProvider,
+          checkedAt: "2026-10-15T00:01:00.000Z",
+          models: previousProvider.models.filter((model) => model.slug !== "retired-model"),
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, refreshedProvider).models,
+          [...refreshedProvider.models],
+        );
+      });
+
+      it("[VAL-STATUS-010] retains the discovered list while an installed probe is degraded", () => {
+        const degradedProvider = {
+          ...previousProvider,
+          status: "warning",
+          checkedAt: "2026-10-15T00:01:00.000Z",
+          models: [],
+          message: "Droid CLI is installed but model discovery failed or timed out.",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, degradedProvider).models,
+          [...previousProvider.models],
+        );
+      });
+
+      it("[VAL-STATUS-010] retains the discovered list during the pending initial probe", () => {
+        const pendingProvider = {
+          ...previousProvider,
+          status: "warning",
+          installed: false,
+          version: null,
+          auth: { status: "unknown" },
+          checkedAt: "2026-10-15T00:01:00.000Z",
+          models: [],
+          message: "Checking Droid CLI availability...",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, pendingProvider).models,
+          [...previousProvider.models],
+        );
+      });
+
+      it("[VAL-STATUS-010] drops the discovered list when Droid is disabled", () => {
+        const disabledProvider = {
+          ...previousProvider,
+          status: "disabled",
+          enabled: false,
+          installed: false,
+          version: null,
+          checkedAt: "2026-10-15T00:01:00.000Z",
+          models: [],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, disabledProvider).models,
+          [],
+        );
+      });
+
+      it("[VAL-STATUS-010] drops the discovered list after an authentication failure", () => {
+        const unauthenticatedProvider = {
+          ...previousProvider,
+          auth: { status: "unauthenticated" },
+          checkedAt: "2026-10-15T00:01:00.000Z",
+          models: [],
+          message: "Droid reported an authentication failure.",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, unauthenticatedProvider).models,
+          [],
+        );
+      });
+    });
+
     describe("Antigravity model inventories", () => {
       const previousProvider = {
         instanceId: ProviderInstanceId.make("antigravity-personal"),
