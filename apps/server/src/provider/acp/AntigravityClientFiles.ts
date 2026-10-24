@@ -31,21 +31,32 @@ const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFil
     const outside = EffectAcpErrors.AcpRequestError.invalidParams(
       `Path '${input.requestPath}' is outside the session workspace.`,
     );
+    const entryExists = (target: string) =>
+      input.fileSystem.readLink(target).pipe(
+        Effect.as(true),
+        Effect.catch(() => input.fileSystem.exists(target)),
+        Effect.orElseSucceed(() => true),
+      );
     const real = yield* input.fileSystem.realPath(resolved).pipe(
       Effect.catch(() =>
         Effect.gen(function* () {
-          // Only a missing file (a new write) falls back to its parent; a
-          // dangling or unreadable link must not be followed on write.
-          const entryExists = yield* input.fileSystem.readLink(resolved).pipe(
-            Effect.as(true),
-            Effect.catch(() => input.fileSystem.exists(resolved)),
-            Effect.orElseSucceed(() => true),
-          );
-          if (entryExists) return yield* outside;
-          const parent = yield* input.fileSystem
-            .realPath(path.dirname(resolved))
-            .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
-          return path.join(parent, path.basename(resolved));
+          // Only missing entries (a new write, possibly into new folders)
+          // resolve through their nearest existing ancestor, so a workspace
+          // reached through a link still contains them; a dangling or
+          // unreadable link must not be followed on write.
+          const missing: Array<string> = [];
+          let current = resolved;
+          while (!(yield* entryExists(current))) {
+            missing.unshift(path.basename(current));
+            const parent = path.dirname(current);
+            if (parent === current) break;
+            const realParent = yield* input.fileSystem
+              .realPath(parent)
+              .pipe(Effect.orElseSucceed(() => undefined));
+            if (realParent !== undefined) return path.join(realParent, ...missing);
+            current = parent;
+          }
+          return yield* outside;
         }),
       ),
     );
