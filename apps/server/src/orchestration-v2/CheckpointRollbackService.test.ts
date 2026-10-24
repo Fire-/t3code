@@ -682,7 +682,7 @@ const seedRollbackHistory = Effect.gen(function* () {
       ),
     ),
   );
-  const rollback = (ordinal: number) =>
+  const rollback = (ordinal: number, options: { readonly restoreFiles?: boolean } = {}) =>
     Effect.gen(function* () {
       const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
       yield* service.execute({
@@ -690,6 +690,7 @@ const seedRollbackHistory = Effect.gen(function* () {
         providerThreadId,
         scopeId,
         checkpointId: checkpointId(ordinal),
+        ...options,
       });
     }).pipe(Effect.provide(serviceLayer));
 
@@ -768,6 +769,37 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
         assert.deepEqual(
           checkpoints.map((checkpoint) => checkpoint.status),
           ["ready", "ready", "ready", "stale", "stale", "stale", "stale", "stale", "ready"],
+        );
+      }),
+    );
+
+    it.effect("rewinds only the conversation to a later run whose checkpoint has no snapshot", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        const sql = yield* SqlClient.SqlClient;
+        // Folders without Git record every checkpoint as missing.
+        yield* sql`UPDATE orchestration_v2_projection_checkpoints
+          SET status = 'missing', payload_json = json_set(payload_json, '$.status', 'missing')
+          WHERE thread_id = ${history.threadId} AND status = 'ready'`;
+
+        yield* history.rollback(2, { restoreFiles: false });
+
+        assert.deepEqual(history.rollbackCounts, [4]);
+        assert.deepEqual(history.restored, []);
+        const runs = yield* sql<{ status: string }>`
+          SELECT status FROM orchestration_v2_projection_runs
+          WHERE thread_id = ${history.threadId} ORDER BY ordinal`;
+        assert.deepEqual(
+          runs.map((run) => run.status),
+          [
+            "completed",
+            "completed",
+            "rolled_back",
+            "rolled_back",
+            "rolled_back",
+            "rolled_back",
+            "rolled_back",
+          ],
         );
       }),
     );
