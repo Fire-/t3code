@@ -35,6 +35,7 @@ import {
   type DroidTokenCounts,
   droidEditDiffCounts,
   droidMcpToolName,
+  droidMessageText,
   droidScriptTitle,
   droidTokenCounts,
   droidToolKind,
@@ -526,37 +527,16 @@ function assistantModelOf(message: Readonly<Record<string, unknown>>): DroidAssi
   };
 }
 
-/**
- * Droid may answer a request with another model than the one asked for. The first reply of each
- * such model in a turn gets one notice; the router asks for no model, so it never reroutes.
- */
-function rerouteNotice(
+function systemNotice(
   state: DroidMapperState,
   ctx: DroidEventContext,
-  answeredBy: DroidAssistantModel,
+  nativeItemId: string,
+  message: string,
   now: DateTime.Utc,
-): DroidMapResult | undefined {
-  const { modelId, apiProvider } = answeredBy;
-  const requested = state.requestedModelId;
-  if (
-    requested === undefined ||
-    modelId === undefined ||
-    modelId === requested ||
-    state.reroutedModels.has(modelId)
-  ) {
-    return undefined;
-  }
-  const message = `Droid answered with ${modelId}${
-    apiProvider === undefined ? "" : ` (${apiProvider})`
-  } instead of the requested ${requested}.`;
-  const nativeItemId = `${ctx.providerTurn.id}:reroute:${modelId}`;
+): DroidMapResult {
   const ordinal = state.nextItemOrdinal;
   return {
-    state: {
-      ...state,
-      nextItemOrdinal: ordinal + 1,
-      reroutedModels: new Set([...state.reroutedModels, modelId]),
-    },
+    state: { ...state, nextItemOrdinal: ordinal + 1 },
     events: [
       nodeEvent(ctx, nativeItemId, "system", "completed", now, now),
       {
@@ -576,6 +556,53 @@ function rerouteNotice(
 }
 
 /**
+ * Droid may answer a request with another model than the one asked for. The first reply of each
+ * such model in a turn gets one notice; the router asks for no model, so it never reroutes. Droid
+ * keeps that model for the session without saying so, and the adapter asks for the thread's model
+ * again on the next turn, which the notice promises.
+ */
+function rerouteNotice(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  answeredBy: DroidAssistantModel,
+  now: DateTime.Utc,
+): DroidMapResult | undefined {
+  const { modelId, apiProvider } = answeredBy;
+  const requested = state.requestedModelId;
+  if (
+    requested === undefined ||
+    modelId === undefined ||
+    modelId === requested ||
+    state.reroutedModels.has(modelId)
+  ) {
+    return undefined;
+  }
+  const message = `Droid answered with ${modelId}${
+    apiProvider === undefined ? "" : ` (${apiProvider})`
+  } instead of the requested ${requested}. Switching back to ${requested} on your next message.`;
+  return systemNotice(
+    { ...state, reroutedModels: new Set([...state.reroutedModels, modelId]) },
+    ctx,
+    `${ctx.providerTurn.id}:reroute:${modelId}`,
+    message,
+    now,
+  );
+}
+
+/** Droid explains a model switch, a failed sign-in and the like in messages only the user sees. */
+function droidNotice(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  message: Readonly<Record<string, unknown>>,
+  now: DateTime.Utc,
+): DroidMapResult {
+  const messageId = asTrimmed(message["id"]);
+  const text = droidMessageText(message["content"]).trim();
+  if (messageId === undefined || text.length === 0) return unchanged(state);
+  return systemNotice(state, ctx, `${ctx.providerTurn.id}:notice:${messageId}`, text, now);
+}
+
+/**
  * The committed assistant message settles what streaming left open and surfaces text blocks
  * that never streamed. Reasoning is only ever shown from its stream.
  */
@@ -586,12 +613,12 @@ function mapCreateMessage(
   now: DateTime.Utc,
 ): DroidMapResult {
   const message = notification["message"];
+  if (!Predicate.isObject(message)) return unchanged(state);
+  if (message["visibility"] === "user_only" && message["role"] !== "assistant") {
+    return droidNotice(state, ctx, message, now);
+  }
   // User messages belong to t3; system, tool, and llm_only messages are plumbing.
-  if (
-    !Predicate.isObject(message) ||
-    message["role"] !== "assistant" ||
-    message["visibility"] === "llm_only"
-  ) {
+  if (message["role"] !== "assistant" || message["visibility"] === "llm_only") {
     return unchanged(state);
   }
   const answeredBy = assistantModelOf(message);

@@ -1808,6 +1808,50 @@ describe("model reroute notice [VAL-HIST-014]", () => {
     });
     assert.deepStrictEqual(notices(events), []);
   });
+
+  it("[VAL-HIST-014] the notice says the next message asks for the requested model again", () => {
+    const { events } = feed([answered("claude-opus-5")], { state: requestedState() });
+    assert.include(notices(events)[0]?.message, `back to ${REQUESTED} on your next message`);
+  });
+});
+
+describe("Droid notices", () => {
+  const droidMessage = (message: Readonly<Record<string, unknown>>) =>
+    ({ type: "create_message", message }) satisfies Notification;
+  const notices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+    turnItems(events).flatMap((item) => (item.type === "system_notice" ? [item] : []));
+
+  it("a user_only system message is a completed system_notice carrying its text", () => {
+    const { events } = feed([
+      droidMessage({
+        id: "notice-1",
+        role: "system",
+        visibility: "user_only",
+        content: [{ type: "text", text: "  Opus 5.5's safety checks blocked this request.  " }],
+      }),
+    ]);
+    const [notice, ...others] = notices(events);
+    assert.strictEqual(others.length, 0);
+    assert.strictEqual(notice?.message, "Opus 5.5's safety checks blocked this request.");
+    assert.strictEqual(notice?.status, "completed");
+    assert.strictEqual(
+      ofType(events, "node.updated").find((event) => event.node.id === notice?.nodeId)?.node.kind,
+      "system",
+    );
+  });
+
+  it("a user_only message without text and an llm_only system message add nothing", () => {
+    const { events } = feed([
+      droidMessage({ id: "hook", role: "user", visibility: "user_only", content: [] }),
+      droidMessage({
+        id: "task-completion:1",
+        role: "system",
+        visibility: "llm_only",
+        content: [{ type: "text", text: "a task report" }],
+      }),
+    ]);
+    assert.deepStrictEqual(events, []);
+  });
 });
 
 describe("compaction item [VAL-HIST-009]", () => {

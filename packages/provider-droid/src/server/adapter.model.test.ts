@@ -682,6 +682,22 @@ describe("DroidAdapterV2 reroute notice", () => {
         assert.strictEqual(noticesOf(opened.all).length, 2, "the router picks its own model");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+
+  it.effect(
+    "[VAL-HIST-014] Droid keeps a rerouted model without announcing it, so the next turn asks for the thread's model again",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid({ availableModels: MODELS });
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened);
+
+        yield* replyTurn(opened, fake, thread, 1, [OTHER_MODEL]);
+        yield* replyTurn(opened, fake, thread, 2, [MODEL]);
+        yield* replyTurn(opened, fake, thread, 3, [MODEL]);
+
+        assert.deepStrictEqual(settingsFrames(fake), [frame(MODEL, "high")]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 });
 
 describe("DroidAdapterV2 model switch and spec mode", () => {

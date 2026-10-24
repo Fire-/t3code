@@ -1381,6 +1381,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           );
           return;
         }
+        const answeredBy = mapped.state.assistantModel?.modelId;
+        if (answeredBy !== undefined && mapped.state.reroutedModels.has(answeredBy)) {
+          // Droid keeps the model it rerouted to for the session and sends no `settings_updated`.
+          known = { ...known, modelId: answeredBy };
+        }
         turn.mapper = mapped.state;
         yield* emitMapped(state, mapped.events);
         if (notification.type === "tool_call") yield* projectTodoList(state, turn, notification);
