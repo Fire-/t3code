@@ -21,10 +21,12 @@ import {
   type DroidMapperState,
   createDroidTurnState,
   droidCompactionEvents,
+  droidTodoSteps,
   droidTurnTokenUsage,
   flushDroidStreams,
   mapDroidNotification,
   mapDroidProposedPlan,
+  mapDroidTodoList,
   settleDroidTurn,
 } from "./events.ts";
 
@@ -1645,6 +1647,97 @@ describe("mapDroidProposedPlan", () => {
       [PlanId.make("plan-2"), "active"],
     ]);
     assert.strictEqual(second.state.nextItemOrdinal, 103);
+  });
+});
+
+describe("todo lists", () => {
+  const ctx = context();
+  const state = createDroidTurnState({ firstItemOrdinal: 101 });
+  const steps = droidTodoSteps({
+    todos: "1. [completed] Read the adapter\n2. [in_progress] Map TodoWrite\n3. [pending] Ship it",
+  });
+
+  it("reads TodoWrite's numbered lines as steps", () => {
+    assert.deepStrictEqual(steps, [
+      { id: "todo-0", text: "Read the adapter", status: "completed" },
+      { id: "todo-1", text: "Map TodoWrite", status: "running" },
+      { id: "todo-2", text: "Ship it", status: "pending" },
+    ]);
+    assert.deepStrictEqual(droidTodoSteps({ todos: "no list here\n2. [pending]   " }), []);
+    assert.deepStrictEqual(droidTodoSteps({ todos: [] }), []);
+  });
+
+  it("a TodoWrite call is a todo_list plan and a finished item", () => {
+    const result = mapDroidTodoList(
+      state,
+      ctx,
+      { planId: PlanId.make("todos-1"), sourceId: TOOL_ID, steps, previous: undefined },
+      at(5),
+    );
+    assert.deepStrictEqual(
+      result.events.map((event) => event.type),
+      ["node.updated", "plan.updated", "turn_item.updated"],
+    );
+    const nodeId = derive.nodeFromProviderItem({
+      driver: DROID,
+      nativeItemId: `provider-turn-1:todos:${TOOL_ID}`,
+    });
+    assert.deepStrictEqual(result.plan, {
+      id: PlanId.make("todos-1"),
+      threadId: ThreadId.make("thread-1"),
+      runId: RunId.make("run-1"),
+      nodeId,
+      kind: "todo_list",
+      status: "active",
+      steps,
+    });
+    const [item] = turnItems(result.events);
+    assert.strictEqual(item?.type, "todo_list");
+    if (item?.type !== "todo_list") return;
+    assert.strictEqual(item.planId, PlanId.make("todos-1"));
+    assert.strictEqual(item.ordinal, 101);
+    assert.strictEqual(result.state.nextItemOrdinal, 102);
+  });
+
+  it("a resent call updates its list in place", () => {
+    const input = { planId: PlanId.make("todos-1"), sourceId: TOOL_ID, steps, previous: undefined };
+    const first = mapDroidTodoList(state, ctx, input, at(1));
+    const done = steps.map((step) => ({ ...step, status: "completed" as const }));
+    const second = mapDroidTodoList(
+      first.state,
+      ctx,
+      { ...input, steps: done, previous: first.plan },
+      at(2),
+    );
+    assert.deepStrictEqual(
+      ofType(second.events, "plan.updated").map((event) => event.plan.status),
+      ["completed"],
+    );
+    assert.strictEqual(turnItems(second.events)[0]?.ordinal, 101);
+    assert.strictEqual(second.state.nextItemOrdinal, 102);
+  });
+
+  it("a later call supersedes the previous list", () => {
+    const first = mapDroidTodoList(
+      state,
+      ctx,
+      { planId: PlanId.make("todos-1"), sourceId: TOOL_ID, steps, previous: undefined },
+      at(1),
+    );
+    const second = mapDroidTodoList(
+      first.state,
+      ctx,
+      { planId: PlanId.make("todos-2"), sourceId: TOOL_ID_2, steps, previous: first.plan },
+      at(2),
+    );
+    assert.deepStrictEqual(
+      ofType(second.events, "plan.updated").map((event) => [event.plan.id, event.plan.status]),
+      [
+        [PlanId.make("todos-1"), "superseded"],
+        [PlanId.make("todos-2"), "active"],
+      ],
+    );
+    assert.strictEqual(turnItems(second.events)[0]?.ordinal, 102);
   });
 });
 

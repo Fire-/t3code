@@ -60,8 +60,10 @@ import {
   createDroidTurnState,
   DROID_ZERO_COUNTS,
   droidCompactionEvents,
+  droidTodoSteps,
   mapDroidNotification,
   mapDroidProposedPlan,
+  mapDroidTodoList,
   settleDroidTurn,
   type DroidEventContext,
   type DroidMapperState,
@@ -184,8 +186,8 @@ const DroidProviderCapabilitiesV2 = {
     approvalsCanOriginateFromSubagents: false,
   },
   planning: {
-    emitsPlanUpdated: false,
-    emitsTodoList: false,
+    emitsPlanUpdated: true,
+    emitsTodoList: true,
     emitsProposedPlan: true,
     supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
@@ -308,6 +310,8 @@ interface DroidThreadState {
   history: ReadonlyArray<DroidHistoryMessage>;
   /** The thread's newest proposed plan; a later proposal supersedes it. */
   latestPlan: OrchestrationV2PlanArtifact | undefined;
+  /** The thread's newest todo list; a later TodoWrite supersedes it. */
+  latestTodoList: OrchestrationV2PlanArtifact | undefined;
   /**
    * The Task subagents of this session by tool use id. The roster of pending background tasks is
    * derived from the running background ones, so the two cannot disagree.
@@ -1379,6 +1383,36 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         turn.mapper = mapped.state;
         yield* emitMapped(state, mapped.events);
+        if (notification.type === "tool_call") yield* projectTodoList(state, turn, notification);
+      });
+
+      /** A TodoWrite call also becomes the thread's todo list, which clients track as tasks. */
+      const projectTodoList = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        notification: DroidNotification,
+      ) {
+        const toolUse = field(notification, "toolUse");
+        const sourceId = field(toolUse, "id");
+        if (field(toolUse, "name") !== "TodoWrite" || !Predicate.isString(sourceId)) return;
+        const steps = droidTodoSteps(field(toolUse, "input"));
+        if (steps.length === 0) return;
+        const planId =
+          turn.mapper.todoLists.get(sourceId)?.planId ??
+          (yield* idAllocator.allocate.plan({
+            threadId: turn.turnInput.threadId,
+            runId: turn.turnInput.runId,
+            driver: DROID_PROVIDER,
+          }));
+        const mapped = mapDroidTodoList(
+          turn.mapper,
+          eventContext(state, turn),
+          { planId, sourceId, steps, previous: state.latestTodoList },
+          yield* DateTime.now,
+        );
+        turn.mapper = mapped.state;
+        state.latestTodoList = mapped.plan;
+        yield* emitMapped(state, mapped.events);
       });
 
       const projectProposedPlan = Effect.fnUntraced(function* (
@@ -1667,6 +1701,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           activeTurn: null,
           history: [],
           latestPlan: undefined,
+          latestTodoList: undefined,
           subagents: new Map(),
         };
         noteStartedSession(settings, result);
@@ -1703,6 +1738,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           activeTurn: null,
           history: visibleDroidHistory(field(field(result, "session"), "messages")),
           latestPlan: undefined,
+          latestTodoList: undefined,
           subagents: new Map(),
         };
         noteLoadedSession(result);
@@ -2660,6 +2696,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             activeTurn: null,
             history: visibleDroidHistory(field(field(forked.loaded, "session"), "messages")),
             latestPlan: undefined,
+            latestTodoList: undefined,
             subagents: new Map(),
           };
           return providerThread;

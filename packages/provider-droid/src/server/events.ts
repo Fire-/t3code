@@ -11,6 +11,7 @@ import {
   type NodeId,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2PlanArtifact,
+  type OrchestrationV2PlanStep,
   type OrchestrationV2ProviderRef,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
@@ -145,6 +146,11 @@ export interface DroidMapperState {
    * that is a refusal the user chose, so the tool settles `cancelled` rather than `failed`.
    */
   readonly declinedToolUseIds: ReadonlySet<string>;
+  /** This turn's todo lists by TodoWrite tool use. */
+  readonly todoLists: ReadonlyMap<
+    string,
+    { readonly planId: PlanId; readonly ordinal: number; readonly startedAt: DateTime.Utc }
+  >;
 }
 
 export interface DroidMapResult {
@@ -179,6 +185,7 @@ export function createDroidTurnState(input: {
     turnTokenUsage: undefined,
     interruptRequested: false,
     declinedToolUseIds: new Set(),
+    todoLists: new Map(),
   };
 }
 
@@ -1013,6 +1020,101 @@ export function mapDroidProposedPlan(
     },
   );
   return { state: { ...state, nextItemOrdinal: state.nextItemOrdinal + 1 }, events, plan };
+}
+
+// ---------------------------------------------------------------------------
+// Todo lists
+// ---------------------------------------------------------------------------
+
+const DROID_TODO_LINE = /^\s*\d+\.\s*\[([a-z_]+)\]\s*(.*?)\s*$/u;
+
+/** A TodoWrite call's list. Droid sends `todos` as numbered `N. [status] text` lines. */
+export function droidTodoSteps(input: unknown): ReadonlyArray<OrchestrationV2PlanStep> {
+  const todos = Predicate.isObject(input) ? input["todos"] : undefined;
+  if (!Predicate.isString(todos)) return [];
+  const steps: Array<OrchestrationV2PlanStep> = [];
+  for (const line of todos.split("\n")) {
+    const match = DROID_TODO_LINE.exec(line);
+    const text = match?.[2];
+    if (match === null || text === undefined || text.length === 0) continue;
+    steps.push({
+      id: `todo-${steps.length}`,
+      text,
+      status:
+        match[1] === "completed" ? "completed" : match[1] === "in_progress" ? "running" : "pending",
+    });
+  }
+  return steps;
+}
+
+/**
+ * The todo list a TodoWrite call wrote: a `todo_list` item and its artifact, which supersedes
+ * the thread's previous list. `sourceId` is the tool use; Droid can resend a tool call as its
+ * input fills in, so a repeat updates the same item. The adapter allocates `planId` for a new
+ * `sourceId` and keeps the returned `plan` as the next call's `previous`.
+ */
+export function mapDroidTodoList(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  input: {
+    readonly planId: PlanId;
+    readonly sourceId: string;
+    readonly steps: ReadonlyArray<OrchestrationV2PlanStep>;
+    readonly previous: OrchestrationV2PlanArtifact | undefined;
+  },
+  now: DateTime.Utc,
+): DroidMapResult & { readonly plan: OrchestrationV2PlanArtifact } {
+  const nativeItemId = `${ctx.providerTurn.id}:todos:${input.sourceId}`;
+  const known = state.todoLists.get(input.sourceId);
+  const ordinal = known?.ordinal ?? state.nextItemOrdinal;
+  const base = itemBase(ctx, nativeItemId, ordinal, known?.startedAt ?? now, now);
+  const plan: OrchestrationV2PlanArtifact = {
+    id: input.planId,
+    threadId: ctx.threadId,
+    runId: ctx.runId,
+    nodeId: base.nodeId,
+    kind: "todo_list",
+    status: input.steps.every((step) => step.status === "completed") ? "completed" : "active",
+    steps: input.steps,
+  };
+  const events: Array<ProviderAdapterV2Event> = [];
+  if (input.previous !== undefined && input.previous.id !== input.planId) {
+    events.push({
+      type: "plan.updated",
+      driver: DROID_DRIVER,
+      plan: { ...input.previous, status: "superseded" },
+    });
+  }
+  events.push(
+    nodeEvent(ctx, nativeItemId, "todo_list", "completed", base.startedAt, now),
+    { type: "plan.updated", driver: DROID_DRIVER, plan },
+    {
+      type: "turn_item.updated",
+      driver: DROID_DRIVER,
+      turnItem: {
+        ...base,
+        status: "completed",
+        title: null,
+        completedAt: now,
+        type: "todo_list",
+        planId: input.planId,
+        steps: input.steps,
+      },
+    },
+  );
+  return {
+    state: {
+      ...state,
+      nextItemOrdinal: known === undefined ? state.nextItemOrdinal + 1 : state.nextItemOrdinal,
+      todoLists: withEntry(state.todoLists, input.sourceId, {
+        planId: input.planId,
+        ordinal,
+        startedAt: base.startedAt,
+      }),
+    },
+    events,
+    plan,
+  };
 }
 
 // ---------------------------------------------------------------------------

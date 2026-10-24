@@ -220,12 +220,14 @@ describe("V2 session presentation", () => {
         updatedAt: "2026-06-20T00:00:02.000Z",
       },
     ];
-    const timelineEntries: TimelineEntry[] = messages.map((message): TimelineEntry => ({
-      id: message.id,
-      kind: "message",
-      createdAt: message.createdAt,
-      message,
-    }));
+    const timelineEntries: TimelineEntry[] = messages.map(
+      (message): TimelineEntry => ({
+        id: message.id,
+        kind: "message",
+        createdAt: message.createdAt,
+        message,
+      }),
+    );
 
     const targets = deriveRevertTurnCountByUserMessageId({
       timelineEntries,
@@ -1099,8 +1101,8 @@ describe("composer tasks drawer", () => {
     steps: openList.steps.map((step) => ({ ...step, status: "completed" as const })),
   };
 
-  it.each(["claudeAgent", "codex"])(
-    "shows %s tasks through the run lifecycle, retaining unfinished tasks only for Claude",
+  it.each(["claudeAgent", "droid", "codex"])(
+    "shows %s tasks through the run lifecycle, retaining unfinished tasks only for Claude and Droid",
     (driver) => {
       const firstRun = run("run-1", 1, driver);
       const settled = {
@@ -1117,7 +1119,7 @@ describe("composer tasks drawer", () => {
         completedList,
       );
 
-      const retainedList = driver === "claudeAgent" ? openList : null;
+      const retainedList = driver === "codex" ? null : openList;
       expect(selectComposerTasksPlan(settled, openList, firstRun.id, true)).toBe(retainedList);
       expect(selectComposerTasksPlan(settled, completedList, firstRun.id, true)).toBeNull();
 

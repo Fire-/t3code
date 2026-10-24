@@ -697,6 +697,54 @@ describe("DroidAdapterV2 plan mode", () => {
     );
   });
 
+  describe("todo lists", () => {
+    const todoWrite = (toolUseId: string, todos: string) => ({
+      type: "tool_call",
+      toolUse: { type: "tool_use", id: toolUseId, name: "TodoWrite", input: { todos } },
+    });
+
+    it.effect("TodoWrite becomes the thread's todo list, superseded by the next turn's", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened);
+        yield* startTurn(opened.runtime, thread);
+        yield* fake.current().emit(todoWrite("todo-1", "1. [in_progress] Read\n2. [pending] Fix"));
+        yield* fake.current().emit(todoWrite("todo-1", "1. [completed] Read\n2. [pending] Fix"));
+        yield* fake.current().emit(completed(1));
+        yield* opened.takeEvent(isTerminal);
+        yield* startTurn(opened.runtime, thread, { runOrdinal: 2 });
+        yield* fake.current().emit(todoWrite("todo-2", "1. [completed] Read\n2. [completed] Fix"));
+        yield* fake.current().emit(completed(2));
+        yield* opened.takeEvent(isTerminal);
+
+        const plans = plansOf(opened.all);
+        assert.deepStrictEqual(
+          plans.map((plan) => [
+            plan.kind,
+            plan.status,
+            plan.kind === "todo_list" ? plan.steps.map((step) => step.status) : [],
+          ]),
+          [
+            ["todo_list", "active", ["running", "pending"]],
+            ["todo_list", "active", ["completed", "pending"]],
+            ["todo_list", "superseded", ["completed", "pending"]],
+            ["todo_list", "completed", ["completed", "completed"]],
+          ],
+        );
+        assert.strictEqual(plans[0]?.id, plans[1]?.id);
+        assert.notStrictEqual(plans[1]?.id, plans[3]?.id);
+        const todoItems = turnItemsOf(opened.all).filter((item) => item.type === "todo_list");
+        assert.strictEqual(new Set(todoItems.map((item) => item.id)).size, 2);
+        assert.isTrue(
+          turnItemsOf(opened.all).some(
+            (item) => item.type === "dynamic_tool" && item.toolName === "TodoWrite",
+          ),
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
   describe("after the reply", () => {
     it.effect(
       "[VAL-PLAN-005] the spike's post-reply frames end the plan turn completed, and a settings_updated to auto is not applied",
