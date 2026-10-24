@@ -103,7 +103,7 @@ function parseDiscoveredModels(data: unknown, state: unknown): ReadonlyArray<Ser
   const activeProvider = recordString(activeModel, "provider");
   const activeModelId = recordString(activeModel, "id");
   const seen = new Set<string>();
-  const parsed: Array<ServerProviderModel> = [];
+  const parsed: Array<{ readonly id: string; readonly model: ServerProviderModel }> = [];
   for (const model of models) {
     const provider = recordString(model, "provider");
     const id = recordString(model, "id");
@@ -112,19 +112,31 @@ function parseDiscoveredModels(data: unknown, state: unknown): ReadonlyArray<Ser
     if (seen.has(slug)) continue;
     seen.add(slug);
     parsed.push({
-      slug,
-      name: recordString(model, "name") ?? slug,
-      subProvider: provider,
-      isCustom: false,
-      capabilities: thinkingCapabilitiesForPrimeModel(
-        model,
-        provider === activeProvider && id === activeModelId
-          ? recordString(state, "thinkingLevel")
-          : undefined,
-      ),
+      id,
+      model: {
+        slug,
+        name: recordString(model, "name") ?? slug,
+        subProvider: provider,
+        isCustom: false,
+        capabilities: thinkingCapabilitiesForPrimeModel(
+          model,
+          provider === activeProvider && id === activeModelId
+            ? recordString(state, "thinkingLevel")
+            : undefined,
+        ),
+      },
     });
   }
-  return parsed;
+  // Prime's catalog can give two ids the same name (mistral's devstral-2512
+  // and devstral-latest are both "Devstral 2"), which leaves pickers and
+  // agents unable to tell them apart.
+  const nameCounts = new Map<string, number>();
+  for (const { model } of parsed) {
+    nameCounts.set(model.name, (nameCounts.get(model.name) ?? 0) + 1);
+  }
+  return parsed.map(({ id, model }) =>
+    (nameCounts.get(model.name) ?? 0) > 1 ? { ...model, name: `${model.name} (${id})` } : model,
+  );
 }
 
 const makePrimeDiscoveryConnection = Effect.fnUntraced(function* (

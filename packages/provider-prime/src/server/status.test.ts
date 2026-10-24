@@ -408,6 +408,32 @@ describe("checkPrimeProviderStatus", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("[VAL-STATUS-004] models that share a name are told apart by their id", () =>
+    Effect.gen(function* () {
+      // Prime's catalog names both of these "Devstral 2".
+      const devstral = { ...MINISTRAL_3B, name: "Devstral 2" };
+      const snapshot = yield* runStatus(
+        makeFakePrime({
+          models: [
+            { ...devstral, id: "devstral-2512" },
+            { ...devstral, id: "devstral-latest" },
+            MINISTRAL_3B,
+          ],
+        }),
+        { PRIME_AGENT_CODING_AGENT_DIR: yield* makeAgentDir(true) },
+      );
+      assert.deepEqual(
+        snapshot.models.map((model) => model.name),
+        [
+          "Prime default",
+          "Devstral 2 (devstral-2512)",
+          "Devstral 2 (devstral-latest)",
+          "Ministral 3B (latest)",
+        ],
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("[VAL-STATUS-005] a missing binary reports not installed with Prime's installer", () =>
     Effect.gen(function* () {
       const snapshot = yield* runStatus(makeFakePrime({ missingBinary: true }), {});
