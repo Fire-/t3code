@@ -1,7 +1,7 @@
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { subagentResumedSince } from "./V2LifecycleRow.logic";
+import { subagentInlineDetail, subagentResumedSince } from "./V2LifecycleRow.logic";
 
 const failedAt = "2026-10-09T12:21:00.000Z";
 const beforeFailure = DateTime.makeUnsafe("2026-10-09T12:05:00.000Z");
@@ -28,5 +28,34 @@ describe("subagentResumedSince", () => {
     expect(subagentResumedSince({ status: "failed", startedAt: beforeFailure }, failedAt)).toBe(
       false,
     );
+  });
+});
+
+describe("subagentInlineDetail", () => {
+  it("shows the prompt and report of a subagent that has no thread to open", () => {
+    expect(
+      subagentInlineDetail({
+        hasThread: false,
+        prompt: "  Find where models are labelled.  ",
+        report: "\nShort answer: no.\n",
+      }),
+    ).toEqual({ prompt: "Find where models are labelled.", report: "Short answer: no." });
+  });
+
+  it("leaves a subagent with its own thread to that thread", () => {
+    expect(subagentInlineDetail({ hasThread: true, prompt: "Prompt", report: "Report" })).toBe(
+      null,
+    );
+  });
+
+  it("drops the generic end-of-task line, and has nothing to show without text", () => {
+    expect(
+      subagentInlineDetail({
+        hasThread: false,
+        prompt: "Prompt",
+        report: "Child task ended with status completed",
+      }),
+    ).toEqual({ prompt: "Prompt", report: null });
+    expect(subagentInlineDetail({ hasThread: false, prompt: " ", report: null })).toBe(null);
   });
 });
