@@ -218,6 +218,15 @@ export function droidScriptTitle(script: string): string {
   return names.size === 0 ? "Script" : `Script: ${[...names].join(", ")}`;
 }
 
+/**
+ * Droid names an MCP tool `<server>___<tool>`. Clients recognize T3's own tools, and show other
+ * servers' tools as integrations, in the `mcp__<server>__<tool>` form Claude uses.
+ */
+export function droidMcpToolName(name: string): string {
+  const match = /^(.+?)___(.+)$/.exec(name);
+  return match === null ? name : `mcp__${match[1]}__${match[2]}`;
+}
+
 export function droidToolPath(input: unknown): string | undefined {
   if (!Predicate.isObject(input)) return undefined;
   return asTrimmed(input["file_path"]) ?? asTrimmed(input["path"]);

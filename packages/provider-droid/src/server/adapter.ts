@@ -15,6 +15,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type ProviderInstanceId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -34,6 +35,9 @@ import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
@@ -47,6 +51,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 
 import { DroidSettings } from "../settings.ts";
@@ -470,6 +475,47 @@ function dropDiscardedSteer(turn: ActiveDroidTurn, notification: DroidNotificati
   }
 }
 
+/**
+ * Droid ends every call to a session MCP server after 3 minutes and takes no per-server timeout
+ * for one, while T3's waiting tools default to 10.
+ */
+const DROID_T3_TOOL_INSTRUCTIONS = `
+
+### T3 tools in Droid
+
+Droid names the T3 tools \`t3-code___<tool>\`, for example \`t3-code___delegate_task\`, and may list them as deferred tools to load first. Droid cancels any T3 tool call after 3 minutes, so pass \`timeoutMs\` of at most 150000 to \`request_secret\`, \`t3_thread_wait\`, and \`delegate_task\` with mode "wait", and call again when the wait times out. For long work prefer \`delegate_task\` with mode "async": the child's completion wakes this thread.`;
+
+/**
+ * Droid keeps session MCP servers out of its config files, so `initialize_session` and every
+ * `load_session` pass the thread's T3 server: a process that loads a session without one keeps
+ * whatever it had, and a new process has none.
+ */
+const droidT3McpServers = (session: McpProviderSessionConfig | undefined) =>
+  session === undefined
+    ? {}
+    : {
+        mcpServers: [
+          {
+            type: "http",
+            name: "t3-code",
+            url: session.endpoint,
+            headers: [{ name: "Authorization", value: session.authorizationHeader }],
+          },
+        ],
+      };
+
+/**
+ * Droid stores the system prompt with the session at `initialize_session`; loads and forks keep it
+ * and nothing can change it later.
+ */
+const droidSystemPrompt = (hasT3Mcp: boolean) => ({
+  type: "preset",
+  preset: "droid",
+  append:
+    buildRuntimeInstructions({ harness: "Droid" }) +
+    (hasT3Mcp ? T3_CODE_ORCHESTRATION_INSTRUCTIONS + DROID_T3_TOOL_INSTRUCTIONS : ""),
+});
+
 const cancelReply = (kind: PendingDroidRequestKind): unknown =>
   kind.type === "permission"
     ? { selectedOption: kind.request.cancelOptionId }
@@ -484,6 +530,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
   const pathService = yield* Path.Path;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
+  const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const authSignal = yield* DroidAuthSignal;
   const hostEnvironment = yield* HostProcess.Environment;
   const processEnvironment = definedDroidEnvironment(options.environment);
@@ -585,6 +632,15 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const logWarning = (message: string) => Effect.logWarning(redactor.text(message));
       const logDebug = (message: string) => Effect.logDebug(redactor.text(message));
       const request = (method: string, params: object = {}) => rpc.request(method, params);
+      /** `threadId` is the app thread the session will serve; its T3 tools act on that thread. */
+      const t3McpServers = (threadId: ThreadId | null) =>
+        mcpSessions.read(threadId ?? input.threadId).pipe(Effect.map(droidT3McpServers));
+      const loadSession = (sessionId: string, threadId: ThreadId | null) =>
+        t3McpServers(threadId).pipe(
+          Effect.flatMap((servers) =>
+            request("droid.load_session", { sessionId, loadAllMessages: true, ...servers }),
+          ),
+        );
       const boundNativeId = () => threadState?.providerThread.nativeThreadRef?.nativeId;
 
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
@@ -1602,10 +1658,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         row: OrchestrationV2ProviderThread | undefined,
         appThreadId: OrchestrationV2ProviderThread["appThreadId"],
       ) {
+        const servers = yield* t3McpServers(appThreadId);
         const result = yield* request("droid.initialize_session", {
           machineId: "default",
           cwd,
           ...droidSettingsParams(settings),
+          ...servers,
+          systemPrompt: droidSystemPrompt("mcpServers" in servers),
         });
         const sessionId = field(result, "sessionId");
         if (!Predicate.isString(sessionId) || sessionId.length === 0) {
@@ -1642,10 +1701,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         row: OrchestrationV2ProviderThread,
         appThreadId: OrchestrationV2ProviderThread["appThreadId"],
       ) {
-        const result = yield* request("droid.load_session", {
-          sessionId: nativeId,
-          loadAllMessages: true,
-        }).pipe(
+        const result = yield* loadSession(nativeId, appThreadId).pipe(
           Effect.tapError((error) =>
             logWarning(`Droid could not load session ${nativeId}: ${describeFailure(error)}`),
           ),
@@ -2326,10 +2382,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         turn: ActiveDroidTurn,
         nativeId: string,
       ) {
-        const result = yield* request("droid.load_session", {
-          sessionId: nativeId,
-          loadAllMessages: true,
-        });
+        const result = yield* loadSession(nativeId, state.providerThread.appThreadId);
         noteLoadedSession(result);
         state.history = visibleDroidHistory(field(field(result, "session"), "messages"));
         // The counts belong to the retired session.
@@ -2514,7 +2567,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         const hostedId = hosted?.providerThread.nativeThreadRef?.nativeId;
         if (hosted === null || hostedId === undefined || hostedId === null) return;
         known = {};
-        yield* request("droid.load_session", { sessionId: hostedId, loadAllMessages: true }).pipe(
+        yield* loadSession(hostedId, hosted.providerThread.appThreadId).pipe(
           Effect.map(noteLoadedSession),
           Effect.catch((error) =>
             Effect.sync(() => {
@@ -2567,9 +2620,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           if (wakePending()) {
             return yield* protocolError("Cannot fork a Droid session while a wake is pending");
           }
-          const load = (sessionId: string) =>
-            request("droid.load_session", { sessionId, loadAllMessages: true });
-
+          // The process goes on serving the fork, so even the source loads with the target's tools.
+          const load = (sessionId: string) => loadSession(sessionId, forkInput.targetThreadId);
           const sourceLoaded = yield* load(sourceId).pipe(
             Effect.tapError((error) =>
               logWarning(`Droid could not load session ${sourceId}: ${describeFailure(error)}`),
@@ -2788,6 +2840,7 @@ export type DroidAdapterV2DriverEnv =
   | FileSystem.FileSystem
   | Path.Path
   | IdAllocator.IdAllocatorV2
+  | McpProviderSessions.McpProviderSessions
   | ProviderHost.ProviderHost;
 
 export const DroidAdapterV2Driver: ProviderAdapterDriver<DroidSettings, DroidAdapterV2DriverEnv> = {

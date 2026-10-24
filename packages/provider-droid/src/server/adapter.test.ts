@@ -17,8 +17,10 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import { AgentScope, type AgentScopeShape } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -31,6 +33,7 @@ import {
   DROID_INSTANCE_ID,
   ensure,
   isTerminal,
+  issueT3Mcp,
   layerTest,
   makeAdapter,
   makeProviderThread,
@@ -286,6 +289,11 @@ describe("DroidAdapterV2", () => {
             modelId: MODEL,
             reasoningEffort: "high",
             autonomyLevel: "off",
+            systemPrompt: {
+              type: "preset",
+              preset: "droid",
+              append: buildRuntimeInstructions({ harness: "Droid" }),
+            },
           });
           assert.strictEqual(thread.id, PROVIDER_THREAD_ID);
           const sessionId = fake.current().sessionId();
@@ -533,6 +541,49 @@ describe("DroidAdapterV2", () => {
             "droid.initialize_session",
           ]);
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("T3 MCP server", () => {
+    it.effect("a new session gets the thread's T3 server and the orchestration instructions", () =>
+      Effect.gen(function* () {
+        const mcpServers = yield* issueT3Mcp();
+        const fake = yield* makeFakeDroid();
+        const opened = yield* openRuntime(fake);
+        yield* ensure(opened);
+
+        const params = requestsOf(fake, "droid.initialize_session")[0]?.params ?? {};
+        assert.deepStrictEqual(params["mcpServers"], mcpServers);
+        const systemPrompt = asRecord(params["systemPrompt"]);
+        assert.strictEqual(systemPrompt["preset"], "droid");
+        const append = String(systemPrompt["append"]);
+        assert.isTrue(append.startsWith(buildRuntimeInstructions({ harness: "Droid" })));
+        assert.include(append, T3_CODE_ORCHESTRATION_INSTRUCTIONS);
+        assert.include(append, "`t3-code___delegate_task`");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("resume passes the T3 server, which Droid does not keep with the session", () =>
+      Effect.gen(function* () {
+        const mcpServers = yield* issueT3Mcp();
+        const fake = yield* makeFakeDroid({
+          sessions: {
+            "stored-session": { settings: FAKE_DROID_DEFAULT_SETTINGS, messages: [] },
+          },
+        });
+        const opened = yield* openRuntime(fake);
+        yield* opened.runtime.resumeThread({
+          providerThread: yield* makeProviderThread("stored-session"),
+          threadId: THREAD_ID,
+          modelSelection: selection("high"),
+          runtimePolicy: policy(),
+        });
+        assert.deepStrictEqual(requestsOf(fake, "droid.load_session")[0]?.params, {
+          sessionId: "stored-session",
+          loadAllMessages: true,
+          mcpServers,
+        });
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 

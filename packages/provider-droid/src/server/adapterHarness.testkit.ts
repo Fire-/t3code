@@ -5,6 +5,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert } from "@effect/vitest";
 import {
+  EnvironmentId,
   NodeId,
   ProviderInstanceId,
   ProviderSessionId,
@@ -35,6 +36,7 @@ import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
@@ -52,6 +54,7 @@ import { type FakeDroid, type FakeDroidProcess } from "./fakeDroid.testkit.ts";
 export const layerTest = Layer.mergeAll(
   NodeServices.layer,
   IdAllocator.layer,
+  McpProviderSessions.layer,
   TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
 );
 
@@ -77,6 +80,33 @@ export const policy = (
   interactionMode: "default" | "plan" = "default",
 ) =>
   ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({ runtimeMode, interactionMode, cwd: null });
+
+const T3_MCP_ENDPOINT = "http://127.0.0.1:3773/mcp";
+
+/**
+ * Issues a thread's T3 MCP credential, as the session manager does before it opens a session, and
+ * returns the `mcpServers` Droid should then be passed.
+ */
+export const issueT3Mcp = Effect.fnUntraced(function* (threadId = THREAD_ID, token = "test-token") {
+  const sessions = yield* McpProviderSessions.McpProviderSessions;
+  yield* sessions.set({
+    environmentId: EnvironmentId.make("environment-droid-test"),
+    threadId,
+    providerSessionId: `mcp:${threadId}`,
+    providerInstanceId: DROID_INSTANCE_ID,
+    endpoint: T3_MCP_ENDPOINT,
+    authorizationHeader: `Bearer ${token}`,
+    browserToolsAvailable: false,
+  });
+  return [
+    {
+      type: "http",
+      name: "t3-code",
+      url: T3_MCP_ENDPOINT,
+      headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+    },
+  ];
+});
 
 export const captureLogs = () => {
   const entries: Array<{ readonly level: string; readonly text: string }> = [];

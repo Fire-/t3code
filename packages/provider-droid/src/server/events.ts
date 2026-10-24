@@ -32,6 +32,7 @@ import * as Struct from "effect/Struct";
 import {
   type DroidTokenCounts,
   droidEditDiffCounts,
+  droidMcpToolName,
   droidScriptTitle,
   droidTokenCounts,
   droidToolKind,
@@ -755,14 +756,16 @@ function toolItemEvent(
     };
   }
 
+  const toolName = droidMcpToolName(tool.name);
   return {
     type: "turn_item.updated",
     driver: DROID_DRIVER,
     turnItem: {
       ...shared,
       type: "dynamic_tool",
-      ...mcpToolPresentation({ toolName: tool.name }),
-      toolName: tool.name,
+      title: toolName,
+      ...mcpToolPresentation({ toolName }),
+      toolName,
       input: tool.input,
       ...(resultText === undefined ? {} : { output: resultText }),
     },

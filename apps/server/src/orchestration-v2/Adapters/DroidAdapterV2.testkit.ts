@@ -483,6 +483,30 @@ export function layer<E, R>(input: {
   );
 }
 
+/**
+ * The system prompt is T3's own instruction text, which the adapter tests pin, so a transcript
+ * takes whatever prompt the adapter sends rather than the one it was recorded with.
+ */
+function withAnySystemPrompt(transcript: DroidRpcReplayTranscript): DroidRpcReplayTranscript {
+  return {
+    ...transcript,
+    entries: transcript.entries.map((entry) =>
+      entry.type === "expect_outbound" &&
+      isRecord(entry.frame) &&
+      entry.frame.method === "droid.initialize_session" &&
+      isRecord(entry.frame.params)
+        ? {
+            ...entry,
+            frame: {
+              ...entry.frame,
+              params: { ...entry.frame.params, systemPrompt: DROID_REPLAY_ANY },
+            },
+          }
+        : entry,
+    ),
+  };
+}
+
 export const DroidOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness<
   DroidRpcReplayTranscript,
   DroidOrchestratorReplayHarnessError
@@ -490,6 +514,7 @@ export const DroidOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness
   driver: DROID_PROVIDER,
   decodeTranscript: (transcript: ProviderReplayTranscript) =>
     decodeDroidRpcReplayTranscript(transcript).pipe(
+      Effect.map(withAnySystemPrompt),
       Effect.mapError(
         (cause) =>
           new DroidReplayTranscriptDecodeError({

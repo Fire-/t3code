@@ -632,6 +632,29 @@ describe("tool calls and results [VAL-TURN-008]", () => {
     }
   });
 
+  it("names an MCP tool the way clients recognize T3 tools and integrations", () => {
+    const final = (name: string) => {
+      const { events } = feed([toolCall(name, { taskId: "task-1" }), toolResult("done")]);
+      const item = turnItems(events).at(-1);
+      assert.strictEqual(item?.type, "dynamic_tool", name);
+      return item?.type === "dynamic_tool" ? item : undefined;
+    };
+
+    const t3 = final("t3-code___task_status");
+    assert.strictEqual(t3?.toolName, "mcp__t3-code__task_status");
+    assert.strictEqual(t3?.title, "mcp__t3-code__task_status");
+    assert.isUndefined(t3?.toolSource, "the client renders T3 tools itself");
+
+    const other = final("mini___slow_count");
+    assert.strictEqual(other?.toolName, "mcp__mini__slow_count");
+    assert.strictEqual(other?.title, "slow count");
+    assert.deepStrictEqual(other?.toolSource, {
+      key: "mcp:mini",
+      name: "mini",
+      kind: "integration",
+    });
+  });
+
   it("[VAL-TURN-008] shows a Script call as JavaScript titled by the tools it calls", () => {
     const script = [
       'const page = await tools.FetchUrl({ url: "https://example.com" });',

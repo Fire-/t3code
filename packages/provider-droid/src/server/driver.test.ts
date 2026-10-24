@@ -32,6 +32,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { fallbackTextGenerationModelSelection } from "@t3tools/shared/serverSettings";
 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
@@ -48,6 +49,7 @@ const layerTest = Layer.mergeAll(
     runBackgroundWork: false,
   }),
   IdAllocator.layer,
+  McpProviderSessions.layer,
   ProviderLatestVersions.layer,
   Layer.succeed(
     HttpClient.HttpClient,

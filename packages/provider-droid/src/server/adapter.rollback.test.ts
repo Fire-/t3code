@@ -480,10 +480,12 @@ describe("DroidAdapterV2 rollback", () => {
           assert.strictEqual(fake.current().sessionId(), newId);
           assert.deepStrictEqual(messageIdsOf(fake, newId), []);
           assert.strictEqual(snapshot.providerThread.id, PROVIDER_THREAD_ID);
+          const first = requestsOf(fake, "droid.initialize_session")[0]?.params;
           assert.deepStrictEqual(requestsOf(fake, "droid.initialize_session")[1]?.params, {
             machineId: "default",
-            cwd: requestsOf(fake, "droid.initialize_session")[0]?.params["cwd"],
+            cwd: first?.["cwd"],
             ...AUTO_SETTINGS,
+            systemPrompt: first?.["systemPrompt"],
           });
 
           const before = methodsOf(fake).length;

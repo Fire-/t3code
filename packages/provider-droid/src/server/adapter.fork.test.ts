@@ -18,6 +18,7 @@ import { DROID_PROVIDER } from "./adapter.ts";
 import {
   adapterFromSavedBlock,
   ensure,
+  issueT3Mcp,
   layerTest,
   makeOfferQueue,
   makeProviderThread,
@@ -30,6 +31,7 @@ import {
   requestsOf,
   runTurn,
   startTurn,
+  THREAD_ID,
   wakeMessage,
 } from "./adapterHarness.testkit.ts";
 import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid, type FakeDroid } from "./fakeDroid.testkit.ts";
@@ -187,6 +189,24 @@ describe("DroidAdapterV2 fork", () => {
           "the orchestrator persists the returned thread; nothing is published for it",
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("a fork loads the source and the rewound copy with the target thread's T3 server", () =>
+    Effect.gen(function* () {
+      yield* issueT3Mcp(THREAD_ID, "source-token");
+      const targetServers = yield* issueT3Mcp(TARGET_THREAD_ID, "target-token");
+      const fake = yield* storedSource();
+      const opened = yield* openRuntime(fake);
+      const { source, turns } = yield* sourceOnStoredSession();
+
+      yield* opened.runtime.forkThread(forkInput(source, { turns, target: turns[0]?.id }));
+
+      assert.deepStrictEqual(methodsOf(fake), REWOUND_METHODS);
+      assert.deepStrictEqual(
+        requestsOf(fake, "droid.load_session").map((request) => request.params["mcpServers"]),
+        [targetServers, targetServers],
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
