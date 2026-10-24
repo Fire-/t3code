@@ -1,8 +1,10 @@
+import { selectEnvironmentQueryData } from "@t3tools/client-runtime/state/runtime";
 import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import {
   toolCallLines,
@@ -21,7 +23,9 @@ import { useRenderedAppearance } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
 import { resolveDiffThemeName } from "../../lib/diffRendering";
 import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
+import { orchestrationEnvironment } from "../../state/orchestration";
 import { useTurnItemDetail } from "../../state/queries";
+import { useEnvironmentQuerySelector } from "../../state/query";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { Button } from "../ui/button";
@@ -242,14 +246,36 @@ function ToolCallBody(
 function ToolCallFrame(props: {
   readonly command?: string;
   readonly args?: unknown;
+  readonly output: string | null;
+  /** The command whose streamed output replaces `output`. */
+  readonly streamedCommand?:
+    | {
+        readonly environmentId: EnvironmentId;
+        readonly threadId: ThreadId;
+        readonly itemId: TurnItemId;
+      }
+    | undefined;
   readonly children: ReactNode;
 }) {
   const theme = useRenderedAppearance();
   const call = toolCallLines({ command: props.command, args: props.args });
-  const copyText =
+  // Shares CommandOutputPanel's subscription. Streaming re-renders this frame, but React
+  // skips the unchanged children element, so the body does not re-render with it.
+  const streamed = useEnvironmentQuerySelector(
+    props.streamedCommand
+      ? orchestrationEnvironment.v2.commandOutput({
+          environmentId: props.streamedCommand.environmentId,
+          input: { threadId: props.streamedCommand.threadId, itemId: props.streamedCommand.itemId },
+        })
+      : null,
+    selectEnvironmentQueryData,
+  );
+  const input =
     call.command ??
     call.argsText ??
     (props.args === undefined ? "" : JSON.stringify(props.args, null, 2));
+  const output = props.streamedCommand ? (streamed?.output.text ?? null) : props.output;
+  const copyText = [input, output ? `Output:\n${output}` : ""].filter(Boolean).join("\n\n");
   return (
     <MarkdownCodeBlock
       code={copyText}
@@ -295,7 +321,19 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "command_execution" ? (
-        <ToolCallFrame command={item.input}>
+        <ToolCallFrame
+          command={item.input}
+          output={outputState.output}
+          streamedCommand={
+            streamsOutput
+              ? {
+                  environmentId: props.environmentId,
+                  threadId: props.projectedItem.sourceThreadId,
+                  itemId: props.projectedItem.sourceItemId,
+                }
+              : undefined
+          }
+        >
           <ToolCallBody
             command={item.input}
             exitCode={item.exitCode}
@@ -409,7 +447,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "dynamic_tool" ? (
-        <ToolCallFrame args={item.input}>
+        <ToolCallFrame args={item.input} output={outputState.output}>
           <ToolCallBody
             toolName={item.toolName}
             args={item.input}
