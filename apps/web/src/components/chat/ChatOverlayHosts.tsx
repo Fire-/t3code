@@ -183,6 +183,7 @@ export function BranchRestoreConfirmHost(props: {
 interface PendingRevert {
   readonly turnCount: number;
   readonly messageId: MessageId;
+  readonly canRestoreFiles: boolean;
 }
 
 const revertConfirmAtom = makeThreadOverlayAtom<PendingRevert>("revert-confirm");
@@ -213,14 +214,18 @@ export function RevertConfirmHost(props: {
           <AlertDialogTitle>Edit from here?</AlertDialogTitle>
           <AlertDialogDescription>
             Rewind chat to before this message. Your prompt and attachments return to the composer.
-            “Revert files too” also undoes your own edits.
+            {pending?.canRestoreFiles === false
+              ? " Files stay as they are: there is no file snapshot for this point."
+              : " “Revert files too” also undoes your own edits."}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
-          <Button variant="destructive-outline" onClick={() => confirm(true)}>
-            Revert files too
-          </Button>
+          {pending?.canRestoreFiles === false ? null : (
+            <Button variant="destructive-outline" onClick={() => confirm(true)}>
+              Revert files too
+            </Button>
+          )}
           <Button onClick={() => confirm(false)}>Revert and keep changes</Button>
         </AlertDialogFooter>
       </AlertDialogPopup>

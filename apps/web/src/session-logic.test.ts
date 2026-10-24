@@ -271,7 +271,10 @@ describe("V2 session presentation", () => {
           },
         };
       });
-    const checkpoint = (ordinal: number, status: "ready" | "stale" = "ready") => ({
+    const checkpoint = (
+      ordinal: number,
+      status: "ready" | "missing" | "error" | "stale" = "ready",
+    ) => ({
       runId: runId(ordinal),
       checkpointTurnCount: ordinal,
       checkpointRef: `checkpoint-${ordinal}` as never,
@@ -369,6 +372,12 @@ describe("V2 session presentation", () => {
           }),
         ),
       ).toEqual({ "user-1": 0, "user-3": 2 });
+    });
+
+    it("edits from checkpoints without a file snapshot", () => {
+      expect(
+        targets([1, 2, 3], [checkpoint(1, "missing"), checkpoint(2, "error"), checkpoint(3)]),
+      ).toEqual({ "user-1": 0, "user-2": 1, "user-3": 2 });
     });
 
     it("hides edit when the predecessor is unavailable or the run is unsettled", () => {

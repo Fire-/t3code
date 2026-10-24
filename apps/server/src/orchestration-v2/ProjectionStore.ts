@@ -42,6 +42,7 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
+  canRollbackToCheckpoint,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -5099,13 +5100,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               rootNodes: [],
               staleCheckpoints: [],
             };
+            // The rollback service applies the stricter file-restore rule.
             if (
               providerThread === undefined ||
               providerThread.providerSessionId === null ||
               checkpoint === undefined ||
               scope === undefined ||
               checkpoint.scopeId !== scope.id ||
-              checkpoint.status !== "ready" ||
+              !canRollbackToCheckpoint(checkpoint.status, false) ||
               providerThread.id !== thread.activeProviderThreadId ||
               providerThread.providerInstanceId !== thread.modelSelection.instanceId
             )
@@ -6126,14 +6128,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         `;
           return yield* Effect.forEach(rows, (row) =>
             decodeThreadPayload(row.payload_json).pipe(
-              Effect.map((thread): ProjectionThreadPullRequests => ({
-                id: thread.id,
-                projectId: thread.projectId,
-                lineage: thread.lineage,
-                settledOverride: thread.settledOverride,
-                settledAt: thread.settledAt,
-                pullRequests: thread.pullRequests ?? [],
-              })),
+              Effect.map(
+                (thread): ProjectionThreadPullRequests => ({
+                  id: thread.id,
+                  projectId: thread.projectId,
+                  lineage: thread.lineage,
+                  settledOverride: thread.settledOverride,
+                  settledAt: thread.settledAt,
+                  pullRequests: thread.pullRequests ?? [],
+                }),
+              ),
             ),
           );
         },
@@ -6762,14 +6766,16 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   DateTime.toEpochMillis(left.updatedAt) -
                     DateTime.toEpochMillis(right.updatedAt) || left.id.localeCompare(right.id),
               )
-              .map((thread): ProjectionThreadPullRequests => ({
-                id: thread.id,
-                projectId: thread.projectId,
-                lineage: thread.lineage,
-                settledOverride: thread.settledOverride,
-                settledAt: thread.settledAt,
-                pullRequests: thread.pullRequests ?? [],
-              })),
+              .map(
+                (thread): ProjectionThreadPullRequests => ({
+                  id: thread.id,
+                  projectId: thread.projectId,
+                  lineage: thread.lineage,
+                  settledOverride: thread.settledOverride,
+                  settledAt: thread.settledAt,
+                  pullRequests: thread.pullRequests ?? [],
+                }),
+              ),
           ),
         ),
       getLimitRecoveryCandidates: (options) =>
@@ -7147,7 +7153,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             checkpoint === undefined ||
             scope === undefined ||
             checkpoint.scopeId !== scope.id ||
-            checkpoint.status !== "ready" ||
+            !canRollbackToCheckpoint(checkpoint.status, false) ||
             providerThread.id !== thread.activeProviderThreadId ||
             providerThread.providerInstanceId !== thread.modelSelection.instanceId
           )
