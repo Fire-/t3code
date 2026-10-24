@@ -203,6 +203,12 @@ export function FetchedToolOutput(props: {
   );
 }
 
+// Scripts, file contents, and other large arguments get a height-capped block of their own
+// instead of growing the inspector without bound after their key.
+function isBlockToolArg(value: string): boolean {
+  return value.length > 300 || value.includes("\n");
+}
+
 function ToolCallBody(
   props: ToolOutputState & {
     readonly command?: string;
@@ -224,6 +230,8 @@ function ToolCallBody(
               <span className="text-muted-foreground">{key} </span>
               {key === "code" && isJavaScriptReplTool(props.toolName) ? (
                 <StructuredValue value={value} language="typescript" />
+              ) : isBlockToolArg(value) ? (
+                <StructuredValue value={value} />
               ) : (
                 value
               )}

@@ -154,6 +154,10 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
     item?.type === "dynamic_tool" ? dynamicToolTitle(item.toolName, item.input, item.title) : null;
   if (title) return title;
   const compactDetail = entry.detail?.trim();
+  // A multi-line prompt is a code cell or script that collapses into one unreadable row label;
+  // the full prompt stays in the inspector.
+  const approvalTitle = item?.type === "approval_request" ? item.title?.trim() : undefined;
+  if (approvalTitle && /[\r\n]/.test(compactDetail ?? "")) return approvalTitle;
   const detailIsSearchOutput =
     (action === "code-search" || action === "search") && /[\r\n]/.test(compactDetail ?? "");
   if (compactDetail && !providerRetry && action !== "read" && !detailIsSearchOutput) {
