@@ -74,9 +74,24 @@ export class AgentSessionImportProjectChangedError extends Schema.TaggedError<Ag
   }
 }
 
+export const AgentSessionImportSkipReason = Schema.Literals([
+  "import-limit",
+  "too-large",
+  "changed",
+  "unreadable",
+  "other-folder",
+  "failed",
+]);
+export type AgentSessionImportSkipReason = typeof AgentSessionImportSkipReason.Type;
+
 export const AgentSessionImportResult = Schema.Struct({
   importedCount: NonNegativeInt,
+  // Sessions with nothing to import are not failures; they count in `emptyCount` instead.
   skippedCount: NonNegativeInt,
+  emptyCount: Schema.optional(NonNegativeInt),
+  skippedReasons: Schema.optional(
+    Schema.Array(Schema.Struct({ reason: AgentSessionImportSkipReason, count: NonNegativeInt })),
+  ),
 });
 export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
 

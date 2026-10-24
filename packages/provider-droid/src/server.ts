@@ -7,6 +7,7 @@ export {
 export {
   DROID_HOME_DIRECTORY,
   DROID_SESSIONS_DIRECTORY,
+  droidSessionParentId,
   droidTranscriptEntries,
   droidTranscriptMessage,
   foldDroidTranscriptFields,

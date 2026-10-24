@@ -66,13 +66,24 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
+export type NativeThreadClaim = Pick<
+  OrchestrationV2ProviderThread,
+  "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+> & {
+  /**
+   * Native threads that carry this one's history on, such as forks and rewinds. Another thread
+   * owning one of them owns this history too, unless it is one of `ownersToIgnore`.
+   */
+  readonly continuations?: {
+    readonly nativeIds: ReadonlyArray<string>;
+    readonly ownersToIgnore: ReadonlyArray<ThreadId>;
+  };
+};
+
 export interface EventSinkV2Shape {
   readonly write: (input: {
     /** Return no events if another thread owns this native session at commit time. */
-    readonly unlessNativeThreadOwned?: Pick<
-      OrchestrationV2ProviderThread,
-      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
-    >;
+    readonly unlessNativeThreadOwned?: NativeThreadClaim;
     /**
      * Places the batch's turn items after the rest of their run's items, in event order, moving
      * any that already have a position.
@@ -88,10 +99,7 @@ export interface EventSinkV2Shape {
      * The batch must not also change that run's lifecycle.
      */
     readonly updateDelegatedCompletionOnly?: boolean;
-    readonly unlessNativeThreadOwned?: Pick<
-      OrchestrationV2ProviderThread,
-      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
-    >;
+    readonly unlessNativeThreadOwned?: NativeThreadClaim;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -417,13 +425,24 @@ const layerBase: Layer.Layer<
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {
+            const continuations = imported.continuations;
             const owners = yield* sql`
               SELECT provider_thread_id
               FROM orchestration_v2_projection_provider_threads
               WHERE driver = ${imported.driver}
                 AND provider_instance_id = ${imported.providerInstanceId}
                 AND thread_id IS NOT ${imported.appThreadId}
-                AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
+                AND (
+                  json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
+                  ${
+                    continuations === undefined || continuations.nativeIds.length === 0
+                      ? sql``
+                      : sql`OR (
+                          json_extract(payload_json, '$.nativeThreadRef.nativeId') IN ${sql.in(continuations.nativeIds)}
+                          AND ${continuations.ownersToIgnore.length === 0 ? sql`1` : sql`thread_id NOT IN ${sql.in(continuations.ownersToIgnore)}`}
+                        )`
+                  }
+                )
               LIMIT 1
             `;
             if (owners.length > 0) return { committed: [], outcomes: [] };

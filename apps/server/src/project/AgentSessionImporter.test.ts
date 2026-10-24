@@ -363,7 +363,11 @@ it.effect(
       const threadId = importId(source);
       const importer = yield* makeImporter([source]);
       yield* sql`CREATE TEMP TRIGGER fail_import BEFORE INSERT ON orchestration_events WHEN NEW.event_type = 'message.updated' BEGIN SELECT RAISE(ABORT, 'test publication failure'); END`;
-      expect(yield* importer.run).toEqual({ importedCount: 0, skippedCount: 1 });
+      expect(yield* importer.run).toEqual({
+        importedCount: 0,
+        skippedCount: 1,
+        skippedReasons: [{ reason: "failed", count: 1 }],
+      });
       expect(yield* events.read({ threadId }).pipe(Stream.runCollect)).toEqual([]);
       expect(yield* Effect.option(projections.getThread(threadId))).toEqual(Option.none());
       expect(yield* runtimes.list()).toEqual([]);
@@ -371,7 +375,11 @@ it.effect(
       yield* sql`DROP TRIGGER fail_import`;
 
       yield* sql`CREATE TEMP TRIGGER fail_runtime BEFORE INSERT ON provider_session_runtime BEGIN SELECT RAISE(ABORT, 'test runtime failure'); END`;
-      expect(yield* importer.run).toEqual({ importedCount: 0, skippedCount: 1 });
+      expect(yield* importer.run).toEqual({
+        importedCount: 0,
+        skippedCount: 1,
+        skippedReasons: [{ reason: "failed", count: 1 }],
+      });
       const committed = yield* events.read({ threadId }).pipe(Stream.runCollect);
       expect(committed).toHaveLength(6);
       expect(importer.published).toHaveLength(6);
@@ -393,6 +401,84 @@ it.effect(
         runtimePayload: { importedTranscripts: [source.source] },
       });
     }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("counts empty sessions apart from sessions that could not be imported", () =>
+  Effect.gen(function* () {
+    const skipped = (reason: AgentSessionScanner.AgentSessionSkipReason) =>
+      ({ _tag: "Skipped", reason }) as const;
+    const importer = yield* makeImporter([
+      skipped("empty"),
+      skipped("too-large"),
+      candidate(CODEX_MODEL_SELECTION, "imported"),
+      skipped("empty"),
+      skipped("too-large"),
+      skipped("changed"),
+    ]);
+    expect(yield* importer.run).toEqual({
+      importedCount: 1,
+      skippedCount: 3,
+      emptyCount: 2,
+      skippedReasons: [
+        { reason: "too-large", count: 2 },
+        { reason: "changed", count: 1 },
+      ],
+    });
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect(
+  "skips sessions a T3 thread rewound into another session, but not ones forked into an import",
+  () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const droid = { instanceId: ProviderInstanceId.make("droid"), model: "claude-opus-5-5" };
+      const session = (id: string, continuedIn?: ReadonlyArray<string>) => ({
+        ...candidate(droid, id, "droid"),
+        ...(continuedIn === undefined ? {} : { continuedIn }),
+      });
+      yield* seedOwner(session("rewound"));
+      const rolledBack = session("rolled-back", ["rewound", "rewound-unowned"]);
+      const cliParent = session("cli-parent", ["cli-fork"]);
+      const importer = yield* makeImporter([session("cli-fork"), rolledBack, cliParent]);
+
+      expect(yield* importer.run).toEqual({ importedCount: 2, skippedCount: 0 });
+      expect(yield* Effect.option(projections.getThread(importId(rolledBack)))).toEqual(
+        Option.none(),
+      );
+      expect((yield* projections.getThread(importId(cliParent))).historyOrigin).toBe("v1_import");
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("imports the session's reasoning effort with its model", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const droid = { instanceId: ProviderInstanceId.make("droid"), model: "claude-opus-5-5" };
+    const base = candidate(droid, "droid-effort", "droid");
+    const source = { ...base, thread: { ...base.thread, reasoningEffort: "xhigh" } };
+    expect(yield* (yield* makeImporter([source])).run).toEqual({
+      importedCount: 1,
+      skippedCount: 0,
+    });
+    expect((yield* projections.getThread(importId(base))).modelSelection).toEqual({
+      ...droid,
+      options: [{ id: "reasoningEffort", value: "xhigh" }],
+    });
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("imports a worktree session onto its worktree and branch", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const base = candidate(CODEX_MODEL_SELECTION, "in-worktree", "codex");
+    const worktree = { path: "/repo-worktrees/feature", branch: "feature/wt" };
+    yield* (yield* makeImporter([{ ...base, thread: { ...base.thread, worktree } }])).run;
+    const thread = yield* projections.getThread(importId(base));
+    expect({ worktreePath: thread.worktreePath, branch: thread.branch }).toEqual({
+      worktreePath: worktree.path,
+      branch: worktree.branch,
+    });
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
 
 it.effect("imports activity between messages as settled turn items in transcript order", () =>

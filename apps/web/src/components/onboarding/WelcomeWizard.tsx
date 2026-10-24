@@ -1,6 +1,7 @@
 import { useAuth } from "@clerk/react";
 import { useAtomValue } from "@effect/atom-react";
 import type {
+  AgentSessionImportResult,
   AgentSessionProjectCandidate,
   EnvironmentId,
   ProjectId,
@@ -98,6 +99,7 @@ import { WizardPanel, WizardSteps, WizardPopup, WizardHeader } from "../ui/wizar
 import { Dialog } from "../ui/dialog";
 import { toastManager } from "../ui/toast";
 import { cn } from "../../lib/utils";
+import { summarizeImport, type ImportSummary } from "./importSummary";
 import { formatRelativeTime } from "../../timestampFormat";
 
 type WizardStep = "connection" | "agents" | "import";
@@ -161,11 +163,7 @@ export function WelcomeWizard({
     setStep("agents");
   };
   const stageIndex = step === "agents" ? 1 : step === "import" ? 2 : 0;
-  const finish = (
-    projectRef?: ScopedProjectRef,
-    importWarning?: string,
-    importedThreadCount = 0,
-  ) => {
+  const finish = (projectRef?: ScopedProjectRef, importSummary?: ImportSummary) => {
     if (finishingPromiseRef.current !== null) return finishingPromiseRef.current;
     if (completionErrorToastIdRef.current !== null) {
       toastManager.close(completionErrorToastIdRef.current);
@@ -179,17 +177,23 @@ export function WelcomeWizard({
           completionErrorToastIdRef.current = null;
         }
         await onDone(projectRef);
-        if (importWarning) {
+        const importedThreadCount = importSummary?.importedThreadCount ?? 0;
+        const importNote = importSummary?.note ?? "";
+        if (importSummary?.warning) {
           toastManager.add({
             type: "warning",
             title: "Some history was not imported",
-            description: importWarning,
+            description: importSummary.warning,
             timeout: 0,
           });
-        } else if (importedThreadCount > 0) {
+        } else if (importedThreadCount > 0 || importNote !== "") {
           toastManager.add({
-            type: "success",
-            title: `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}`,
+            type: importedThreadCount > 0 ? "success" : "info",
+            title:
+              importedThreadCount > 0
+                ? `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}`
+                : "No threads to import",
+            ...(importNote === "" ? {} : { description: importNote }),
           });
         }
         return true;
@@ -1184,8 +1188,7 @@ function ImportStep({
   readonly setIsImporting: (value: boolean) => void;
   readonly onDone: (
     projectRef?: ScopedProjectRef,
-    importWarning?: string,
-    importedThreadCount?: number,
+    importSummary?: ImportSummary,
   ) => Promise<boolean>;
 }) {
   const { environments } = useEnvironments();
@@ -1194,8 +1197,7 @@ function ImportStep({
   const importThreads = useAtomCommand(agentSessionImport, { reportFailure: false });
   const projects = useProjects();
   const [selectedPaths, setSelectedPaths] = useState<ReadonlySet<string> | null>(null);
-  const importWarningRef = useRef("");
-  const importedThreadCountRef = useRef(0);
+  const importSummaryRef = useRef<ImportSummary | undefined>(undefined);
   const [landingProject, setLandingProject] = useState<ScopedProjectRef | null>(null);
   const importedProjectsRef = useRef(new Map<string, ScopedProjectRef>());
   const projectsWithImportedHistoryRef = useRef(new Map<string, ScopedProjectRef>());
@@ -1223,11 +1225,9 @@ function ImportStep({
     ) {
       // oxlint-disable-next-line react/set-state-in-effect -- The landing project is known only once the projects subscription delivers it.
       setLandingProject(null);
-      void onDone(landingProject, importWarningRef.current, importedThreadCountRef.current).then(
-        (completed) => {
-          if (!completed) setIsImporting(false);
-        },
-      );
+      void onDone(landingProject, importSummaryRef.current).then((completed) => {
+        if (!completed) setIsImporting(false);
+      });
     }
   }, [landingProject, onDone, projects, setIsImporting]);
 
@@ -1260,7 +1260,7 @@ function ImportStep({
       importedProjectsRef.current,
     );
     if (projectRef === undefined) {
-      void onDone(undefined, importWarningRef.current, importedThreadCountRef.current);
+      void onDone(undefined, importSummaryRef.current);
       return;
     }
     setIsImporting(true);
@@ -1286,8 +1286,7 @@ function ImportStep({
       return;
     }
     setIsImporting(true);
-    importWarningRef.current = "";
-    importedThreadCountRef.current = 0;
+    importSummaryRef.current = undefined;
     lastImportSelectionRef.current = selection.map((candidate) => candidate.key);
     const importGeneration = importGenerationRef.current;
     const importedProjects = importedProjectsRef.current;
@@ -1296,8 +1295,7 @@ function ImportStep({
       importedProjects.size > 0
         ? selection.filter((candidate) => importedProjects.has(candidate.key)).length
         : 0;
-    let importedThreadCount = 0;
-    let skippedThreadCount = 0;
+    const threadImportResults: Array<AgentSessionImportResult> = [];
     const refreshEnvironments = new Set<EnvironmentId>();
     for (const candidate of selection) {
       const { environmentId } = candidate;
@@ -1365,8 +1363,7 @@ function ImportStep({
         return;
       }
       if (threadImportResult._tag === "Success") {
-        importedThreadCount += threadImportResult.value.importedCount;
-        skippedThreadCount += threadImportResult.value.skippedCount;
+        threadImportResults.push(threadImportResult.value);
         if (threadImportResult.value.importedCount > 0) {
           projectsWithImportedHistoryRef.current.set(
             candidate.key,
@@ -1386,18 +1383,10 @@ function ImportStep({
       if (refreshEnvironments.has(scan.environmentId)) scan.refresh();
     }
     setIsImporting(false);
-    importedThreadCountRef.current = importedThreadCount;
-    if (importedProjectsCount < selection.length) {
-      if (importedThreadCount > 0 && skippedThreadCount > 0) {
-        importWarningRef.current = `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}. ${skippedThreadCount} ${skippedThreadCount === 1 ? "thread" : "threads"} could not be imported.`;
-      } else if (skippedThreadCount > 0) {
-        importWarningRef.current = `${skippedThreadCount} ${skippedThreadCount === 1 ? "thread could" : "threads could"} not be imported.`;
-      } else if (importedThreadCount > 0) {
-        importWarningRef.current = `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}. Some thread history could not be imported.`;
-      } else {
-        importWarningRef.current = "Could not import thread history.";
-      }
-    }
+    importSummaryRef.current = summarizeImport(
+      threadImportResults,
+      importedProjectsCount >= selection.length,
+    );
     finishAfterImport();
   };
 

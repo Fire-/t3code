@@ -291,6 +291,13 @@ export function droidTranscriptEntries(
   });
 }
 
+/** The session a fork or rewind copied, which keeps the history it had then. */
+export function droidSessionParentId(
+  record: Readonly<Record<string, unknown>>,
+): string | undefined {
+  return record["type"] === "session_start" ? trimmedString(record["parent"]) : undefined;
+}
+
 /** A subagent's own session. Its parent's transcript already holds the task and its report. */
 export function isDroidSubagentSessionStart(record: Readonly<Record<string, unknown>>): boolean {
   return (

@@ -716,7 +716,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("skips linked git worktrees and reports the origin of real checkouts", () =>
+    it.effect("merges linked git worktrees into their checkout and reports real origins", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -736,6 +736,10 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const worktreeGitDir = path.join(repo, ".git", "worktrees", "wt");
         yield* fileSystem.makeDirectory(worktreeGitDir, { recursive: true });
         yield* fileSystem.writeFileString(path.join(worktreeGitDir, "commondir"), "../..\n");
+        yield* fileSystem.writeFileString(
+          path.join(worktreeGitDir, "HEAD"),
+          "ref: refs/heads/feature/wt\n",
+        );
         yield* fileSystem.writeFileString(
           path.join(worktree, ".git"),
           `gitdir: ${worktreeGitDir}\n`,
@@ -764,19 +768,85 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const result = yield* runScan({ claudeHomePath, codexHomePath });
 
         expect(
-          result.candidates.map((candidate) => ({ path: candidate.path, git: candidate.git })),
+          result.candidates.map((candidate) => ({
+            path: candidate.path,
+            git: candidate.git,
+            threadCount: candidate.threadCount,
+          })),
         ).toEqual([
           {
             path: submodule,
             git: { remoteKey: "github.com/pingdotgg/vendor", repository: "pingdotgg/vendor" },
+            threadCount: 1,
           },
-          { path: noRemote, git: { remoteKey: null, repository: null } },
-          { path: plain, git: null },
+          { path: noRemote, git: { remoteKey: null, repository: null }, threadCount: 1 },
+          { path: plain, git: null, threadCount: 1 },
           {
             path: repo,
             git: { remoteKey: "github.com/pingdotgg/t3code", repository: "pingdotgg/t3code" },
+            threadCount: 2,
           },
         ]);
+      }),
+    );
+
+    it.effect("imports a checkout's linked worktree sessions with their worktree", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const repo = yield* makeTempDir("t3code-workspace-repo-");
+        const worktree = yield* makeTempDir("t3code-workspace-worktree-");
+        yield* fileSystem.makeDirectory(path.join(repo, ".git"));
+        yield* fileSystem.writeFileString(path.join(repo, ".git", "config"), "[core]\n");
+        const worktreeGitDir = path.join(repo, ".git", "worktrees", "wt");
+        yield* fileSystem.makeDirectory(worktreeGitDir, { recursive: true });
+        yield* fileSystem.writeFileString(path.join(worktreeGitDir, "commondir"), "../..\n");
+        yield* fileSystem.writeFileString(
+          path.join(worktreeGitDir, "HEAD"),
+          "ref: refs/heads/feature/wt\n",
+        );
+        yield* fileSystem.writeFileString(
+          path.join(worktree, ".git"),
+          `gitdir: ${worktreeGitDir}\n`,
+        );
+        for (const [index, cwd] of [repo, worktree].entries()) {
+          yield* writeTranscript({
+            filePath: path.join(
+              codexHomePath,
+              "sessions",
+              "2026",
+              "08",
+              "24",
+              `rollout-${index}.jsonl`,
+            ),
+            contents: [
+              encodeTranscriptRecord({
+                type: "session_meta",
+                payload: { id: `session-${index}`, cwd },
+              }),
+              encodeTranscriptRecord({
+                type: "event_msg",
+                payload: { type: "user_message", message: `Work in session ${index}` },
+              }),
+            ].join("\n"),
+            mtimeMs: nowMs - index * 1_000,
+          });
+        }
+
+        const input = { claudeHomePath, codexHomePath };
+        const threads = yield* runRecentThreads({ ...input, workspaceRoot: repo });
+        expect(
+          threads.map((thread) => ({ id: thread.providerSessionId, worktree: thread.worktree })),
+        ).toEqual([
+          { id: "session-0", worktree: undefined },
+          { id: "session-1", worktree: { path: worktree, branch: "feature/wt" } },
+        ]);
+        const worktreeThreads = yield* runRecentThreads({ ...input, workspaceRoot: worktree });
+        expect(worktreeThreads.map((thread) => thread.providerSessionId)).toEqual(["session-1"]);
       }),
     );
 
@@ -1256,6 +1326,23 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           ]),
           mtimeMs: nowMs - 120_000,
         });
+        // Droid writes session_start before the first prompt; quitting then leaves only that.
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-empty.jsonl"),
+          contents: droidSession({ id: "droid-empty", title: "New Session" }, []),
+          mtimeMs: nowMs - 180_000,
+        });
+        // The transcript's last model wins; the settings' effort was for another model.
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-titled.settings.json"),
+          contents: JSON.stringify({ model: "claude-opus-5-5", reasoningEffort: "xhigh" }),
+          mtimeMs: nowMs - 60_000,
+        });
+        yield* writeTranscript({
+          filePath: path.join(sessionsDir, "droid-untitled.settings.json"),
+          contents: JSON.stringify({ model: "gpt-5.5", reasoningEffort: "medium" }),
+          mtimeMs: nowMs - 120_000,
+        });
         yield* writeTranscript({
           filePath: path.join(sessionsDir, "droid-subagent.jsonl"),
           contents: droidSession(
@@ -1270,12 +1357,10 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           const scan = yield* scanner.scan;
           expect
             .soft(scan.candidates.map(({ sources, threadCount }) => ({ sources, threadCount })))
-            .toEqual([{ sources: ["droid"], threadCount: 2 }]);
+            .toEqual([{ sources: ["droid"], threadCount: 3 }]);
           const outcomes = yield* Stream.runCollect(scanner.recentThreads(workspace));
           expect(
-            outcomes.map((outcome) =>
-              outcome._tag === "Importable" ? outcome.thread : outcome._tag,
-            ),
+            outcomes.map((outcome) => (outcome._tag === "Importable" ? outcome.thread : outcome)),
           ).toMatchObject([
             {
               source: "droid",
@@ -1316,11 +1401,18 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             {
               providerSessionId: "droid-untitled",
               title: "Rename the button",
-              model: null,
+              model: "gpt-5.5",
+              reasoningEffort: "medium",
               messages: [{ role: "user", text: "Rename the button\nIt says Submit" }],
               activities: [],
             },
+            { _tag: "Skipped", reason: "empty" },
           ]);
+          expect(
+            outcomes.flatMap((outcome) =>
+              outcome._tag === "Importable" ? [outcome.thread.reasoningEffort] : [],
+            ),
+          ).toEqual([undefined, "medium"]);
 
           // Threads imported before thinking was imported get their history again, once.
           const sources = outcomes.flatMap((outcome) =>
@@ -1336,11 +1428,16 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                 ),
               ),
             );
-          expect(yield* tags(sources)).toEqual([["AlreadyImported"], ["AlreadyImported"]]);
+          expect(yield* tags(sources)).toEqual([
+            ["AlreadyImported"],
+            ["AlreadyImported"],
+            ["Skipped"],
+          ]);
           const { historyVersion: _, ...olderSource } = sources[0]!;
           expect(yield* tags([olderSource, sources[1]!])).toEqual([
             ["Importable", true, sources[0]!.historyVersion],
             ["AlreadyImported"],
+            ["Skipped"],
           ]);
         }).pipe(
           Effect.provide(
@@ -1357,6 +1454,75 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           ),
           Effect.provideService(HostProcess.HomeDirectory, userHome),
         );
+      }),
+    );
+
+    it.effect("lists the Droid sessions forked or rewound from each session", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const userHome = yield* makeTempDir("t3code-droid-user-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const sessionsDir = path.join(userHome, ".factory", "sessions", "-workspace");
+        // original -> rewound -> rewound-again, and original -> forked.
+        for (const [id, parent, ageMs] of [
+          ["original", undefined, 4_000],
+          ["rewound", "original", 3_000],
+          ["rewound-again", "rewound", 2_000],
+          ["forked", "original", 1_000],
+        ] as const) {
+          yield* writeTranscript({
+            filePath: path.join(sessionsDir, `${id}.jsonl`),
+            contents: [
+              { type: "session_start", id, cwd: workspace, ...(parent ? { parent } : {}) },
+              {
+                type: "message",
+                id: `${id}-u1`,
+                timestamp: "2026-08-24T10:00:00.000Z",
+                message: { role: "user", content: [{ type: "text", text: "Same prompt" }] },
+              },
+            ]
+              .map((record) => encodeTranscriptRecord(record))
+              .join("\n"),
+            mtimeMs: nowMs - ageMs,
+          });
+        }
+
+        const outcomes = yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          return yield* Stream.runCollect(scanner.recentThreads(workspace));
+        }).pipe(
+          Effect.provide(
+            layerScannerTest({
+              claudeHomePath,
+              codexHomePath,
+              providerInstances: {
+                [ProviderInstanceId.make("droid")]: {
+                  driver: ProviderDriverKind.make("droid"),
+                  enabled: true,
+                },
+              },
+            }),
+          ),
+          Effect.provideService(HostProcess.HomeDirectory, userHome),
+        );
+        expect(
+          Object.fromEntries(
+            outcomes.flatMap((outcome) =>
+              outcome._tag === "Importable"
+                ? [[outcome.thread.providerSessionId, outcome.continuedIn?.toSorted()]]
+                : [],
+            ),
+          ),
+        ).toEqual({
+          forked: undefined,
+          "rewound-again": undefined,
+          rewound: ["rewound-again"],
+          original: ["forked", "rewound", "rewound-again"],
+        });
       }),
     );
 
@@ -1524,6 +1690,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           workspaceRoot: workspace,
         });
         expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Skipped", "Importable"]);
+        expect(outcomes[0]).toEqual({ _tag: "Skipped", reason: "too-large" });
         expect(outcomes[1]).toMatchObject({ thread: { providerSessionId: "older" } });
       }),
     );
@@ -1616,7 +1783,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                     thread: { messages: [{ text: "Replacement prompt" }] },
                   });
                 } else {
-                  expect(outcomes).toEqual([{ _tag: "Skipped" }]);
+                  expect(outcomes).toEqual([{ _tag: "Skipped", reason: "other-folder" }]);
                 }
               }).pipe(Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })));
             }),
@@ -1839,7 +2006,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         expect(transcriptOpenCount).toBe(2);
         expect(fullReadBytes).toBe(new TextEncoder().encode(contents).byteLength);
-        expect(outcomes).toEqual([{ _tag: "Skipped" }]);
+        expect(outcomes).toEqual([{ _tag: "Skipped", reason: "changed" }]);
       }),
     );
 

@@ -17,6 +17,7 @@ import {
   TurnItemId,
   type AgentSessionImportInput,
   type AgentSessionImportResult,
+  type AgentSessionImportSkipReason,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
@@ -86,6 +87,9 @@ class AgentSessionThreadModifiedError extends Schema.TaggedError<AgentSessionThr
 function dateTime(value: string): DateTime.Utc {
   return DateTime.makeUnsafe(value);
 }
+
+const importThreadId = (providerInstanceId: string, providerSessionId: string) =>
+  ThreadId.make(`import:${providerInstanceId}:${providerSessionId}`);
 
 function messageEvents(input: {
   readonly threadId: ThreadId;
@@ -338,18 +342,21 @@ const make = Effect.gen(function* () {
     const outcomes = scanner.recentThreads(project.workspaceRoot, completedSources);
     const importedThreadIds = new Set<ThreadId>();
     let importedCount = 0;
-    let skippedCount = 0;
+    let emptyCount = 0;
+    const skippedByReason = new Map<AgentSessionImportSkipReason, number>();
+    const skip = (reason: AgentSessionImportSkipReason) => {
+      skippedByReason.set(reason, (skippedByReason.get(reason) ?? 0) + 1);
+    };
 
     yield* Stream.runForEach(outcomes, (outcome) =>
       Effect.gen(function* () {
         if (outcome._tag === "Skipped") {
-          skippedCount += 1;
+          if (outcome.reason === "empty") emptyCount += 1;
+          else skip(outcome.reason);
           return;
         }
         const source = outcome.source;
-        const threadId = ThreadId.make(
-          `import:${source.providerInstanceId}:${source.providerSessionId}`,
-        );
+        const threadId = importThreadId(source.providerInstanceId, source.providerSessionId);
         if (outcome._tag === "AlreadyImported") {
           importedThreadIds.add(threadId);
           importedCount += 1;
@@ -440,11 +447,17 @@ const make = Effect.gen(function* () {
             projectId: input.projectId,
             title: thread.title.trim() === "" ? "Untitled thread" : thread.title,
             providerInstanceId: thread.providerInstanceId,
-            modelSelection: { instanceId: thread.providerInstanceId, model },
+            modelSelection: {
+              instanceId: thread.providerInstanceId,
+              model,
+              ...(thread.reasoningEffort === undefined
+                ? {}
+                : { options: [{ id: "reasoningEffort", value: thread.reasoningEffort }] }),
+            },
             runtimeMode: DEFAULT_RUNTIME_MODE,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            branch: null,
-            worktreePath: null,
+            branch: thread.worktree?.branch ?? null,
+            worktreePath: thread.worktree?.path ?? null,
             linkedPullRequest: null,
             branchPullRequest: null,
             activeProviderThreadId: providerThreadId,
@@ -493,7 +506,21 @@ const make = Effect.gen(function* () {
           };
 
           const committed = yield* eventSink.write({
-            unlessNativeThreadOwned: providerThread,
+            unlessNativeThreadOwned: {
+              ...providerThread,
+              ...(outcome.continuedIn === undefined
+                ? {}
+                : {
+                    continuations: {
+                      nativeIds: outcome.continuedIn,
+                      // A fork imported as its own thread is a separate conversation, not a
+                      // T3 thread that rewound this one.
+                      ownersToIgnore: outcome.continuedIn.map((sessionId) =>
+                        importThreadId(thread.providerInstanceId, sessionId),
+                      ),
+                    },
+                  }),
+            },
             events: [
               {
                 id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${threadId}:created`),
@@ -532,12 +559,18 @@ const make = Effect.gen(function* () {
           importedThreadIds.add(threadId);
           importedCount += 1;
         } else if (imported === false) {
-          skippedCount += 1;
+          skip("failed");
         }
       }),
     );
 
-    return { importedCount, skippedCount } satisfies AgentSessionImportResult;
+    const skippedReasons = Array.from(skippedByReason, ([reason, count]) => ({ reason, count }));
+    return {
+      importedCount,
+      skippedCount: skippedReasons.reduce((total, { count }) => total + count, 0),
+      ...(emptyCount > 0 ? { emptyCount } : {}),
+      ...(skippedReasons.length > 0 ? { skippedReasons } : {}),
+    } satisfies AgentSessionImportResult;
   });
 
   return { importRecentAgentThreads };
