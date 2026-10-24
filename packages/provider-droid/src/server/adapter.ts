@@ -2334,6 +2334,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             const hosted = state ?? (yield* adoptSession(sourceId, row, appThreadId));
             return threadSnapshot(hosted);
           }
+          // Droid rewinds only from a loaded session, and a fresh process (after a restart) has none.
+          if (state === null) yield* adoptSession(sourceId, row, appThreadId);
 
           const rewind = request("droid.execute_rewind", {
             sessionId: sourceId,

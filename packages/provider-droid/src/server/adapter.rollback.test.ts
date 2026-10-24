@@ -386,10 +386,15 @@ describe("DroidAdapterV2 rollback", () => {
           const snapshot = yield* opened.runtime.rollbackThread(rollbackToTurn(row, turns, 1));
 
           assert.deepStrictEqual(methodsOf(fake), [
+            "droid.load_session",
             "droid.execute_rewind",
             "droid.load_session",
             "droid.update_session_settings",
           ]);
+          assert.strictEqual(
+            requestsOf(fake, "droid.load_session")[0]?.params["sessionId"],
+            "stored-session",
+          );
           assert.strictEqual(
             requestsOf(fake, "droid.execute_rewind")[0]?.params["sessionId"],
             "stored-session",

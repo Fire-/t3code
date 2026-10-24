@@ -309,6 +309,16 @@ const makeFakeProcess = Effect.fnUntraced(function* (
         return;
       }
       case "droid.execute_rewind": {
+        // Like Droid, a rewind needs a loaded session even though it names the one to fork.
+        if (sessionId === undefined) {
+          yield* respond(id, {
+            error: {
+              code: -32603,
+              message: "No active session. Call initialize_session or load_session first.",
+            },
+          });
+          return;
+        }
         const source = Predicate.isString(params["sessionId"])
           ? store.get(params["sessionId"])
           : undefined;
