@@ -143,6 +143,7 @@ computer.
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
 | Antigravity | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
 | Pi          | Install [Pi](./providers-pi.md#set-up-pi) with Node.js 22.19 or newer, then run `pi` and `/login`.                                                        |
+| Prime       | Install [Prime](./providers-prime.md#set-up-prime), then run `prime-agent` and `/login`, or set `PRIME_API_KEY`.                                          |
 | Muse Code   | Install [Muse Code](https://dev.meta.ai/docs/muse-code) on the server, run `muse login`, then enable it in Settings → Providers.                          |
 | Droid       | Install [Droid](./providers-droid.md#set-up-droid), then run `droid` and sign in, or set `FACTORY_API_KEY`. Enable it in Settings → Providers.            |
 
@@ -173,7 +174,7 @@ their original values.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
-[Antigravity](./providers-antigravity.md), [Pi](./providers-pi.md),
+[Antigravity](./providers-antigravity.md), [Pi](./providers-pi.md), [Prime](./providers-prime.md),
 [Muse Code](./providers-muse.md), and [Droid](./providers-droid.md).
 
 ## Next steps

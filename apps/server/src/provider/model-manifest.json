@@ -88,6 +88,15 @@
       ]
     },
     {
+      "driver": "prime-agent",
+      "t3CodeRange": ">=0.0.46",
+      "recommendedRange": ">=0.9.8",
+      "ranges": [
+        { "range": ">=0.9.8", "status": "supported" },
+        { "range": "<0.9.8", "status": "unsupported" }
+      ]
+    },
+    {
       "driver": "muse",
       "t3CodeRange": ">=0.0.46",
       "recommendedRange": ">=1.4.2",

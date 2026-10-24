@@ -1153,6 +1153,95 @@ it.layer(
       });
     });
 
+    describe("Prime model inventories", () => {
+      const cachedProvider = {
+        instanceId: ProviderInstanceId.make("prime-agent"),
+        driver: ProviderDriverKind.make("prime-agent"),
+        status: "ready",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated", type: "api_key", label: "Prime API key" },
+        checkedAt: "2026-09-07T02:48:00.000Z",
+        version: "1.0.0",
+        models: ["kimi-k3", "glm-5.3"].map((slug) => ({
+          slug,
+          name: slug,
+          isCustom: false,
+          capabilities: null,
+        })),
+        slashCommands: [],
+        skills: [],
+      } satisfies ServerProvider;
+      const discoveredModels = ["mistral/zai-glm-5-3", "mistral/ministral-3b-latest"].map(
+        (slug) => ({
+          slug,
+          name: slug,
+          subProvider: "mistral",
+          isCustom: false,
+          capabilities: null,
+        }),
+      );
+
+      it("[VAL-RETAIN-001] replaces stale cached slugs after a successful discovery", () => {
+        const refreshedProvider = {
+          ...cachedProvider,
+          checkedAt: "2026-09-07T03:00:00.000Z",
+          models: discoveredModels,
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(cachedProvider, refreshedProvider).models.map(
+            (model) => model.slug,
+          ),
+          ["mistral/zai-glm-5-3", "mistral/ministral-3b-latest"],
+        );
+      });
+
+      it("[VAL-RETAIN-002] keeps last-known models when discovery degrades", () => {
+        const previousProvider = { ...cachedProvider, models: discoveredModels };
+        for (const status of ["warning", "error"] as const) {
+          const degradedProvider = {
+            ...previousProvider,
+            status,
+            checkedAt: "2026-09-07T03:00:00.000Z",
+            message: "Prime is installed, but T3 Code could not load its models.",
+            models: [],
+          } satisfies ServerProvider;
+
+          assert.deepStrictEqual(
+            ProviderRegistry.mergeProviderSnapshot(previousProvider, degradedProvider).models,
+            discoveredModels,
+          );
+        }
+      });
+
+      it("[VAL-RETAIN-003] keeps no cached models while disabled or signed out", () => {
+        const previousProvider = { ...cachedProvider, models: discoveredModels };
+        const clearedProviders = [
+          {
+            ...previousProvider,
+            enabled: false,
+            installed: false,
+            status: "warning",
+            auth: { status: "unknown" },
+            models: [],
+          },
+          {
+            ...previousProvider,
+            status: "error",
+            auth: { status: "unauthenticated" },
+            models: [],
+          },
+        ] satisfies ReadonlyArray<ServerProvider>;
+
+        for (const provider of clearedProviders) {
+          assert.deepStrictEqual(
+            ProviderRegistry.mergeProviderSnapshot(previousProvider, provider).models,
+            [],
+          );
+        }
+      });
+    });
     describe("Antigravity model inventories", () => {
       const previousProvider = {
         instanceId: ProviderInstanceId.make("antigravity-personal"),

@@ -34,6 +34,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
 import { DroidDriver, type DroidDriverEnv } from "@t3tools/provider-droid/server";
+import { PrimeDriver, type PrimeDriverEnv } from "@t3tools/provider-prime/server";
 import * as ModelManifest from "./ModelManifest.ts";
 import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
@@ -627,6 +628,40 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
         }).pipe(Effect.provide(layerTest)),
     );
   }
+
+  it.live(
+    "[VAL-SET-001][VAL-SET-002] resolves the saved Prime block to an enabled Prime instance",
+    () =>
+      Effect.gen(function* () {
+        const savedId = ProviderInstanceId.make("prime-agent");
+        const unsetId = ProviderInstanceId.make("prime_unset");
+        const primeDriverKind = ProviderDriverKind.make("prime-agent");
+        const configMap: ProviderInstanceConfigMap = {
+          [savedId]: {
+            driver: primeDriverKind,
+            enabled: true,
+            config: {
+              binaryPath: "/x/prime-agent",
+              customModels: ["mistral/zai-glm-5-3", { slug: "a/b", name: "B" }],
+            },
+          },
+          [unsetId]: { driver: primeDriverKind, config: {} },
+        };
+
+        const { registry } = yield* makeProviderInstanceRegistry<PrimeDriverEnv>({
+          drivers: [PrimeDriver],
+          configMap,
+        });
+
+        expect(yield* registry.listUnavailable).toEqual([]);
+        const saved = yield* registry.getInstance(savedId);
+        expect(saved?.driverKind).toBe(primeDriverKind);
+        expect(saved?.enabled).toBe(true);
+        const unset = yield* registry.getInstance(unsetId);
+        expect(unset?.driverKind).toBe(primeDriverKind);
+        expect(unset?.enabled).toBe(false);
+      }).pipe(Effect.provide(layerTest)),
+  );
 
   it.live(
     "shadows instances whose driver is not registered in this build without failing boot",

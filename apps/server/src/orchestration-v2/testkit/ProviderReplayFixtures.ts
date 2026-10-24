@@ -35,6 +35,7 @@ const DRIVERS_WITH_REPLAY_FIXTURE_FILES = new Set([
   "muse",
   "opencode",
   "pi",
+  "prime-agent",
 ]);
 for (const fixture of ORCHESTRATOR_REPLAY_FIXTURES) {
   for (const provider of fixture.providers) {

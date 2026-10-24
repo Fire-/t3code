@@ -85,6 +85,7 @@ const TEXT_GENERATION_FALLBACK_DRIVERS = [
   "grok",
   "muse",
   "pi",
+  "prime-agent",
   "opencode",
   "antigravity",
   "droid",

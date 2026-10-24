@@ -182,17 +182,19 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
   const isCodex = provider.driver === ProviderDriverKind.make("codex");
   const isDroid = provider.driver === ProviderDriverKind.make("droid");
+  const isPrimeAgent = provider.driver === ProviderDriverKind.make("prime-agent");
   if (
     !isAntigravity &&
     !isCodex &&
     !isDroid &&
+    !isPrimeAgent &&
     provider.driver !== ProviderDriverKind.make("opencode")
   ) {
     return true;
   }
 
   if (
-    (isAntigravity || isCodex || isDroid) &&
+    (isAntigravity || isCodex || isDroid || isPrimeAgent) &&
     (!provider.enabled || provider.auth.status === "unauthenticated")
   ) {
     return false;
@@ -210,11 +212,16 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   // probe (discovery failed or timed out) only knows the custom models.
   const isDegradedInstalledDroidProbe =
     isDroid && provider.installed && provider.status !== "ready";
+  // Prime's get_available_models returns its whole inventory, so only a ready
+  // probe may replace the list; a degraded probe keeps the last-known models.
+  const isDegradedPrimeDiscovery =
+    isPrimeAgent && provider.installed && provider.status !== "ready";
   return (
     isPendingAntigravityAuthentication ||
     isPendingInitialProbe ||
     isIncompleteInstalledProbe ||
-    isDegradedInstalledDroidProbe
+    isDegradedInstalledDroidProbe ||
+    isDegradedPrimeDiscovery
   );
 };
 

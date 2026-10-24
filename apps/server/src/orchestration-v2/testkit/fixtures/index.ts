@@ -61,6 +61,7 @@ import { assertDroidMessageSteeringOutput } from "./message_steering/droid_outpu
 import { assertGrokMessageSteeringOutput } from "./message_steering/grok_output.ts";
 import { messageSteeringInput } from "./message_steering/input.ts";
 import { assertPiMessageSteeringOutput } from "./message_steering/pi_output.ts";
+import { assertPrimeMessageSteeringOutput } from "./message_steering/prime_output.ts";
 import { MUSE_PERMISSION_DECLINED_FILE, musePermissionInput } from "./muse_permission/input.ts";
 import { assertMusePermissionOutput } from "./muse_permission/output.ts";
 import { museSubagentApprovalInput } from "./muse_subagent_approval/input.ts";
@@ -77,10 +78,24 @@ import { assertPiCompactionOutput } from "./pi_compaction/output.ts";
 import { providerThreadResumeInput } from "./provider_thread_resume/input.ts";
 import { assertDroidProviderThreadResumeOutput } from "./provider_thread_resume/droid_output.ts";
 import { assertPiProviderThreadResumeOutput } from "./provider_thread_resume/pi_output.ts";
+import { assertPrimeProviderThreadResumeOutput } from "./provider_thread_resume/prime_output.ts";
+import { primeApprovalInput } from "./prime_approval/input.ts";
+import { assertPrimeApprovalOutput } from "./prime_approval/prime_output.ts";
+import { primeGoalAutonomousInput } from "./prime_goal_autonomous/input.ts";
+import { assertPrimeGoalAutonomousOutput } from "./prime_goal_autonomous/prime_output.ts";
+import { primeRlmChildrenInput } from "./prime_rlm_children/input.ts";
+import { assertPrimeRlmChildrenOutput } from "./prime_rlm_children/prime_output.ts";
+import { primeSessionCommandInput } from "./prime_session_command/input.ts";
+import { assertPrimeSessionCommandOutput } from "./prime_session_command/prime_output.ts";
+import { primeThreadRollbackInput } from "./prime_thread_rollback/input.ts";
+import { assertPrimeThreadRollbackOutput } from "./prime_thread_rollback/prime_output.ts";
+import { primeThreadRollbackAfterStopInput } from "./prime_thread_rollback_after_stop/input.ts";
+import { assertPrimeThreadRollbackAfterStopOutput } from "./prime_thread_rollback_after_stop/prime_output.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { assertDroidMultiTurnOutput } from "./multi_turn/droid_output.ts";
 import { assertPiMultiTurnOutput } from "./multi_turn/pi_output.ts";
+import { assertPrimeMultiTurnOutput } from "./multi_turn/prime_output.ts";
 import { multiTurnInput } from "./multi_turn/input.ts";
 import { openCodeChildApprovalInput } from "./opencode_child_approval/input.ts";
 import { assertOpenCodeChildApprovalOutput } from "./opencode_child_approval/output.ts";
@@ -137,6 +152,7 @@ import { skillInvocationInput } from "./skill_invocation/input.ts";
 import { assertSimpleOutput } from "./simple/codex_output.ts";
 import { assertDroidSimpleOutput } from "./simple/droid_output.ts";
 import { assertPiSimpleOutput } from "./simple/pi_output.ts";
+import { assertPrimeSimpleOutput } from "./simple/prime_output.ts";
 import { simpleInput } from "./simple/input.ts";
 import { malformedSessionUpdateInput } from "./malformed_session_update/input.ts";
 import { assertMalformedSessionUpdateOutput } from "./malformed_session_update/output.ts";
@@ -214,6 +230,7 @@ import { assertTurnInterruptMidToolCursorOutput } from "./turn_interrupt_mid_too
 import { assertTurnInterruptMidToolDroidOutput } from "./turn_interrupt_mid_tool/droid_output.ts";
 import { turnInterruptMidToolInput } from "./turn_interrupt_mid_tool/input.ts";
 import { assertTurnInterruptMidToolPiOutput } from "./turn_interrupt_mid_tool/pi_output.ts";
+import { assertTurnInterruptMidToolPrimeOutput } from "./turn_interrupt_mid_tool/prime_output.ts";
 import { assertTurnInterruptRestartClaudeOutput } from "./turn_interrupt_restart/claude_output.ts";
 import { turnInterruptRestartInput } from "./turn_interrupt_restart/input.ts";
 import { assertClaudeWebSearchOutput } from "./web_search/claude_output.ts";
@@ -230,6 +247,7 @@ import {
   OPENCODE_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
   PI_MODEL_SELECTION,
+  PRIME_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
   RESTRICTED_GRANULAR_POLICY,
@@ -678,6 +696,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./simple/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
         assertOutput: assertPiSimpleOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./simple/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeSimpleOutput,
       },
       {
         driver: ProviderDriverKind.make("muse"),
@@ -1268,6 +1292,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         assertOutput: assertPiMultiTurnOutput,
       },
       {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./multi_turn/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeMultiTurnOutput,
+      },
+      {
         driver: ProviderDriverKind.make("muse"),
         transcriptFile: new URL("./multi_turn/muse_transcript.ndjson", import.meta.url),
         modelSelection: MUSE_MODEL_SELECTION,
@@ -1392,6 +1422,15 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: DROID_MODEL_SELECTION,
         assertOutput: assertDroidProviderThreadResumeOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL(
+          "./provider_thread_resume/prime_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeProviderThreadResumeOutput,
       },
     ],
   },
@@ -1612,6 +1651,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: DROID_MODEL_SELECTION,
         assertOutput: assertDroidMessageSteeringOutput,
       },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./message_steering/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeMessageSteeringOutput,
+      },
     ],
   },
   {
@@ -1734,6 +1779,91 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: DROID_MODEL_SELECTION,
         assertOutput: assertTurnInterruptMidToolDroidOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL(
+          "./turn_interrupt_mid_tool/prime_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertTurnInterruptMidToolPrimeOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_approval",
+    buildInput: primeApprovalInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_approval/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeApprovalOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_session_command",
+    buildInput: primeSessionCommandInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_session_command/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeSessionCommandOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_goal_autonomous",
+    buildInput: primeGoalAutonomousInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_goal_autonomous/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        runContinuationWorker: true,
+        assertOutput: assertPrimeGoalAutonomousOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_rlm_children",
+    buildInput: primeRlmChildrenInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_rlm_children/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeRlmChildrenOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_thread_rollback",
+    buildInput: primeThreadRollbackInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL("./prime_thread_rollback/prime_transcript.ndjson", import.meta.url),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeThreadRollbackOutput,
+      },
+    ],
+  },
+  {
+    name: "prime_thread_rollback_after_stop",
+    buildInput: primeThreadRollbackAfterStopInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("prime-agent"),
+        transcriptFile: new URL(
+          "./prime_thread_rollback_after_stop/prime_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: PRIME_MODEL_SELECTION,
+        assertOutput: assertPrimeThreadRollbackAfterStopOutput,
       },
     ],
   },
