@@ -7,7 +7,10 @@ export {
 export {
   DROID_HOME_DIRECTORY,
   DROID_SESSIONS_DIRECTORY,
+  droidTranscriptEntries,
   droidTranscriptMessage,
   foldDroidTranscriptFields,
   isDroidSubagentSessionStart,
+  isDroidTranscriptHistoryRecord,
+  type DroidTranscriptActivity,
 } from "./server/sessionTranscripts.ts";

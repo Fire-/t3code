@@ -75,7 +75,6 @@ import {
   type DroidHistoryMessage,
 } from "./history.ts";
 import {
-  boundDroidToolOutput,
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
   droidTaskCompletionMessageId,
@@ -116,6 +115,7 @@ import { definedDroidEnvironment } from "./status.ts";
 import {
   droidSubagentRoster,
   droidTaskCall,
+  droidTaskCompletionOutcome,
   launchDroidSubagent,
   noteDroidTaskCall,
   settleDroidSubagent,
@@ -342,16 +342,6 @@ const backgroundSubagentsOf = (state: DroidThreadState) =>
 /** How a Task subagent ends with the turn that still holds it open. */
 const subagentStatusOnTurnEnd = (outcome: TurnOutcome): DroidSubagentOutcome["status"] =>
   outcome.kind === "interrupted" ? "interrupted" : "failed";
-
-const completionOutcome = (completion: DroidTaskCompletion): DroidSubagentOutcome => ({
-  status:
-    completion.status === "completed"
-      ? "completed"
-      : completion.status === "stopped"
-        ? "cancelled"
-        : "failed",
-  result: completion.summary === undefined ? null : boundDroidToolOutput(completion.summary),
-});
 
 const MAX_ERROR_MESSAGE_CHARS = 1_000;
 
@@ -764,7 +754,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           (candidate) => candidate.childSessionId === completion.taskId,
         );
         if (subagent === undefined) return;
-        yield* settleSubagents(state, [subagent], completionOutcome(completion));
+        yield* settleSubagents(state, [subagent], droidTaskCompletionOutcome(completion));
       });
 
       const openRequest = Effect.fnUntraced(function* (

@@ -14,6 +14,7 @@ import {
   type OrchestrationV2ProviderRef,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2TurnItem,
   type PlanId,
   type RunId,
   type ThreadId,
@@ -655,11 +656,32 @@ export function flushDroidStreams(
 
 type ToolSettleStatus = "completed" | "failed" | "interrupted" | "cancelled";
 
-interface ToolSettlement {
+export interface DroidToolSettlement {
   readonly status: ToolSettleStatus;
   /** The `tool_result` payload; absent when the turn ended without one. */
   readonly content?: unknown;
 }
+
+type TurnItemBaseKey =
+  | "id"
+  | "threadId"
+  | "runId"
+  | "nodeId"
+  | "providerThreadId"
+  | "providerTurnId"
+  | "nativeItemRef"
+  | "parentItemId"
+  | "ordinal"
+  | "startedAt"
+  | "completedAt"
+  | "updatedAt";
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+/** A tool's item without the ids and times that place it in a thread. */
+export type DroidToolItemFields = DistributiveOmit<
+  Extract<OrchestrationV2TurnItem, { readonly type: ToolItemType }>,
+  TurnItemBaseKey
+>;
 
 const isEmptyInput = (input: unknown): boolean =>
   input === undefined ||
@@ -670,71 +692,68 @@ const isEmptyInput = (input: unknown): boolean =>
  * An item keeps the type it first appears with. File tools wait for their path (Droid's first
  * `tool_call` frame has an empty input); a tool whose final input has no path is a dynamic tool.
  */
-function toolItemType(tool: ToolState, final: boolean): ToolItemType | undefined {
-  switch (droidToolKind(tool.name)) {
+export function droidToolItemType(
+  name: string,
+  input: unknown,
+  final: boolean,
+): ToolItemType | undefined {
+  switch (droidToolKind(name)) {
     case "execute":
       return "command_execution";
     case "edit":
-      if (droidToolPath(tool.input) !== undefined) return "file_change";
-      return final || !isEmptyInput(tool.input) ? "dynamic_tool" : undefined;
+      if (droidToolPath(input) !== undefined) return "file_change";
+      return final || !isEmptyInput(input) ? "dynamic_tool" : undefined;
     default:
       return "dynamic_tool";
   }
 }
 
-function toolItemEvent(
-  ctx: DroidEventContext,
-  tool: ToolState,
-  surface: ToolSurface,
-  now: DateTime.Utc,
-  settlement: ToolSettlement | undefined,
-): ProviderAdapterV2Event {
+/**
+ * How a tool call reads as an item. Live turns and imported transcripts both build tool items
+ * here, so a tool looks the same whichever way it reached the thread.
+ */
+export function droidToolItemFields(
+  tool: {
+    readonly name: string;
+    readonly input: unknown;
+    readonly progressExitCode?: number | undefined;
+  },
+  itemType: ToolItemType,
+  settlement: DroidToolSettlement | undefined,
+): DroidToolItemFields {
   const status = settlement?.status ?? "running";
-  const completedAt = settlement === undefined ? null : now;
-  const shared = {
-    ...itemBase(ctx, tool.nativeItemId, surface.ordinal, surface.startedAt, now),
-    status,
-    title: tool.name,
-    completedAt,
-  } as const;
   const resultText =
     settlement === undefined ? undefined : droidToolResultOutput(settlement.content).text;
   const input = Predicate.isObject(tool.input) ? tool.input : {};
 
-  if (surface.itemType === "command_execution") {
+  if (itemType === "command_execution") {
     const { output, exitCode: footerExitCode } = splitDroidExecuteOutput(resultText);
     const exitCode = footerExitCode ?? tool.progressExitCode;
     return {
-      type: "turn_item.updated",
-      driver: DROID_DRIVER,
-      turnItem: {
-        ...shared,
-        type: "command_execution",
-        input: asString(input["command"]) ?? "",
-        ...(output === undefined ? {} : { output }),
-        ...(exitCode === undefined ? {} : { exitCode }),
-      },
+      status,
+      title: tool.name,
+      type: "command_execution",
+      input: asString(input["command"]) ?? "",
+      ...(output === undefined ? {} : { output }),
+      ...(exitCode === undefined ? {} : { exitCode }),
     };
   }
 
   const fileName = droidToolPath(tool.input);
-  if (surface.itemType === "file_change" && fileName !== undefined) {
+  if (itemType === "file_change" && fileName !== undefined) {
     const oldStr = asString(input["old_str"]);
     const newStr = asString(input["new_str"]) ?? asString(input["content"]);
     const counts = status === "completed" ? droidEditDiffCounts(settlement?.content) : undefined;
     const diffStr = status === "failed" ? resultText : undefined;
     return {
-      type: "turn_item.updated",
-      driver: DROID_DRIVER,
-      turnItem: {
-        ...shared,
-        type: "file_change",
-        fileName,
-        ...(oldStr === undefined ? {} : { oldStr }),
-        ...(newStr === undefined ? {} : { newStr }),
-        ...(counts === undefined ? {} : counts),
-        ...(diffStr === undefined ? {} : { diffStr }),
-      },
+      status,
+      title: tool.name,
+      type: "file_change",
+      fileName,
+      ...(oldStr === undefined ? {} : { oldStr }),
+      ...(newStr === undefined ? {} : { newStr }),
+      ...(counts === undefined ? {} : counts),
+      ...(diffStr === undefined ? {} : { diffStr }),
     };
   }
 
@@ -743,31 +762,41 @@ function toolItemEvent(
   if (tool.name === "Script") {
     const code = asString(input["script"]);
     return {
-      type: "turn_item.updated",
-      driver: DROID_DRIVER,
-      turnItem: {
-        ...shared,
-        type: "dynamic_tool",
-        title: code === undefined ? tool.name : droidScriptTitle(code),
-        toolName: "js",
-        input: code === undefined ? {} : { code },
-        ...(resultText === undefined ? {} : { output: resultText }),
-      },
+      status,
+      type: "dynamic_tool",
+      title: code === undefined ? tool.name : droidScriptTitle(code),
+      toolName: "js",
+      input: code === undefined ? {} : { code },
+      ...(resultText === undefined ? {} : { output: resultText }),
     };
   }
 
   const toolName = droidMcpToolName(tool.name);
   return {
+    status,
+    type: "dynamic_tool",
+    title: toolName,
+    ...mcpToolPresentation({ toolName }),
+    toolName,
+    input: tool.input,
+    ...(resultText === undefined ? {} : { output: resultText }),
+  };
+}
+
+function toolItemEvent(
+  ctx: DroidEventContext,
+  tool: ToolState,
+  surface: ToolSurface,
+  now: DateTime.Utc,
+  settlement: DroidToolSettlement | undefined,
+): ProviderAdapterV2Event {
+  return {
     type: "turn_item.updated",
     driver: DROID_DRIVER,
     turnItem: {
-      ...shared,
-      type: "dynamic_tool",
-      title: toolName,
-      ...mcpToolPresentation({ toolName }),
-      toolName,
-      input: tool.input,
-      ...(resultText === undefined ? {} : { output: resultText }),
+      ...itemBase(ctx, tool.nativeItemId, surface.ordinal, surface.startedAt, now),
+      completedAt: settlement === undefined ? null : now,
+      ...droidToolItemFields(tool, surface.itemType, settlement),
     },
   };
 }
@@ -778,9 +807,10 @@ function updateTool(
   ctx: DroidEventContext,
   tool: ToolState,
   now: DateTime.Utc,
-  settlement: ToolSettlement | undefined,
+  settlement: DroidToolSettlement | undefined,
 ): DroidMapResult {
-  const itemType = tool.surface?.itemType ?? toolItemType(tool, settlement !== undefined);
+  const itemType =
+    tool.surface?.itemType ?? droidToolItemType(tool.name, tool.input, settlement !== undefined);
   const completed = settlement !== undefined;
   if (itemType === undefined) {
     return {

@@ -1212,10 +1212,36 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
               {
                 role: "assistant",
                 modelId: "claude-opus-5-5",
-                content: [{ type: "tool_use", id: "t1", name: "Execute" }],
+                content: [
+                  { type: "thinking", thinking: "Not imported" },
+                  { type: "tool_use", id: "t1", name: "Execute", input: { command: "vp test" } },
+                  {
+                    type: "tool_use",
+                    id: "t2",
+                    name: "Task",
+                    input: { description: "Find the flake", prompt: "Find the flaky test" },
+                  },
+                ],
               },
             ],
-            ["u2", { role: "user", content: [{ type: "tool_result", tool_use_id: "t1" }] }],
+            [
+              "u2",
+              {
+                role: "user",
+                content: [
+                  { type: "tool_result", tool_use_id: "t1", content: "1 failed" },
+                  { type: "tool_result", tool_use_id: "t2", content: "task_id: task_1" },
+                ],
+              },
+            ],
+            [
+              "task-completion:task_1",
+              {
+                role: "user",
+                visibility: "llm_only",
+                content: text("Background task completed.\ntask_id: task_1\noutput: setup.ts:12"),
+              },
+            ],
             [
               "a2",
               { role: "assistant", modelId: "claude-sonnet-5-5", content: text("A race in setup") },
@@ -1261,12 +1287,37 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                 { role: "user", text: "Why does CI fail?" },
                 { role: "assistant", text: "A race in setup" },
               ],
+              activities: [
+                {
+                  position: 1,
+                  activity: {
+                    kind: "tool",
+                    item: {
+                      type: "command_execution",
+                      status: "completed",
+                      input: "vp test",
+                      output: "1 failed",
+                    },
+                  },
+                },
+                {
+                  position: 1,
+                  activity: {
+                    kind: "subagent",
+                    title: "Find the flake",
+                    prompt: "Find the flaky test",
+                    status: "completed",
+                    result: "setup.ts:12",
+                  },
+                },
+              ],
             },
             {
               providerSessionId: "droid-untitled",
               title: "Rename the button",
               model: null,
               messages: [{ role: "user", text: "Rename the button\nIt says Submit" }],
+              activities: [],
             },
           ]);
         }).pipe(
@@ -1285,6 +1336,85 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           Effect.provideService(HostProcess.HomeDirectory, userHome),
         );
       }),
+    );
+
+    it.effect(
+      "keeps a Droid session's first prompt and newest history when it exceeds the budget",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const userHome = yield* makeTempDir("t3code-droid-user-home-");
+          const workspace = yield* makeTempDir("t3code-workspace-");
+          const text = (value: string) => [{ type: "text", text: value }];
+          const message = (id: string, role: string, content: unknown) =>
+            encodeTranscriptRecord({
+              type: "message",
+              id,
+              timestamp: "2026-08-24T10:00:00.000Z",
+              message: { role, content },
+            });
+          // Each number is several reader tokens, so these small records exceed the real 128 MiB budget in aggregate.
+          const bulkyInput = { pattern: Array.from({ length: 1_000 }, () => 1) };
+          yield* writeTranscript({
+            filePath: path.join(userHome, ".factory", "sessions", "-cwd", "droid-long.jsonl"),
+            contents: [
+              encodeTranscriptRecord({ type: "session_start", id: "droid-long", cwd: workspace }),
+              message("u1", "user", text("First prompt")),
+              message("a1", "assistant", text("First reply")),
+              ...Array.from({ length: 1_000 }, (_, index) =>
+                message(`old-${index}`, "assistant", [
+                  { type: "tool_use", id: `grep-${index}`, name: "Grep", input: bulkyInput },
+                ]),
+              ),
+              message("u2", "user", text("Latest prompt")),
+              message("a2", "assistant", [
+                ...text("Latest reply"),
+                { type: "tool_use", id: "ls", name: "Execute", input: { command: "ls" } },
+              ]),
+              message("r2", "user", [{ type: "tool_result", tool_use_id: "ls", content: "a.ts" }]),
+            ].join("\n"),
+            mtimeMs: nowMs,
+          });
+
+          const outcomes = yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            return yield* Stream.runCollect(scanner.recentThreads(workspace));
+          }).pipe(
+            Effect.provide(
+              layerScannerTest({
+                claudeHomePath,
+                codexHomePath,
+                providerInstances: {
+                  [ProviderInstanceId.make("droid")]: {
+                    driver: ProviderDriverKind.make("droid"),
+                    enabled: true,
+                  },
+                },
+              }),
+            ),
+            Effect.provideService(HostProcess.HomeDirectory, userHome),
+          );
+
+          const thread = outcomes[0]?._tag === "Importable" ? outcomes[0].thread : undefined;
+          expect(thread?.messages.map(({ role, text }) => [role, text])).toEqual([
+            ["user", "First prompt"],
+            ["user", "Latest prompt"],
+            ["assistant", "Latest reply"],
+          ]);
+          const activities = thread?.activities ?? [];
+          expect(activities[0]).toMatchObject({ position: 1, activity: { kind: "notice" } });
+          expect(activities.at(-1)).toMatchObject({
+            position: 3,
+            activity: { kind: "tool", item: { type: "command_execution", output: "a.ts" } },
+          });
+          const keptOldTools = activities.length - 2;
+          expect(keptOldTools).toBeGreaterThan(0);
+          expect(keptOldTools).toBeLessThan(1_000);
+        }),
     );
 
     it.effect("suppresses duplicate session copies without reporting a skipped import", () =>

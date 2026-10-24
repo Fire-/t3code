@@ -35,9 +35,12 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import {
   DROID_HOME_DIRECTORY,
   DROID_SESSIONS_DIRECTORY,
+  droidTranscriptEntries,
   droidTranscriptMessage,
   foldDroidTranscriptFields,
   isDroidSubagentSessionStart,
+  isDroidTranscriptHistoryRecord,
+  type DroidTranscriptActivity,
 } from "@t3tools/provider-droid/server";
 
 import * as ServerConfig from "../config.ts";
@@ -71,6 +74,13 @@ const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_IMPORTED_TRANSCRIPT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORTED_MESSAGES = 200;
 const MAX_IMPORT_HISTORY_BYTES = 32 * 1024 * 1024;
+/**
+ * Droid sessions import whole, tool calls included, so the user can continue where they were.
+ * Past this budget the oldest history is dropped (the first prompt stays) instead of the session.
+ */
+const MAX_DROID_IMPORT_HISTORY_BYTES = 128 * 1024 * 1024;
+// A tool row shows only the last 8,000 characters, but an edit's +/- counts parse its whole result.
+const MAX_DROID_TOOL_RESULT_CHARS = 64 * 1024;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
@@ -122,12 +132,51 @@ const TranscriptRecord = Schema.Struct({
   ),
 });
 
+// Droid keeps tool calls and results as content blocks; only Droid imports read them.
+const DroidTranscriptRecord = Schema.Struct({
+  ...TranscriptRecord.fields,
+  message: Schema.optional(
+    Schema.Struct({
+      ...TranscriptMessage.fields,
+      content: Schema.optional(
+        Schema.Union([
+          Schema.String,
+          Schema.Array(
+            Schema.Struct({
+              ...TranscriptContentBlock.fields,
+              id: Schema.optional(Schema.Unknown),
+              name: Schema.optional(Schema.Unknown),
+              input: Schema.optional(Schema.Unknown),
+              tool_use_id: Schema.optional(Schema.Unknown),
+              is_error: Schema.optional(Schema.Unknown),
+              // Typed, not Unknown, so image data in a result is never read.
+              content: Schema.optional(
+                Schema.Union([Schema.String, Schema.Array(TranscriptContentBlock)]),
+              ),
+            }),
+          ),
+        ]),
+      ),
+    }),
+  ),
+});
+
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
+const decodeDroidTranscriptRecord = Schema.decodeUnknownOption(
+  Schema.fromJsonString(DroidTranscriptRecord),
+);
 const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
+const decodeDroidTranscriptValue = Schema.decodeUnknownOption(DroidTranscriptRecord);
 const selectTranscriptPath = createTranscriptJsonSelector(TranscriptRecord);
+const selectDroidTranscriptPath = createTranscriptJsonSelector(DroidTranscriptRecord);
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
+
+const droidStringLimit = (path: ReadonlyArray<string | number | null>) =>
+  path[0] === "message" && path[1] === "content" && path[3] === "content"
+    ? MAX_DROID_TOOL_RESULT_CHARS
+    : Number.POSITIVE_INFINITY;
 
 type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
 
@@ -144,6 +193,15 @@ export interface AgentSessionThreadMessage {
   readonly createdAt: string;
 }
 
+/** Work shown between messages: Droid's tool calls, subagents, and notices, or a note about the import. */
+export interface AgentSessionThreadActivity {
+  /** How many of the thread's messages come before it. */
+  readonly position: number;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly activity: DroidTranscriptActivity;
+}
+
 export interface AgentSessionThread {
   readonly source: AgentSessionSource;
   readonly providerInstanceId: ProviderInstanceId;
@@ -153,7 +211,11 @@ export interface AgentSessionThread {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly messages: ReadonlyArray<AgentSessionThreadMessage>;
+  readonly activities: ReadonlyArray<AgentSessionThreadActivity>;
 }
+
+const TRIMMED_HISTORY_NOTICE =
+  "Earlier history was too large to import. The conversation continues from its most recent part.";
 
 export type AgentSessionRecentThread =
   | {
@@ -314,7 +376,10 @@ export function parseAgentSessionTranscript(
   lines = splitTranscriptRecords(input.contents, MAX_IMPORT_RECORDS + 1),
 ): AgentSessionThread | null {
   if (lines.length > MAX_IMPORT_RECORDS) return null;
-  const records = lines.flatMap((line) => Option.toArray(decodeTranscriptRecord(line)));
+  const decode = input.source === "droid" ? decodeDroidTranscriptRecord : decodeTranscriptRecord;
+  const records = lines.flatMap(
+    (line): ReadonlyArray<DecodedTranscriptRecord> => Option.toArray(decode(line)),
+  );
   const claudeFields =
     input.source === "claudeAgent"
       ? records.reduce(foldClaudeFields, emptyClaudeFields)
@@ -328,6 +393,7 @@ function parseAgentSessionRecords(
   input: AgentSessionTranscriptMetadata,
   records: ReadonlyArray<DecodedTranscriptRecord>,
   claudeFields: ClaudeFields,
+  omittedRecords = 0,
 ): AgentSessionThread | null {
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
@@ -405,8 +471,40 @@ function parseAgentSessionRecords(
       derivedTitle = deriveTitle(input.source, message.text);
     }
     messages.push(message);
-    if (messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
+    if (input.source !== "droid" && messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
   };
+
+  const activities: Array<AgentSessionThreadActivity> = [];
+  if (input.source === "droid") {
+    for (const entry of droidTranscriptEntries(records)) {
+      if (entry.type === "message") {
+        retainMessage({
+          role: entry.role,
+          text: entry.text,
+          createdAt: normalizeTimestamp(entry.timestamp, fallbackTimestamp),
+          codexResponseUser: false,
+        });
+        continue;
+      }
+      activities.push({
+        position: messages.length,
+        startedAt: normalizeTimestamp(entry.startedAt, fallbackTimestamp),
+        completedAt: normalizeTimestamp(entry.completedAt, fallbackTimestamp),
+        activity: entry.activity,
+      });
+    }
+    if (omittedRecords > 0 && messages.length > 0) {
+      // The first prompt is always kept; the note sits where the dropped history was.
+      const at = messages[0]!.createdAt;
+      const index = activities.findIndex((activity) => activity.position >= 1);
+      activities.splice(index === -1 ? activities.length : index, 0, {
+        position: 1,
+        startedAt: at,
+        completedAt: at,
+        activity: { kind: "notice", message: TRIMMED_HISTORY_NOTICE },
+      });
+    }
+  }
 
   const hasMatchingCodexEventInTurn = (text: string) => {
     const comparisonText = text.trim();
@@ -425,18 +523,8 @@ function parseAgentSessionRecords(
   };
 
   let recordIndex = -1;
-  for (const record of records) {
+  for (const record of input.source === "droid" ? [] : records) {
     recordIndex += 1;
-    if (input.source === "droid") {
-      const message = droidTranscriptMessage(record);
-      if (message === null) continue;
-      retainMessage({
-        ...message,
-        createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
-        codexResponseUser: false,
-      });
-      continue;
-    }
     if (input.source === "claudeAgent") {
       if (isHiddenClaudeRecord(record)) continue;
       if (record.type !== "user" && record.type !== "assistant") continue;
@@ -529,6 +617,7 @@ function parseAgentSessionRecords(
     createdAt: retainedMessages[0]?.createdAt ?? fallbackTimestamp,
     updatedAt: fallbackTimestamp,
     messages: retainedMessages,
+    activities,
   };
 }
 
@@ -541,7 +630,7 @@ function shouldRetainDecodedRecord(
   source: AgentSessionSource,
   record: DecodedTranscriptRecord,
 ): boolean {
-  if (source === "droid") return droidTranscriptMessage(record) !== null;
+  if (source === "droid") return isDroidTranscriptHistoryRecord(record);
   if (source === "claudeAgent") {
     if (isHiddenClaudeRecord(record) || (record.type !== "user" && record.type !== "assistant")) {
       return false;
@@ -856,22 +945,51 @@ export const make = Effect.gen(function* () {
             if (!sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))) {
               return null;
             }
-            const records: Array<DecodedTranscriptRecord> = [];
+            const droid = source === "droid";
+            const historyBudget = droid ? MAX_DROID_IMPORT_HISTORY_BYTES : MAX_IMPORT_HISTORY_BYTES;
+            const decodeValue = droid ? decodeDroidTranscriptValue : decodeTranscriptValue;
+            // Slots of dropped records become undefined; `firstPrompt` is never dropped.
+            const retained: Array<
+              { readonly record: DecodedTranscriptRecord; readonly bytes: number } | undefined
+            > = [];
+            let firstPrompt: number | undefined;
+            let nextToDrop = 0;
+            let omittedRecords = 0;
             let cwd = Option.none<string>();
             let claudeFields = emptyClaudeFields;
             let historyBytes = 0;
             let recordBytes = 0;
             let recordCount = 0;
             let bytesRead = 0;
+            const dropOldest = () => {
+              for (; nextToDrop < retained.length; nextToDrop++) {
+                const entry = retained[nextToDrop];
+                if (entry === undefined || nextToDrop === firstPrompt) continue;
+                retained[nextToDrop] = undefined;
+                historyBytes -= entry.bytes;
+                omittedRecords += 1;
+                nextToDrop += 1;
+                return true;
+              }
+              return false;
+            };
             const reserve = (bytes: number) => {
               recordBytes += bytes;
-              if (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES) {
-                throw new TranscriptJsonLimitError(
-                  "Transcript selected history exceeds the 32 MiB memory budget",
-                );
+              while (historyBytes + recordBytes > historyBudget) {
+                if (!droid || !dropOldest()) {
+                  throw new TranscriptJsonLimitError(
+                    `Transcript selected history exceeds the ${historyBudget / 1024 / 1024} MiB memory budget`,
+                  );
+                }
               }
             };
-            let reader = createTranscriptJsonReader(reserve, selectTranscriptPath);
+            const newReader = () =>
+              droid
+                ? createTranscriptJsonReader(reserve, selectDroidTranscriptPath, {
+                    stringLimit: droidStringLimit,
+                  })
+                : createTranscriptJsonReader(reserve, selectTranscriptPath);
+            let reader = newReader();
             let decoder = new TextDecoder();
             let recordStarted = false;
 
@@ -879,21 +997,28 @@ export const make = Effect.gen(function* () {
               reader.write(decoder.decode());
               recordCount += 1;
               if (recordCount > recordLimit) return false;
-              const decoded = decodeTranscriptValue(reader.finish());
+              const decoded: Option.Option<DecodedTranscriptRecord> = decodeValue(reader.finish());
               if (Option.isSome(decoded)) {
                 if (Option.isNone(cwd)) cwd = Option.fromNullOr(extractDecodedCwd(decoded.value));
                 if (source === "claudeAgent") {
                   claudeFields = foldClaudeFields(claudeFields, decoded.value);
-                } else if (source === "droid") {
+                } else if (droid) {
                   claudeFields = foldDroidTranscriptFields(claudeFields, decoded.value);
                 }
                 if (shouldRetainDecodedRecord(source, decoded.value)) {
-                  records.push(decoded.value);
+                  if (
+                    droid &&
+                    firstPrompt === undefined &&
+                    droidTranscriptMessage(decoded.value)?.role === "user"
+                  ) {
+                    firstPrompt = retained.length;
+                  }
+                  retained.push({ record: decoded.value, bytes: recordBytes });
                   historyBytes += recordBytes;
                 }
               }
               recordBytes = 0;
-              reader = createTranscriptJsonReader(reserve, selectTranscriptPath);
+              reader = newReader();
               decoder = new TextDecoder();
               recordStarted = false;
               return true;
@@ -925,8 +1050,11 @@ export const make = Effect.gen(function* () {
             }
 
             if (recordStarted && !(yield* Effect.try(finishRecord))) return null;
+            const records = retained.flatMap((entry) =>
+              entry === undefined ? [] : [entry.record],
+            );
             return sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))
-              ? { records, recordCount, cwd, claudeFields }
+              ? { records, recordCount, cwd, claudeFields, omittedRecords }
               : null;
           }),
         ),
@@ -1483,6 +1611,7 @@ export const make = Effect.gen(function* () {
             },
             snapshot.records,
             snapshot.claudeFields,
+            snapshot.omittedRecords,
           );
           if (parsedThread === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });

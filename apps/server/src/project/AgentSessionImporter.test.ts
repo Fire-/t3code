@@ -51,6 +51,7 @@ function candidate(
   modelSelection: typeof CODEX_MODEL_SELECTION,
   providerSessionId: string,
   provider: "codex" | "claudeAgent" = "codex",
+  activities: ReadonlyArray<AgentSessionScanner.AgentSessionThreadActivity> = [],
 ) {
   const providerInstanceId = modelSelection.instanceId;
   return {
@@ -78,6 +79,7 @@ function candidate(
         { role: "user" as const, text: "Fix it", createdAt: timestamp },
         { role: "assistant" as const, text: "Fixed", createdAt: timestamp },
       ],
+      activities,
     },
   } satisfies AgentSessionScanner.AgentSessionRecentThread;
 }
@@ -387,4 +389,75 @@ it.effect(
         runtimePayload: { importedTranscripts: [source.source] },
       });
     }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect("imports activity between messages as settled turn items in transcript order", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const at = { startedAt: timestamp, completedAt: timestamp };
+    const source = candidate(CODEX_MODEL_SELECTION, "with-activity", "codex", [
+      { position: 1, ...at, activity: { kind: "notice", message: "Earlier history was trimmed" } },
+      {
+        position: 1,
+        ...at,
+        activity: {
+          kind: "tool",
+          item: {
+            status: "completed",
+            title: "Execute",
+            type: "command_execution",
+            input: "vp test",
+            output: "ok",
+          },
+        },
+      },
+      {
+        position: 1,
+        ...at,
+        activity: {
+          kind: "subagent",
+          title: "Find the flake",
+          prompt: "Find it",
+          status: "completed",
+          result: "setup.ts",
+        },
+      },
+      {
+        position: 2,
+        ...at,
+        activity: {
+          kind: "tool",
+          item: {
+            status: "interrupted",
+            title: "Grep",
+            type: "dynamic_tool",
+            toolName: "Grep",
+            input: {},
+          },
+        },
+      },
+    ]);
+    const importer = yield* makeImporter([source]);
+
+    expect(yield* importer.run).toEqual({ importedCount: 1, skippedCount: 0 });
+    const { turnItems } = yield* projections.getThreadRecords(importId(source), ["turnItems"]);
+    expect(
+      turnItems
+        .toSorted((left, right) => left.ordinal - right.ordinal)
+        .map((item) => [item.ordinal, item.type, item.status, item.runId]),
+    ).toEqual([
+      [1, "user_message", "completed", null],
+      [2, "system_notice", "completed", null],
+      [3, "command_execution", "completed", null],
+      [4, "subagent", "completed", null],
+      [5, "assistant_message", "completed", null],
+      [6, "dynamic_tool", "interrupted", null],
+    ]);
+    expect(turnItems.find((item) => item.type === "subagent")).toMatchObject({
+      title: "Find the flake",
+      prompt: "Find it",
+      result: "setup.ts",
+      childThreadId: null,
+    });
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
 );

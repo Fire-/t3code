@@ -23,7 +23,12 @@ import type * as DateTime from "effect/DateTime";
 import * as Predicate from "effect/Predicate";
 
 import { DROID_DRIVER, type DroidEventContext, type DroidNotification } from "./events.ts";
-import { droidTaskResultReport, droidToolKind } from "./protocol.ts";
+import {
+  boundDroidToolOutput,
+  droidTaskResultReport,
+  droidToolKind,
+  type DroidTaskCompletion,
+} from "./protocol.ts";
 
 type DroidSubagentSettleStatus = "completed" | "failed" | "cancelled" | "interrupted";
 
@@ -31,6 +36,19 @@ export interface DroidSubagentOutcome {
   readonly status: DroidSubagentSettleStatus;
   readonly result: string | null;
 }
+
+/** How a background Task ends when Droid reports its completion. */
+export const droidTaskCompletionOutcome = (
+  completion: DroidTaskCompletion,
+): DroidSubagentOutcome => ({
+  status:
+    completion.status === "completed"
+      ? "completed"
+      : completion.status === "stopped"
+        ? "cancelled"
+        : "failed",
+  result: completion.summary === undefined ? null : boundDroidToolOutput(completion.summary),
+});
 
 interface SubagentSurface {
   readonly nodeId: NodeId;
