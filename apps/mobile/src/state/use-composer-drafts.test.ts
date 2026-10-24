@@ -546,6 +546,23 @@ describe("mobile composer drafts", () => {
     expect(getComposerDraftSnapshot(key)).toEqual({ ...before, modelSelection: undefined });
   });
 
+  it("drops a runtime mode pick once the thread reaches it, keeping an unsettled model pick", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const threadId = ThreadId.make("thread-1");
+    const key = `${environmentId}:${threadId}`;
+    const h = modelReconciliationHarness(environmentId, threadId);
+    updateComposerDraftSettings(key, {
+      modelSelection: { ...h.model(), model: "remote-model" },
+      runtimeMode: "approval-required",
+    });
+    h.flush();
+    const before = getComposerDraftSnapshot(key);
+    expect(before.runtimeMode).toBe("approval-required");
+
+    h.update({ runtimeMode: "approval-required" });
+    expect(getComposerDraftSnapshot(key)).toEqual({ ...before, runtimeMode: undefined });
+  });
+
   it("retains an unavailable provider pick through differing durable model updates", () => {
     const environmentId = EnvironmentId.make("environment-1");
     const threadId = ThreadId.make("thread-1");
