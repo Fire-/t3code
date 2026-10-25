@@ -49,9 +49,12 @@ branch and is rebuilt from scratch on every build:
 between rebuilds.
 
 When two overlays need the same change, cherry-pick one commit into each and
-keep its subject identical. `mise run check-overlays` (run first by
-`rebuild-local`) matches commits by subject and fails if the copies' patches
-differ; amend every copy together or none.
+keep its subject identical. Merging one overlay into another, or branching
+from one, is stacking even when it only shares a single commit; if an overlay
+needs part of another, split that part into its own commit and cherry-pick it.
+`mise run check-overlays` (run first by `rebuild-local`) fails if two overlays
+contain the very same commit, and matches cherry-picked copies by subject and
+fails if their patches differ; amend every copy together or none.
 
 ## Mise Tasks
 
@@ -59,7 +62,7 @@ differ; amend every copy together or none.
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mise run sync`                               | Fetch origin/main, re-overlay `overlay/*` branches that lack it, return to original branch; overlays that would conflict are left untouched and listed, so fix those by hand and rerun |
 | `mise run rebuild-local`                      | Reset `local` to origin/main, re-merge all `overlay/*` branches, end on `local`                                                                                                        |
-| `mise run check-overlays`                     | Fail if a commit cherry-picked into several overlays differs between them                                                                                                              |
+| `mise run check-overlays`                     | Fail if overlays stack (share the very same commit) or a commit cherry-picked into several overlays differs between them                                                               |
 | `mise run build`                              | Build all workspace packages                                                                                                                                                           |
 | `mise run smoke-test`                         | Boot-check the built server bundle (`bin.mjs --version`)                                                                                                                               |
 | `mise run swap`                               | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                                                                                                                    |

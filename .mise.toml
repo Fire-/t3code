@@ -97,9 +97,10 @@ echo "local rebuilt: origin/main + all overlay/* branches (alphabetical order)"
 
 # Overlays never stack, so a change two of them need is cherry-picked into
 # each. Copies that drift apart make the merge into local conflict or blend
-# both versions.
+# both versions. A cherry-pick always gets a new SHA, so the same SHA in two
+# overlays means one was merged into or branched from the other.
 [tasks.check-overlays]
-description = "Fail if a commit shared by several overlay/* branches (same subject) differs between them"
+description = "Fail if overlay/* branches share a commit SHA (stacked) or a cherry-picked copy (same subject) differs between them"
 run = '''
 set -euo pipefail
 for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
@@ -109,15 +110,24 @@ for b in $(git branch --list 'overlay/*' --format='%(refname:short)'); do
     done
 done | awk -F'\t' '
   { rows[$1] = rows[$1] sprintf("  %-28s %.10s  patch %.10s\n", $3, $4, $2); n[$1]++ }
+  { holders[$4] = holders[$4] " " $3; copies[$4]++; subject[$4] = $1 }
   !($1 in pid) { pid[$1] = $2; next }
   pid[$1] != $2 { bad[$1] = 1 }
   END {
     for (s in n) if (n[s] > 1) shared++
     for (s in bad) drift++
-    if (!drift) { printf "overlays ok: %d shared commit(s), identical in every overlay\n", shared; exit }
-    print "ERROR: commits shared between overlays have drifted (matched by subject):"
-    for (s in bad) printf "%s\n%s", s, rows[s]
-    print "Re-cherry-pick one copy into the other overlays so every copy carries the same patch."
+    for (h in copies) if (copies[h] > 1) stacked++
+    if (!drift && !stacked) { printf "overlays ok: %d shared commit(s), identical in every overlay\n", shared; exit }
+    if (stacked) {
+      print "ERROR: overlays contain the very same commit, so one was merged into or branched from another:"
+      for (h in copies) if (copies[h] > 1) printf "%s\n  %.10s in%s\n", subject[h], h, holders[h]
+      print "Rebuild the stacked overlay from origin/main and cherry-pick the commits it needs instead."
+    }
+    if (drift) {
+      print "ERROR: commits shared between overlays have drifted (matched by subject):"
+      for (s in bad) printf "%s\n%s", s, rows[s]
+      print "Re-cherry-pick one copy into the other overlays so every copy carries the same patch."
+    }
     exit 1
   }'
 '''
