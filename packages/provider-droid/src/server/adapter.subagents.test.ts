@@ -94,7 +94,7 @@ const completionMessage = (text: string, taskTurnId = "3a1b2c3d") => ({
 
 const launchTask = Effect.fnUntraced(function* (
   process: FakeDroidProcess,
-  options: { readonly background: boolean },
+  options: { readonly await?: boolean } = {},
 ) {
   yield* process.emit(taskCall({}));
   yield* process.emit(
@@ -102,7 +102,7 @@ const launchTask = Effect.fnUntraced(function* (
       subagent_type: "worker",
       description: "dig",
       prompt: "Dig in.",
-      ...(options.background ? { await: false } : {}),
+      ...(options.await === undefined ? {} : { await: options.await }),
     }),
   );
   yield* process.emit(childSession);
@@ -150,7 +150,7 @@ const clearedAt = (events: Events) => {
 const withBackgroundTask = Effect.gen(function* () {
   const fake = yield* makeFakeDroid();
   const begun = yield* beginTurn(fake, { runtimeMode: "auto" });
-  yield* launchTask(begun.process, { background: true });
+  yield* launchTask(begun.process, { await: false });
   yield* begun.process.emit(taskResult(LAUNCH_ACKNOWLEDGEMENT));
   yield* begun.process.emit(completed(1));
   yield* begun.opened.takeEvent(isTerminal);
@@ -176,7 +176,7 @@ describe("DroidAdapterV2 awaited Task subagents", () => {
         const fake = yield* makeFakeDroid();
         const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
 
-        yield* launchTask(process, { background: false });
+        yield* launchTask(process);
         yield* opened.takeEvent(isSubagentWith("running"));
         const [started] = subagentUpdates(opened.all);
         assert.strictEqual(started?.origin, "provider_native");
@@ -236,7 +236,7 @@ describe("DroidAdapterV2 awaited Task subagents", () => {
       Effect.gen(function* () {
         const fake = yield* makeFakeDroid();
         const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
-        yield* launchTask(process, { background: false });
+        yield* launchTask(process);
         yield* process.emit(taskResult(AWAITED_REPORT("done")));
 
         yield* process.emit(taskCall({ subagent_type: "worker", description: "dig", prompt: "x" }));
@@ -265,7 +265,7 @@ describe("DroidAdapterV2 awaited Task subagents", () => {
     Effect.gen(function* () {
       const fake = yield* makeFakeDroid();
       const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
-      yield* launchTask(process, { background: false });
+      yield* launchTask(process);
       yield* process.emit(taskResult("Error: the subagent crashed", true));
       yield* process.emit(completed(1));
       yield* opened.takeEvent(isTerminal);
@@ -288,7 +288,7 @@ describe("DroidAdapterV2 awaited Task subagents", () => {
         Effect.gen(function* () {
           const fake = yield* makeFakeDroid();
           const begun = yield* beginTurn(fake, { runtimeMode: "auto" });
-          yield* launchTask(begun.process, { background: false });
+          yield* launchTask(begun.process);
           yield* begun.opened.takeEvent(isSubagentWith("running"));
 
           yield* end(begun);
@@ -381,7 +381,7 @@ describe("DroidAdapterV2 subagent child threads", () => {
         runtimeMode: "auto",
         homeDirectory: home,
       });
-      yield* launchTask(process, { background: false });
+      yield* launchTask(process);
       const created = yield* opened.takeEvent((event) => event.type === "app_thread.created");
       if (created.type !== "app_thread.created") return assert.fail("no child thread");
       assert.strictEqual(created.appThread.id, CHILD_THREAD);
@@ -491,6 +491,32 @@ describe("Pending background tasks are set on start and cleared on completion, f
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "a Task called without `await` that Droid launched in the background runs until its report",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
+        yield* launchTask(process);
+        yield* process.emit(taskResult(LAUNCH_ACKNOWLEDGEMENT));
+        yield* process.emit(completed(1));
+        yield* opened.takeEvent(isTerminal);
+
+        assert.deepStrictEqual(
+          subagentUpdates(opened.all).map((subagent) => subagent.status),
+          ["running"],
+        );
+        assert.deepStrictEqual(rosters(opened.all).at(-1), [
+          { taskId: CHILD, kind: "subagent", description: "dig" },
+        ]);
+
+        yield* process.emit(completionMessage(completionReport("completed", "sub-ok")));
+        yield* opened.takeEvent(isSubagentWith("completed"));
+        assert.strictEqual(subagentUpdates(opened.all).at(-1)?.result, "sub-ok");
+        assert.deepStrictEqual(rosters(opened.all).at(-1), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("[VAL-SUB-006] a report for a task the adapter does not know changes nothing", () =>
     Effect.gen(function* () {
       const begun = yield* withBackgroundTask;
@@ -586,7 +612,7 @@ describe("Pending background tasks are set on start and cleared on completion, f
       Effect.gen(function* () {
         const fake = yield* makeFakeDroid();
         const begun = yield* beginTurn(fake, { runtimeMode: "auto" });
-        yield* launchTask(begun.process, { background: true });
+        yield* launchTask(begun.process, { await: false });
         yield* begun.process.emit(taskResult("Error: could not launch", true));
         yield* begun.process.emit(completed(1));
         yield* begun.opened.takeEvent(isTerminal);
@@ -643,7 +669,7 @@ describe("Pending background tasks are set on start and cleared on completion, f
         const process = fake.current();
         yield* startTurn(opened.runtime, thread, { runtimeMode: "auto" });
         yield* opened.takeEvent((event) => event.type === "provider_turn.updated");
-        yield* launchTask(process, { background: true });
+        yield* launchTask(process, { await: false });
         yield* process.emit(taskResult(LAUNCH_ACKNOWLEDGEMENT));
         yield* process.emit(completed(1));
         yield* opened.takeEvent(isTerminal);
@@ -670,7 +696,7 @@ describe("Pending background tasks are set on start and cleared on completion, f
       Effect.gen(function* () {
         const fake = yield* makeFakeDroid();
         const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
-        yield* launchTask(process, { background: true });
+        yield* launchTask(process, { await: false });
         yield* process.emit(taskResult(LAUNCH_ACKNOWLEDGEMENT));
         yield* process.settle;
 
@@ -715,7 +741,7 @@ describe("Pending background tasks are set on start and cleared on completion, f
         const thread = yield* resume(opened, "stored-session");
         const process = fake.current();
         yield* startTurn(opened.runtime, thread, { runtimeMode: "auto" });
-        yield* launchTask(process, { background: true });
+        yield* launchTask(process, { await: false });
         yield* process.emit(taskResult(LAUNCH_ACKNOWLEDGEMENT));
         yield* process.emit(completed(1));
         yield* opened.takeEvent(isTerminal);

@@ -39,6 +39,7 @@ import {
   boundDroidToolOutput,
   droidTaskResultReport,
   droidToolKind,
+  isDroidBackgroundTaskLaunch,
   type DroidTaskCompletion,
 } from "./protocol.ts";
 import type { DroidTranscriptEntry } from "./sessionTranscripts.ts";
@@ -90,7 +91,11 @@ interface SubagentSurface {
 export interface DroidSubagent {
   readonly toolUseId: string;
   readonly providerTurnId: ProviderTurnId;
-  /** `await: false`: the Task call returns at once and the report arrives as a message later. */
+  /**
+   * The Task call returns at once and the report arrives as a message later. Set by `await:
+   * false`, or by Droid's launch reply: a call without `await` runs wherever Droid's default puts
+   * it, and that default has changed between versions.
+   */
   readonly background: boolean;
   readonly prompt: string;
   readonly title: string | null;
@@ -504,7 +509,11 @@ export function settleDroidTaskResult(
 ): DroidSubagentUpdate | undefined {
   if (known === undefined || isSettledDroidSubagent(known)) return undefined;
   const failed = notification["isError"] === true;
-  if (known.background && !failed) return undefined;
+  if (!failed && (known.background || isDroidBackgroundTaskLaunch(notification["content"]))) {
+    return known.background
+      ? undefined
+      : { subagent: { ...known, background: true }, events: [], surfaced: false };
+  }
   const announced =
     known.surface === undefined
       ? announce(known, ctx, undefined, ordinal, now)

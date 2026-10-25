@@ -326,6 +326,11 @@ export function awaitedTaskReport(text: string | undefined): string | undefined 
   return asTrimmed(lines.join("\n"));
 }
 
+/** A background Task's result only acknowledges the launch, and leads with this line. */
+export function isDroidBackgroundTaskLaunch(content: unknown): boolean {
+  return droidMessageText(content).split("\n", 1)[0]?.trim() === "Task launched in background.";
+}
+
 /**
  * The report of a `Task` tool result: the text with Droid's framing lines removed, stripped
  * before it is bounded so a long report cannot cut the framing in half.

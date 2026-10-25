@@ -554,6 +554,23 @@ describe("background Task subagent", () => {
     assert.strictEqual(subagentItemOf(running.events)?.turnItem.nativeItemRef?.nativeId, CHILD);
   });
 
+  it("runs in the background when Droid launched a Task called without `await` there", () => {
+    const running = launched();
+    const acknowledged = settleDroidTaskResult(
+      running.subagent,
+      ctx,
+      taskResult(`Task launched in background.\ntask_id: ${CHILD}\nsession_id: ${CHILD}`),
+      NOT_STOPPED,
+      102,
+      at(20),
+    );
+    assert.deepStrictEqual(statusesOf(acknowledged), []);
+    assert.strictEqual(acknowledged?.subagent.status, "running");
+    assert.deepStrictEqual(droidSubagentRoster([acknowledged!.subagent]), [
+      { taskId: CHILD, kind: "subagent", description: "dig" },
+    ]);
+  });
+
   it("lists no awaited subagent and no finished background one", () => {
     const awaited = launched();
     const background = launchedInBackground();
