@@ -26,6 +26,7 @@ import {
 import type { IdAllocatorV2Derive } from "@t3tools/provider-core/server/IdAllocator";
 import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
+import { HTML_RENDER_TOOL_NAME, type HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import * as DateTime from "effect/DateTime";
 import * as Equal from "effect/Equal";
 import * as Predicate from "effect/Predicate";
@@ -934,6 +935,63 @@ function mapToolResult(
     status: notification["isError"] === true ? errorStatus : "completed",
     content: notification["content"],
   });
+}
+
+/** The tool a `tool_result` settles, while it is still open. */
+export function droidToolSettledBy(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  notification: DroidNotification,
+): { readonly toolUseId: string; readonly name: string; readonly input: unknown } | undefined {
+  if (notification.type !== "tool_result") return undefined;
+  const toolUseId = asTrimmed(notification["toolUseId"]);
+  if (toolUseId === undefined) return undefined;
+  const tool = state.tools.get(toolNativeItemId(ctx, toolUseId));
+  return tool === undefined || tool.completed
+    ? undefined
+    : { toolUseId, name: tool.name, input: tool.input };
+}
+
+const HTML_RENDER_TOOL = droidMcpToolName(`t3-code___${HTML_RENDER_TOOL_NAME}`);
+
+/**
+ * Pages a Script published through T3's `html_render`. Droid reports only what the script
+ * printed, so each page gets the item a direct call would have had: clients draw pages from it.
+ */
+export function mapDroidScriptPages(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  scriptToolUseId: string,
+  pages: ReadonlyArray<HtmlRenderReference>,
+  now: DateTime.Utc,
+): DroidMapResult {
+  const scriptNativeItemId = toolNativeItemId(ctx, scriptToolUseId);
+  const events = pages.flatMap((page, index): ReadonlyArray<ProviderAdapterV2Event> => {
+    const nativeItemId = `${scriptNativeItemId}:${HTML_RENDER_TOOL_NAME}:${page.attachmentId}`;
+    return [
+      nodeEvent(ctx, nativeItemId, "tool_call", "completed", now, now),
+      {
+        type: "turn_item.updated",
+        driver: DROID_DRIVER,
+        turnItem: {
+          ...itemBase(ctx, nativeItemId, state.nextItemOrdinal + index, now, now),
+          parentItemId: ctx.derive.turnItemFromProviderItem({
+            driver: DROID_DRIVER,
+            nativeItemId: scriptNativeItemId,
+          }),
+          completedAt: now,
+          status: "completed",
+          type: "dynamic_tool",
+          title: HTML_RENDER_TOOL,
+          ...mcpToolPresentation({ toolName: HTML_RENDER_TOOL }),
+          toolName: HTML_RENDER_TOOL,
+          input: { title: page.title, height: page.height },
+          output: { htmlRender: page },
+        },
+      },
+    ];
+  });
+  return { state: { ...state, nextItemOrdinal: state.nextItemOrdinal + pages.length }, events };
 }
 
 /**

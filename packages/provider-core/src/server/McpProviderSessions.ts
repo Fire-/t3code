@@ -44,6 +44,10 @@ export class McpProviderSessions extends Context.Service<
       input: { readonly html?: unknown; readonly title?: unknown; readonly height?: unknown },
       reported?: HtmlRenderReference,
     ) => Effect.Effect<HtmlRenderReference | undefined>;
+    // For a provider whose code-running tool calls html_render without reporting the inputs.
+    readonly takeHtmlRenders: (
+      threadId: ThreadId,
+    ) => Effect.Effect<ReadonlyArray<HtmlRenderReference>>;
   }
 >()("@t3tools/provider-core/server/McpProviderSessions") {}
 
@@ -145,6 +149,16 @@ const make = Effect.gen(function* () {
           next.set(threadId, rest);
         }
         return [kept[index]!.reference, next];
+      }),
+    takeHtmlRenders: (threadId) =>
+      Ref.modify(htmlRenders, (current) => {
+        const kept = current.get(threadId) ?? [];
+        if (kept.length === 0) {
+          return [[], current];
+        }
+        const next = new Map(current);
+        next.delete(threadId);
+        return [kept.map((page) => page.reference), next];
       }),
   });
 });

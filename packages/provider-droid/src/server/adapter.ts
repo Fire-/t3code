@@ -1,5 +1,8 @@
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
+import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
+import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import {
   MessageId,
   ProviderDriverKind,
@@ -62,8 +65,10 @@ import {
   DROID_ZERO_COUNTS,
   droidCompactionEvents,
   droidTodoSteps,
+  droidToolSettledBy,
   mapDroidNotification,
   mapDroidProposedPlan,
+  mapDroidScriptPages,
   mapDroidTodoList,
   settleDroidTurn,
   type DroidEventContext,
@@ -80,8 +85,10 @@ import {
 import {
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
+  droidMcpToolName,
   droidTaskCompletionMessageId,
   droidTaskCompletionOf,
+  droidToolResultOutput,
   type DroidTaskCompletion,
   type DroidTokenCounts,
 } from "./protocol.ts";
@@ -1453,6 +1460,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         if (yield* handleSubagentFrame(state, turn, notification)) return;
         if (notification.type === "create_message") noteQueuedSteerStarted(turn, notification);
+        const settledTool = droidToolSettledBy(
+          turn.mapper,
+          eventContext(state, turn),
+          notification,
+        );
         const mapped = mapDroidNotification(
           turn.mapper,
           eventContext(state, turn),
@@ -1473,6 +1485,49 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         turn.mapper = mapped.state;
         yield* emitMapped(state, mapped.events);
         if (notification.type === "tool_call") yield* projectTodoList(state, turn, notification);
+        if (settledTool !== undefined) {
+          yield* claimHtmlRenders(state, turn, settledTool, notification);
+        }
+      });
+
+      /**
+       * Pages published through T3's `html_render`, which the server keeps until an adapter claims
+       * them. A direct call's item already carries its page. A Script's item holds only what the
+       * script printed, so the pages kept by then were the script's and get items of their own.
+       */
+      const claimHtmlRenders = Effect.fnUntraced(function* (
+        state: DroidThreadState,
+        turn: ActiveDroidTurn,
+        tool: { readonly toolUseId: string; readonly name: string; readonly input: unknown },
+        notification: DroidNotification,
+      ) {
+        const threadId = turn.turnInput.threadId;
+        if (tool.name === "Script") {
+          // A script can fail after it published, and its page is out by then.
+          const pages = yield* mcpSessions.takeHtmlRenders(threadId);
+          if (pages.length === 0) return;
+          const mapped = mapDroidScriptPages(
+            turn.mapper,
+            eventContext(state, turn),
+            tool.toolUseId,
+            pages,
+            yield* DateTime.now,
+          );
+          turn.mapper = mapped.state;
+          return yield* emitMapped(state, mapped.events);
+        }
+        const toolName = droidMcpToolName(tool.name);
+        if (resolveT3McpToolId(toolName) !== HTML_RENDER_TOOL_NAME) return;
+        const reported = htmlRenderFromToolItem({
+          toolName,
+          output: droidToolResultOutput(field(notification, "content")).text,
+        });
+        // A failed call may have published before Droid lost its result: a Script must not show it.
+        yield* mcpSessions.takeHtmlRender(
+          threadId,
+          Predicate.isObject(tool.input) ? tool.input : {},
+          reported,
+        );
       });
 
       /** A TodoWrite call also becomes the thread's todo list, which clients track as tasks. */
