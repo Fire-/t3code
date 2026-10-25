@@ -417,6 +417,72 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("marks a steer its provider dropped as not delivered, once", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const threadId = threadEvent.threadId;
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const messageId = MessageId.make("message:steer-discarded");
+      const steer: OrchestrationV2TurnItem = {
+        createdBy: "user",
+        creationSource: "web",
+        id: idAllocator.derive.userTurnItem({ messageId }),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "user_message",
+        messageId,
+        inputIntent: "steer",
+        text: "use the other branch",
+        attachments: [],
+      };
+      yield* eventSink.write({
+        events: [
+          threadEvent,
+          {
+            id: yield* idAllocator.allocate.event({ threadId }),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: steer,
+          },
+        ],
+      });
+      const discard = (discarded: MessageId) =>
+        ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          event: { type: "steer.discarded", driver: CODEX_DRIVER, threadId, messageId: discarded },
+        });
+
+      assert.lengthOf(yield* discard(messageId), 1);
+      assert.isEmpty(yield* discard(messageId));
+      assert.isEmpty(yield* discard(MessageId.make("message:never-sent")));
+      const stored = yield* projectionStore.getTurnItem({ threadId, itemId: steer.id });
+      assert.equal(stored?.status, "cancelled");
+      assert.equal(stored?.type === "user_message" ? stored.text : null, steer.text);
+    }),
+  );
+
   it.effect("rolls back runs a provider rewound off its active branch", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;

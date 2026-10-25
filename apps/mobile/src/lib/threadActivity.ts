@@ -137,6 +137,7 @@ export interface ThreadFeedMessage {
   readonly runId: RunId | null;
   readonly streaming: boolean;
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
+  readonly undelivered?: true;
   readonly createdBy?: OrchestrationV2Actor;
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;
@@ -2151,6 +2152,7 @@ export function buildThreadFeed(
           ...(item.type === "user_message"
             ? {
                 inputIntent: item.inputIntent,
+                ...(item.status === "cancelled" ? { undelivered: true as const } : {}),
                 createdBy: item.createdBy,
                 creationSource: item.creationSource,
                 ...(item.scheduledTaskId ? { scheduledTaskId: item.scheduledTaskId } : {}),
