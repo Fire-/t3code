@@ -129,18 +129,25 @@ export const captureLogs = () => {
   return { entries, provide };
 };
 
+/** Keeps the adapter away from the real `~/.factory`; a test that needs Droid's files names its own home. */
+const NO_HOME = "/nonexistent/t3-droid-test-home";
+
 export const makeAdapter = Effect.fnUntraced(function* (
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   authSignal?: DroidAuthSignalService,
   binaryPath = "droid",
   continuationRequests?: DroidAdapterV2Options["continuationRequests"],
+  homeDirectory = NO_HOME,
 ) {
   const make = makeDroidAdapterV2({
     instanceId: DROID_INSTANCE_ID,
     settings: { enabled: true, binaryPath, customModels: [] },
     environment: {},
     ...(continuationRequests === undefined ? {} : { continuationRequests }),
-  }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+  }).pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    Effect.provideService(HostProcess.HomeDirectory, homeDirectory),
+  );
   return yield* authSignal === undefined
     ? make
     : make.pipe(Effect.provideService(DroidAuthSignal, authSignal));
@@ -175,6 +182,7 @@ export const adapterFromSavedBlock = Effect.fnUntraced(function* (fake: FakeDroi
   }).pipe(
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner),
     Effect.provideService(HostProcess.Environment, {}),
+    Effect.provideService(HostProcess.HomeDirectory, NO_HOME),
   );
 });
 
@@ -191,6 +199,8 @@ export interface OpenOptions {
   readonly sessionScope?: Scope.Closeable;
   /** Where the adapter offers the continuations Droid starts on its own; without it none is offered. */
   readonly continuationRequests?: DroidAdapterV2Options["continuationRequests"];
+  /** The home Droid keeps its sessions under. */
+  readonly homeDirectory?: string;
 }
 
 export const openRuntime = Effect.fnUntraced(function* (
@@ -206,6 +216,7 @@ export const openRuntime = Effect.fnUntraced(function* (
       options.authSignal,
       options.binaryPath,
       options.continuationRequests,
+      options.homeDirectory,
     ));
   const open = adapter.openSession({
     threadId: THREAD_ID,

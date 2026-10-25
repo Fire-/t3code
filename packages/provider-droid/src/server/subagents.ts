@@ -5,12 +5,18 @@
  *
  * A record freezes the ids it launched under (run, provider turn, nodes), so a background
  * subagent can still settle after the turn that launched it has ended.
+ *
+ * A child session gets a read-only child thread. Droid does not stream a child's events, so the
+ * thread holds the Task prompt while the child runs and its transcript once it has ended.
  */
 import type {
+  ModelSelection,
   NodeId,
+  OrchestrationV2AppThread,
   OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderRef,
   OrchestrationV2Subagent,
+  OrchestrationV2TurnItem,
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
@@ -19,7 +25,13 @@ import type {
   TurnItemId,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
-import type * as DateTime from "effect/DateTime";
+import {
+  makeSubagentChildThread,
+  makeSubagentConversationArtifacts,
+  subagentThreadTitle,
+} from "@t3tools/provider-core/server/subagentProjection";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 
 import { DROID_DRIVER, type DroidEventContext, type DroidNotification } from "./events.ts";
@@ -29,6 +41,7 @@ import {
   droidToolKind,
   type DroidTaskCompletion,
 } from "./protocol.ts";
+import type { DroidTranscriptEntry } from "./sessionTranscripts.ts";
 
 type DroidSubagentSettleStatus = "completed" | "failed" | "cancelled" | "interrupted";
 
@@ -50,6 +63,12 @@ export const droidTaskCompletionOutcome = (
   result: completion.summary === undefined ? null : boundDroidToolOutput(completion.summary),
 });
 
+interface ChildThreadSurface {
+  readonly sessionId: string;
+  readonly threadId: ThreadId;
+  readonly rootNodeId: NodeId;
+}
+
 interface SubagentSurface {
   readonly nodeId: NodeId;
   readonly turnItemId: TurnItemId;
@@ -64,6 +83,8 @@ interface SubagentSurface {
   readonly nativeTaskRef: OrchestrationV2ProviderRef | null;
   /** The ref the roster's task id is read from, so the roster and the item name one task. */
   readonly nativeItemRef: OrchestrationV2ProviderRef;
+  /** Null exactly when `nativeTaskRef` is: no child session, no child thread. */
+  readonly child: ChildThreadSurface | null;
 }
 
 export interface DroidSubagent {
@@ -78,7 +99,20 @@ export interface DroidSubagent {
   readonly status: OrchestrationV2Subagent["status"];
   /** Set once the subagent has been announced. */
   readonly surface: SubagentSurface | undefined;
+  /** The report it settled with. */
+  readonly result: string | null;
 }
+
+/** What a child thread copies from the thread whose turn launched the subagent. */
+export interface DroidSubagentParent {
+  readonly appThread: OrchestrationV2AppThread;
+  readonly modelSelection: ModelSelection;
+  /** Which subagent of the thread this is; names a child thread that has no title or prompt. */
+  readonly number: number;
+}
+
+// Ordinals on a child thread: the prompt, then its transcript.
+const CHILD_PROMPT_ORDINAL = 100;
 
 export interface DroidSubagentUpdate {
   readonly subagent: DroidSubagent;
@@ -93,7 +127,7 @@ const asTrimmed = (value: unknown): string | undefined => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
-const isSettledDroidSubagent = (subagent: DroidSubagent): boolean =>
+export const isSettledDroidSubagent = (subagent: DroidSubagent): boolean =>
   subagent.status === "completed" ||
   subagent.status === "failed" ||
   subagent.status === "cancelled" ||
@@ -135,7 +169,127 @@ export function noteDroidTaskCall(
     childSessionId: undefined,
     status: "pending",
     surface: undefined,
+    result: null,
   };
+}
+
+function childRootNodeEvent(
+  surface: SubagentSurface,
+  child: ChildThreadSurface,
+  status: OrchestrationV2Subagent["status"],
+  completedAt: DateTime.Utc | null,
+): ProviderAdapterV2Event {
+  return {
+    type: "node.updated",
+    driver: DROID_DRIVER,
+    node: {
+      id: child.rootNodeId,
+      threadId: child.threadId,
+      runId: null,
+      parentNodeId: null,
+      rootNodeId: child.rootNodeId,
+      kind: "root_turn",
+      status,
+      countsForRun: false,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: surface.nativeTaskRef,
+      runtimeRequestId: null,
+      checkpointScopeId: null,
+      startedAt: surface.startedAt,
+      completedAt,
+    },
+  };
+}
+
+function childConversationEvents(
+  surface: SubagentSurface,
+  child: ChildThreadSurface,
+  input: {
+    readonly nativeItemId: string;
+    readonly role: "user" | "assistant";
+    readonly text: string;
+    readonly ordinal: number;
+    readonly at: DateTime.Utc;
+    /** Only the Task prompt comes from the parent thread. */
+    readonly fromParent?: boolean;
+  },
+  derive: DroidEventContext["derive"],
+): ReadonlyArray<ProviderAdapterV2Event> {
+  const { message, turnItem } = makeSubagentConversationArtifacts({
+    messageId: derive.messageFromProviderItem({
+      driver: DROID_DRIVER,
+      nativeItemId: input.nativeItemId,
+    }),
+    ...(input.fromParent === true ? { senderThreadId: surface.threadId } : {}),
+    turnItemId: derive.turnItemFromProviderItem({
+      driver: DROID_DRIVER,
+      nativeItemId: input.nativeItemId,
+    }),
+    threadId: child.threadId,
+    rootNodeId: child.rootNodeId,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: { driver: DROID_DRIVER, nativeId: input.nativeItemId, strength: "weak" },
+    role: input.role,
+    text: input.text,
+    ordinal: input.ordinal,
+    now: input.at,
+  });
+  return [
+    { type: "message.updated", driver: DROID_DRIVER, message },
+    { type: "turn_item.updated", driver: DROID_DRIVER, turnItem },
+  ];
+}
+
+function childThreadOpened(
+  subagent: DroidSubagent,
+  surface: SubagentSurface,
+  child: ChildThreadSurface,
+  parent: DroidSubagentParent,
+  derive: DroidEventContext["derive"],
+  now: DateTime.Utc,
+): ReadonlyArray<ProviderAdapterV2Event> {
+  return [
+    {
+      type: "app_thread.created",
+      driver: DROID_DRIVER,
+      appThread: makeSubagentChildThread({
+        parentThread: parent.appThread,
+        childThreadId: child.threadId,
+        parentNodeId: surface.nodeId,
+        // Droid keys its process by session, so the child never gets a provider thread of its own.
+        activeProviderThreadId: null,
+        providerInstanceId: surface.providerInstanceId,
+        modelSelection: parent.modelSelection,
+        title: subagentThreadTitle({
+          parentTitle: parent.appThread.title,
+          title: subagent.title,
+          prompt: subagent.prompt,
+          ordinal: parent.number,
+        }),
+        now,
+        createdBy: "agent",
+        creationSource: "provider",
+      }),
+    },
+    childRootNodeEvent(surface, child, "running", null),
+    ...(subagent.prompt === ""
+      ? []
+      : childConversationEvents(
+          surface,
+          child,
+          {
+            nativeItemId: `${child.sessionId}:prompt`,
+            role: "user",
+            text: subagent.prompt,
+            ordinal: CHILD_PROMPT_ORDINAL,
+            at: now,
+            fromParent: true,
+          },
+          derive,
+        )),
+  ];
 }
 
 function subagentEvents(
@@ -148,6 +302,11 @@ function subagentEvents(
   const settled = status !== "running";
   const completedAt = settled ? now : null;
   return [
+    // A background subagent's run stops listening once the subagent's own item settles, so its
+    // child thread ends first.
+    ...(settled && surface.child !== null
+      ? [childRootNodeEvent(surface, surface.child, status, completedAt)]
+      : []),
     {
       type: "subagent.updated",
       driver: DROID_DRIVER,
@@ -161,7 +320,7 @@ function subagentEvents(
         driver: DROID_DRIVER,
         providerInstanceId: surface.providerInstanceId,
         providerThreadId: surface.providerThreadId,
-        childThreadId: null,
+        childThreadId: surface.child?.threadId ?? null,
         nativeTaskRef: surface.nativeTaskRef,
         prompt: subagent.prompt,
         title: subagent.title,
@@ -217,7 +376,7 @@ function subagentEvents(
         origin: "provider_native",
         driver: DROID_DRIVER,
         providerInstanceId: surface.providerInstanceId,
-        childThreadId: null,
+        childThreadId: surface.child?.threadId ?? null,
         prompt: subagent.prompt,
         result,
       },
@@ -228,15 +387,30 @@ function subagentEvents(
 function announce(
   known: DroidSubagent,
   ctx: DroidEventContext,
-  childSessionId: string | undefined,
+  launch: { readonly childSessionId: string; readonly parent: DroidSubagentParent } | undefined,
   ordinal: number,
   now: DateTime.Utc,
 ): DroidSubagentUpdate {
   const nativeItemId = `${known.providerTurnId}:subagent:${known.toolUseId}`;
+  const childSessionId = launch?.childSessionId;
   const nativeTaskRef: OrchestrationV2ProviderRef | null =
     childSessionId === undefined
       ? null
       : { driver: DROID_DRIVER, nativeId: childSessionId, strength: "strong" };
+  const child: ChildThreadSurface | null =
+    childSessionId === undefined
+      ? null
+      : {
+          sessionId: childSessionId,
+          threadId: ctx.derive.threadFromProviderThread({
+            driver: DROID_DRIVER,
+            nativeThreadId: childSessionId,
+          }),
+          rootNodeId: ctx.derive.nodeFromProviderItem({
+            driver: DROID_DRIVER,
+            nativeItemId: `${childSessionId}:root`,
+          }),
+        };
   const surface: SubagentSurface = {
     nodeId: ctx.derive.nodeFromProviderItem({ driver: DROID_DRIVER, nativeItemId }),
     turnItemId: ctx.derive.turnItemFromProviderItem({ driver: DROID_DRIVER, nativeItemId }),
@@ -253,11 +427,17 @@ function announce(
       nativeId: known.toolUseId,
       strength: "strong",
     },
+    child,
   };
   const subagent: DroidSubagent = { ...known, childSessionId, status: "running", surface };
   return {
     subagent,
-    events: subagentEvents(subagent, surface, "running", null, now),
+    events: [
+      ...(child === null || launch === undefined
+        ? []
+        : childThreadOpened(subagent, surface, child, launch.parent, ctx.derive, now)),
+      ...subagentEvents(subagent, surface, "running", null, now),
+    ],
     surfaced: true,
   };
 }
@@ -273,6 +453,7 @@ export function launchDroidSubagent(
   notification: DroidNotification,
   ordinal: number,
   now: DateTime.Utc,
+  parent: DroidSubagentParent,
 ): DroidSubagentUpdate | undefined {
   const toolUseId = asTrimmed(notification["toolUseId"]);
   const childSessionId = asTrimmed(notification["childSessionId"]);
@@ -288,8 +469,9 @@ export function launchDroidSubagent(
     childSessionId: undefined,
     status: "pending",
     surface: undefined,
+    result: null,
   };
-  return announce(call, ctx, childSessionId, ordinal, now);
+  return announce(call, ctx, { childSessionId, parent }, ordinal, now);
 }
 
 export function settleDroidSubagent(
@@ -300,7 +482,7 @@ export function settleDroidSubagent(
   const { surface } = subagent;
   if (surface === undefined || isSettledDroidSubagent(subagent)) return undefined;
   return {
-    subagent: { ...subagent, status: outcome.status },
+    subagent: { ...subagent, status: outcome.status, result: outcome.result },
     events: subagentEvents(subagent, surface, outcome.status, outcome.result, now),
     surfaced: false,
   };
@@ -347,6 +529,107 @@ export function settleDroidTaskResult(
     events: [...announced.events, ...settled.events],
     surfaced: announced.surfaced,
   };
+}
+
+/**
+ * A child thread's history once its subagent has ended, from the child session's transcript. The
+ * transcript's first user message is the Task prompt, already on the thread. When the transcript
+ * holds no reply (it could not be read, or the child never answered), the report stands in.
+ */
+export function droidChildThreadHistory(
+  subagent: DroidSubagent,
+  entries: ReadonlyArray<DroidTranscriptEntry>,
+  derive: DroidEventContext["derive"],
+  now: DateTime.Utc,
+): ReadonlyArray<ProviderAdapterV2Event> {
+  const surface = subagent.surface;
+  const child = surface?.child ?? null;
+  if (surface === undefined || child === null) return [];
+  const at = (timestamp: string | undefined) =>
+    Option.getOrElse(DateTime.make(timestamp ?? Number.NaN), () => now);
+  const promptIndex = entries.findIndex(
+    (entry) => entry.type === "message" && entry.role === "user",
+  );
+  const history = entries.filter((_, index) => index !== promptIndex);
+  const events = history.flatMap((entry, index): ReadonlyArray<ProviderAdapterV2Event> => {
+    const nativeItemId = `${child.sessionId}:history:${index}`;
+    const ordinal = CHILD_PROMPT_ORDINAL + 1 + index;
+    if (entry.type === "message") {
+      return childConversationEvents(
+        surface,
+        child,
+        { nativeItemId, role: entry.role, text: entry.text, ordinal, at: at(entry.timestamp) },
+        derive,
+      );
+    }
+    const completedAt = at(entry.completedAt);
+    const base = {
+      id: derive.turnItemFromProviderItem({ driver: DROID_DRIVER, nativeItemId }),
+      threadId: child.threadId,
+      runId: null,
+      nodeId: child.rootNodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: { driver: DROID_DRIVER, nativeId: nativeItemId, strength: "weak" as const },
+      parentItemId: null,
+      ordinal,
+      startedAt: at(entry.startedAt),
+      completedAt,
+      updatedAt: completedAt,
+    };
+    const { activity } = entry;
+    const turnItem: OrchestrationV2TurnItem =
+      activity.kind === "tool"
+        ? { ...base, ...activity.item }
+        : activity.kind === "subagent"
+          ? {
+              ...base,
+              type: "subagent",
+              status: activity.status,
+              title: activity.title,
+              subagentId: derive.nodeFromProviderItem({ driver: DROID_DRIVER, nativeItemId }),
+              origin: "provider_native",
+              driver: DROID_DRIVER,
+              providerInstanceId: surface.providerInstanceId,
+              childThreadId: null,
+              prompt: activity.prompt,
+              result: activity.result,
+            }
+          : activity.kind === "reasoning"
+            ? {
+                ...base,
+                type: "reasoning",
+                status: "completed",
+                title: null,
+                text: activity.text,
+                streaming: false,
+              }
+            : {
+                ...base,
+                type: "system_notice",
+                status: "completed",
+                title: activity.message,
+                message: activity.message,
+              };
+    return [{ type: "turn_item.updated", driver: DROID_DRIVER, turnItem }];
+  });
+  const replied = history.some((entry) => entry.type === "message" && entry.role === "assistant");
+  if (replied || subagent.result === null || subagent.result === "") return events;
+  return [
+    ...events,
+    ...childConversationEvents(
+      surface,
+      child,
+      {
+        nativeItemId: `${child.sessionId}:report`,
+        role: "assistant",
+        text: subagent.result,
+        ordinal: CHILD_PROMPT_ORDINAL + 1 + history.length,
+        at: now,
+      },
+      derive,
+    ),
+  ];
 }
 
 /** What `pendingBackgroundTasks` lists: the background subagents still running. */

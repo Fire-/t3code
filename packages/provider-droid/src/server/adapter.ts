@@ -114,11 +114,18 @@ import {
   type DroidModelInfo,
   type DroidSessionSettings,
 } from "./sessionSettings.ts";
+import {
+  droidTranscriptEntries,
+  droidTranscriptRecords,
+  findDroidSessionTranscript,
+} from "./sessionTranscripts.ts";
 import { definedDroidEnvironment } from "./status.ts";
 import {
+  droidChildThreadHistory,
   droidSubagentRoster,
   droidTaskCall,
   droidTaskCompletionOutcome,
+  isSettledDroidSubagent,
   launchDroidSubagent,
   noteDroidTaskCall,
   settleDroidSubagent,
@@ -534,6 +541,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
   const authSignal = yield* DroidAuthSignal;
   const hostEnvironment = yield* HostProcess.Environment;
   const processEnvironment = definedDroidEnvironment(options.environment);
+  // Droid keeps its sessions under the home of the environment it runs in.
+  const droidHome =
+    processEnvironment["HOME"]?.trim() ||
+    processEnvironment["USERPROFILE"]?.trim() ||
+    (yield* HostProcess.HomeDirectory);
   const { continuationRequests } = options;
   const redactor = makeRedactor(
     processEnvironment["FACTORY_API_KEY"] ?? hostEnvironment["FACTORY_API_KEY"],
@@ -707,6 +719,32 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       /**
+       * An ended subagent's child thread, filled from the child session's transcript. Droid does
+       * not stream a child's events, and by the time the subagent ends the file holds them all.
+       */
+      const fillChildThread = Effect.fnUntraced(function* (subagent: DroidSubagent) {
+        const child = subagent.surface?.child;
+        if (child === undefined || child === null) return;
+        const records = yield* findDroidSessionTranscript(droidHome, child.sessionId).pipe(
+          Effect.flatMap((file) =>
+            file === undefined
+              ? Effect.succeed([])
+              : fileSystem.readFileString(file).pipe(Effect.map(droidTranscriptRecords)),
+          ),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, pathService),
+          Effect.orElseSucceed(() => []),
+        );
+        const history = droidChildThreadHistory(
+          subagent,
+          droidTranscriptEntries(records),
+          idAllocator.derive,
+          yield* DateTime.now,
+        );
+        for (const event of history) yield* emit(event);
+      });
+
+      /**
        * Records subagent updates and publishes them. A changed roster goes out first: the run's
        * subscription stays open until the subagent's terminal arrives, and by then the thread must
        * already have stopped listing the task.
@@ -726,6 +764,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         if (!Equal.equals(before, rosterOf(state))) yield* updateProviderThread(state, {});
         for (const update of updates) {
+          // A subagent settles once, so its child thread is filled once. The history goes out
+          // before the subagent ends: a background run stops listening at that point.
+          if (isSettledDroidSubagent(update.subagent)) yield* fillChildThread(update.subagent);
           for (const event of update.events) yield* emit(event);
         }
       });
@@ -1202,7 +1243,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         const ordinal = turn.mapper.nextItemOrdinal;
         const update =
           notification.type === "child_session_available"
-            ? launchDroidSubagent(known, ctx, notification, ordinal, now)
+            ? launchDroidSubagent(known, ctx, notification, ordinal, now, {
+                appThread: turn.turnInput.appThread,
+                modelSelection: turn.turnInput.modelSelection,
+                number:
+                  [...state.subagents.values()].filter((subagent) => subagent.surface !== undefined)
+                    .length + 1,
+              })
             : settleDroidTaskResult(
                 known,
                 ctx,

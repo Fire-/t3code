@@ -5,7 +5,12 @@
  * what `load_session` returns as `{ type: "message", id, timestamp, message: { role, content } }`.
  * The folder name is lossy, so the cwd comes from `session_start`.
  */
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 
 import { droidToolItemFields, droidToolItemType, type DroidToolItemFields } from "./events.ts";
 import { visibleDroidMessage } from "./history.ts";
@@ -47,6 +52,57 @@ export interface DroidTranscriptFields {
 
 const trimmedString = (value: unknown): string | undefined =>
   Predicate.isString(value) && value.trim().length > 0 ? value.trim() : undefined;
+
+const decodeTranscriptLine = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      type: Schema.optional(Schema.String),
+      id: Schema.optional(Schema.Unknown),
+      title: Schema.optional(Schema.Unknown),
+      timestamp: Schema.optional(Schema.String),
+      message: Schema.optional(
+        Schema.Struct({
+          role: Schema.optional(Schema.String),
+          modelId: Schema.optional(Schema.Unknown),
+          visibility: Schema.optional(Schema.Unknown),
+          content: Schema.optional(Schema.Unknown),
+        }),
+      ),
+    }),
+  ),
+);
+
+/** A transcript file's records. A line that is not one is skipped. */
+export function droidTranscriptRecords(text: string): ReadonlyArray<DroidTranscriptRecord> {
+  return text
+    .split("\n")
+    .flatMap((line) => (line.trim() === "" ? [] : Option.toArray(decodeTranscriptLine(line))));
+}
+
+// Droid names sessions by UUID; any other name could reach outside the sessions folder.
+const SESSION_FILE_NAME = /^[\w-]+$/u;
+
+/**
+ * Where a session's transcript is. Its folder is named for the cwd with symlinks resolved (`/tmp`
+ * is `-private-tmp`), so every folder is looked in rather than one derived; some sessions sit at
+ * the top.
+ */
+export const findDroidSessionTranscript = Effect.fn("findDroidSessionTranscript")(function* (
+  home: string,
+  sessionId: string,
+) {
+  if (!SESSION_FILE_NAME.test(sessionId)) return undefined;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const sessions = path.join(home, DROID_HOME_DIRECTORY, DROID_SESSIONS_DIRECTORY);
+  const fileName = `${sessionId}.jsonl`;
+  const folders = yield* fileSystem.readDirectory(sessions).pipe(Effect.orElseSucceed(() => []));
+  for (const relative of [fileName, ...folders.map((folder) => path.join(folder, fileName))]) {
+    const file = path.join(sessions, relative);
+    if (yield* fileSystem.exists(file).pipe(Effect.orElseSucceed(() => false))) return file;
+  }
+  return undefined;
+});
 
 /** Session id and title from `session_start`; the model of the latest assistant message. */
 export function foldDroidTranscriptFields(

@@ -1,8 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderThreadId } from "@t3tools/contracts";
+import { derive } from "@t3tools/provider-core/server/IdAllocator";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 
 import { DROID_PROVIDER } from "./adapter.ts";
@@ -21,6 +24,7 @@ import {
   sessionStatuses,
   startTurn,
   terminals,
+  THREAD_ID,
   type BegunTurn,
   type Events,
 } from "./adapterHarness.testkit.ts";
@@ -32,6 +36,10 @@ import {
 
 const TOOL_USE_ID = "chatcmpl-tool-0d8e2c1e5251402e8a35e8edbb902ac5";
 const CHILD = "5fd3ffdd-4f3f-41c8-8873-e1fd3f6a1378";
+const CHILD_THREAD = derive.threadFromProviderThread({
+  driver: DROID_PROVIDER,
+  nativeThreadId: CHILD,
+});
 
 const taskCall = (input: Record<string, unknown>) => ({
   type: "tool_call",
@@ -175,7 +183,7 @@ describe("DroidAdapterV2 awaited Task subagents", () => {
         assert.strictEqual(started?.driver, "droid");
         assert.strictEqual(started?.prompt, "Dig in.");
         assert.strictEqual(started?.title, "dig");
-        assert.strictEqual(started?.childThreadId, null);
+        assert.strictEqual(started?.childThreadId, CHILD_THREAD);
         assert.deepStrictEqual(started?.nativeTaskRef, {
           driver: DROID_PROVIDER,
           nativeId: CHILD,
@@ -327,6 +335,85 @@ describe("DroidAdapterV2 awaited Task subagents", () => {
       "interrupted",
     );
   });
+});
+
+describe("DroidAdapterV2 subagent child threads", () => {
+  const onChildThread = (events: Events) =>
+    events.flatMap((event) =>
+      event.type === "message.updated" && event.message.threadId === CHILD_THREAD
+        ? [[event.message.role, event.message.text]]
+        : event.type === "node.updated" && event.node.threadId === CHILD_THREAD
+          ? [[event.node.kind, event.node.status]]
+          : [],
+    );
+
+  const isChildEnd = (event: Events[number]) =>
+    event.type === "node.updated" &&
+    event.node.threadId === CHILD_THREAD &&
+    event.node.status === "completed";
+
+  it.effect("a child session gets a child thread, filled from its transcript when it ends", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-droid-home-" });
+      const folder = path.join(home, ".factory", "sessions", "-repo");
+      yield* fs.makeDirectory(folder, { recursive: true });
+      const records = [
+        { type: "session_start", id: CHILD, callingSessionId: "parent-session" },
+        ...[
+          ["user", "Dig in."],
+          ["assistant", "Found the bug in a.ts."],
+        ].map(([role, text], index) => ({
+          type: "message",
+          id: `m${index}`,
+          timestamp: `2027-01-15T08:00:0${index}.000Z`,
+          message: { role, content: [{ type: "text", text }] },
+        })),
+      ];
+      yield* fs.writeFileString(
+        path.join(folder, `${CHILD}.jsonl`),
+        records.map((record) => JSON.stringify(record)).join("\n"),
+      );
+
+      const fake = yield* makeFakeDroid();
+      const { opened, process } = yield* beginTurn(fake, {
+        runtimeMode: "auto",
+        homeDirectory: home,
+      });
+      yield* launchTask(process, { background: false });
+      const created = yield* opened.takeEvent((event) => event.type === "app_thread.created");
+      if (created.type !== "app_thread.created") return assert.fail("no child thread");
+      assert.strictEqual(created.appThread.id, CHILD_THREAD);
+      assert.strictEqual(created.appThread.lineage.parentThreadId, THREAD_ID);
+
+      yield* process.emit(taskResult(AWAITED_REPORT("Found the bug in a.ts.")));
+      yield* process.emit(completed(1));
+      yield* opened.takeEvent(isTerminal);
+
+      assert.deepStrictEqual(onChildThread(opened.all), [
+        ["root_turn", "running"],
+        ["user", "Dig in."],
+        ["assistant", "Found the bug in a.ts."],
+        ["root_turn", "completed"],
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("a background child Droid kept no transcript of still shows its report", () =>
+    Effect.gen(function* () {
+      const { opened, process } = yield* withBackgroundTask;
+      yield* process.emit(completionMessage(completionReport("completed", "sub-ok")));
+      yield* opened.takeEvent(isChildEnd);
+
+      assert.deepStrictEqual(onChildThread(opened.all), [
+        ["root_turn", "running"],
+        ["user", "Dig in."],
+        ["assistant", "sub-ok"],
+        ["root_turn", "completed"],
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 });
 
 describe("Pending background tasks are set on start and cleared on completion, failure, and process exit", () => {

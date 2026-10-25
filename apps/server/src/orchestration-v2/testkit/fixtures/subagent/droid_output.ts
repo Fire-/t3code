@@ -21,9 +21,9 @@ function field(value: unknown, key: string): unknown {
 }
 
 /**
- * Two awaited Task calls become two provider-native subagents on the parent thread. Droid sends
- * no child thread content (MISSION decision 15), so each subagent is known by its child session
- * id and the report its Task call returned.
+ * Two awaited Task calls become two provider-native subagents on the parent thread, each with a
+ * read-only child thread. Droid streams nothing of a child, and a replay has no transcript of
+ * one on disk, so a child thread holds the Task prompt and the report the Task call returned.
  */
 export function assertDroidSubagentOutput(
   result: OrchestratorV2ScenarioResult,
@@ -50,6 +50,27 @@ export function assertDroidSubagentOutput(
     assert.include(childSessionIds, subagent.nativeTaskRef?.nativeId ?? "");
     assert.isNotNull(subagent.completedAt);
     assert.equal(subagent.runId, projection.runs[0]?.id);
+
+    if (subagent.childThreadId === null) {
+      throw new Error(`Subagent ${subagent.id} is missing its child thread`);
+    }
+    const child = result.projections.get(subagent.childThreadId);
+    assert.isDefined(child);
+    assert.equal(child.thread.lineage.parentThreadId, projection.thread.id);
+    assert.equal(child.thread.lineage.relationshipToParent, "subagent");
+    assert.isNull(child.thread.activeProviderThreadId);
+    assert.lengthOf(child.runs, 0);
+    assert.lengthOf(child.providerThreads, 0);
+    assertUserMessagesInclude(child, [subagent.prompt]);
+    assert.isTrue(
+      child.turnItems.some(
+        (item) =>
+          item.type === "assistant_message" &&
+          subagent.result !== null &&
+          item.text.includes(subagent.result.slice(0, 40)),
+      ),
+      "the child thread shows the report",
+    );
   }
   assert.lengthOf(
     new Set(projection.subagents.map((subagent) => subagent.nativeTaskRef?.nativeId)),

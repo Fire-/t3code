@@ -16,6 +16,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { ProviderAdapterDriverCreateError } from "@t3tools/provider-core/server/adapterDriver";
 import type { ProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
@@ -478,6 +479,8 @@ export function layer<E, R>(input: {
         TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
         NodeServices.layer,
         IdAllocator.layer,
+        // The adapter reads child transcripts from Droid's home; a replay must not see the real one.
+        Layer.succeed(HostProcess.Environment, { HOME: "/nonexistent/t3-droid-replay-home" }),
       ),
     ),
   );

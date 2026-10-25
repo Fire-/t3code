@@ -1,7 +1,13 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 import {
   droidTranscriptEntries,
+  droidTranscriptRecords,
+  findDroidSessionTranscript,
   isDroidTranscriptHistoryRecord,
   type DroidTranscriptEntry,
   type DroidTranscriptRecord,
@@ -165,4 +171,49 @@ describe("droidTranscriptEntries", () => {
       ["assistant", "Done."],
     ]);
   });
+});
+
+describe("Droid transcript files", () => {
+  it("reads a transcript's records and skips lines that are not one", () => {
+    const records = droidTranscriptRecords(
+      [
+        JSON.stringify({ type: "session_start", id: "s-1", cwd: "/repo" }),
+        "not json",
+        "",
+        JSON.stringify(recorder()("m-1", "user", text("Hi"))),
+      ].join("\n"),
+    );
+    assert.deepStrictEqual(
+      records.map((record) => [record.type, record.id]),
+      [
+        ["session_start", "s-1"],
+        ["message", "m-1"],
+      ],
+    );
+  });
+
+  it.effect("finds a session in any folder or at the top, and nothing outside them", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-droid-home-" });
+      const sessions = path.join(home, ".factory", "sessions");
+      yield* fs.makeDirectory(path.join(sessions, "-private-tmp"), { recursive: true });
+      yield* fs.writeFileString(path.join(sessions, "-private-tmp", "child-1.jsonl"), "");
+      yield* fs.writeFileString(path.join(sessions, "top-1.jsonl"), "");
+      yield* fs.writeFileString(path.join(home, "outside.jsonl"), "");
+
+      assert.strictEqual(
+        yield* findDroidSessionTranscript(home, "child-1"),
+        path.join(sessions, "-private-tmp", "child-1.jsonl"),
+      );
+      assert.strictEqual(
+        yield* findDroidSessionTranscript(home, "top-1"),
+        path.join(sessions, "top-1.jsonl"),
+      );
+      assert.isUndefined(yield* findDroidSessionTranscript(home, "missing"));
+      assert.isUndefined(yield* findDroidSessionTranscript(home, "../../outside"));
+      assert.isUndefined(yield* findDroidSessionTranscript(path.join(home, "nobody"), "child-1"));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });

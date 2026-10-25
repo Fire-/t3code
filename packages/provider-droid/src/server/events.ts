@@ -67,7 +67,10 @@ export interface DroidEventContext {
   readonly providerTurn: OrchestrationV2ProviderTurn;
   readonly derive: Pick<
     IdAllocatorV2Derive,
-    "turnItemFromProviderItem" | "nodeFromProviderItem" | "messageFromProviderItem"
+    | "turnItemFromProviderItem"
+    | "nodeFromProviderItem"
+    | "messageFromProviderItem"
+    | "threadFromProviderThread"
   >;
   /** Droid does not report a context window in usage notifications; the model list does. */
   readonly contextWindow?: number | undefined;
