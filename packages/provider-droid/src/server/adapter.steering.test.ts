@@ -18,6 +18,7 @@ import {
   steerBegunTurn,
   steerMessageIdFor,
   terminals,
+  THREAD_ID,
   type BegunTurn,
 } from "./adapterHarness.testkit.ts";
 import { makeFakeDroid, type FakeDroid } from "./fakeDroid.testkit.ts";
@@ -55,6 +56,11 @@ const turnItems = (begun: BegunTurn) =>
   begun.opened.all.flatMap((event) => (event.type === "turn_item.updated" ? [event.turnItem] : []));
 
 const addUserMessages = (fake: FakeDroid) => requestsOf(fake, "droid.add_user_message");
+
+const discardedSteers = (begun: BegunTurn) =>
+  begun.opened.all.flatMap((event) =>
+    event.type === "steer.discarded" && event.threadId === THREAD_ID ? [event.messageId] : [],
+  );
 
 describe("DroidAdapterV2 steering", () => {
   it.effect(
@@ -334,6 +340,47 @@ describe("DroidAdapterV2 steering", () => {
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
         yield* begun.process.settle;
         assert.strictEqual(terminals(begun.opened.all).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("a steer Stop discards mid-turn is reported as not delivered, once", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeDroid();
+      const begun = yield* beginTurn(fake);
+      yield* steerBegunTurn(begun, { ordinal: 1, text: "Also add tests" });
+      yield* begun.opened.runtime.interruptTurn({
+        providerThread: begun.providerThread,
+        providerTurnId: begun.providerTurn.id,
+      });
+      yield* begun.process.emit(discarded("Also add tests"));
+      yield* begun.process.emit(completed(1, "cancelled"));
+      yield* begun.opened.takeEvent(isTerminal);
+      yield* begun.process.settle;
+
+      assert.deepStrictEqual(discardedSteers(begun), [steerMessageIdFor(1)]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "a steer still queued when Stop's reply ends the turn is reported as not delivered",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const begun = yield* beginTurn(fake);
+        yield* steerBegunTurn(begun, { ordinal: 1, text: "Also add tests" });
+        yield* begun.process.emit(completed(1));
+        yield* begun.process.settle;
+        yield* begun.opened.runtime.interruptTurn({
+          providerThread: begun.providerThread,
+          providerTurnId: begun.providerTurn.id,
+        });
+        const terminal = yield* begun.opened.takeEvent(isTerminal);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+        // Droid's own discard notice can trail the reply; the steer is already reported.
+        yield* begun.process.emit(discarded("Also add tests"));
+        yield* begun.process.settle;
+
+        assert.deepStrictEqual(discardedSteers(begun), [steerMessageIdFor(1)]);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

@@ -1,6 +1,7 @@
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
+  MessageId,
   ProviderDriverKind,
   type ChatAttachment,
   type OrchestrationV2ConversationMessage,
@@ -455,18 +456,23 @@ function noteQueuedSteerStarted(turn: ActiveDroidTurn, notification: DroidNotifi
  * Droid names a dropped message by its text and the JSON-RPC id of the frame that queued it, an
  * id t3 never sees, so the text picks the steer. One notification covers one message.
  */
-function dropDiscardedSteer(turn: ActiveDroidTurn, notification: DroidNotification): void {
+function dropDiscardedSteer(
+  turn: ActiveDroidTurn,
+  notification: DroidNotification,
+): ReadonlyArray<string> {
   const text = notification["text"];
   if (!Predicate.isString(text)) {
+    const dropped = [...turn.queuedSteers.keys()];
     turn.queuedSteers.clear();
-    return;
+    return dropped;
   }
   for (const [messageId, queued] of turn.queuedSteers) {
     if (queued === text) {
       turn.queuedSteers.delete(messageId);
-      return;
+      return [messageId];
     }
   }
+  return [];
 }
 
 /**
@@ -947,6 +953,19 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               updatedAt: at,
             };
 
+      const reportDiscardedSteers = (turn: ActiveDroidTurn, messageIds: ReadonlyArray<string>) =>
+        Effect.forEach(
+          messageIds,
+          (messageId) =>
+            emit({
+              type: "steer.discarded",
+              driver: DROID_PROVIDER,
+              threadId: turn.turnInput.threadId,
+              messageId: MessageId.make(messageId),
+            }),
+          { discard: true },
+        );
+
       /**
        * Settles the turn and emits its one terminal. Detaching the turn first is what makes a
        * duplicate or late completion harmless.
@@ -985,6 +1004,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         // An awaited subagent ends with the turn that waits on it. A background one outlives the
         // turn, unless the process goes away with it.
         const processGone = outcome.disposition === "broken" || ended;
+        // Droid drops queued steers on an interrupt, and a dead process takes them along. Its
+        // discard notice can trail Stop's reply, and an idle session has nothing to match it to.
+        if (outcome.kind === "interrupted" || processGone) {
+          yield* reportDiscardedSteers(turn, [...turn.queuedSteers.keys()]);
+          turn.queuedSteers.clear();
+        }
         yield* settleSubagents(
           state,
           [...state.subagents.values()].filter(
@@ -1131,7 +1156,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         turn: ActiveDroidTurn,
         notification: DroidNotification,
       ) {
-        dropDiscardedSteer(turn, notification);
+        yield* reportDiscardedSteers(turn, dropDiscardedSteer(turn, notification));
         if (!turn.nativeSettled || turn.queuedSteers.size > 0 || turn.awaitingNative.size > 0) {
           return;
         }
