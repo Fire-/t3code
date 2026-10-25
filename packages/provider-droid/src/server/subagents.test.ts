@@ -148,6 +148,27 @@ const launched = (input: Record<string, unknown> = AWAITED_INPUT) => {
   return update!;
 };
 
+const RESUME_TOOL_USE_ID = "chatcmpl-tool-00000000000000000000000000000002";
+
+/** The parent continues the same child session with `resume`, under a new Task call. */
+const resumed = () => {
+  const input = { ...AWAITED_INPUT, description: "dig more", prompt: "Go on.", resume: CHILD };
+  const called = noteCall(
+    noteCall(undefined, taskCall({}, RESUME_TOOL_USE_ID)),
+    taskCall(input, RESUME_TOOL_USE_ID),
+  );
+  const update = launchDroidSubagent(
+    called,
+    ctx,
+    childSession(CHILD, RESUME_TOOL_USE_ID),
+    103,
+    at(40),
+    PARENT,
+  );
+  assert.isDefined(update);
+  return update!;
+};
+
 const ofType = <Type extends ProviderAdapterV2Event["type"]>(
   events: ReadonlyArray<ProviderAdapterV2Event>,
   type: Type,
@@ -417,6 +438,21 @@ describe("Droid subagent child thread", () => {
       "a background run stops listening once the subagent ends",
     );
   });
+
+  it("keeps a resumed child's thread and first prompt, and adds the follow-up", () => {
+    const first = launched();
+    const again = resumed();
+    const [created] = ofType(again.events, "app_thread.created");
+    assert.isTrue(created?.createOnly, "a resume never renames the child thread");
+    const prompts = [first, again].map((update) =>
+      ofType(update.events, "message.updated").map((event) => event.message),
+    );
+    assert.deepStrictEqual(
+      prompts.map((messages) => messages.map((message) => message.text)),
+      [["Dig in."], ["Go on."]],
+    );
+    assert.notStrictEqual(prompts[0]![0]!.id, prompts[1]![0]!.id);
+  });
 });
 
 describe("droidChildThreadHistory", () => {
@@ -503,6 +539,58 @@ describe("droidChildThreadHistory", () => {
         [["assistant", "The report."]],
       );
     }
+  });
+
+  it("leaves out every prompt, since each launch showed its own", () => {
+    const resumedRecords: ReadonlyArray<DroidTranscriptRecord> = [
+      ...childRecords,
+      {
+        type: "message",
+        id: "m5",
+        timestamp: stamp(5),
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "# Follow-up Instructions\n\nGo on." }],
+        },
+      },
+      {
+        type: "message",
+        id: "m6",
+        timestamp: stamp(6),
+        message: { role: "assistant", content: [{ type: "text", text: "Went on." }] },
+      },
+    ];
+    const events = droidChildThreadHistory(
+      settled(),
+      droidTranscriptEntries(resumedRecords),
+      derive,
+      at(30),
+    );
+    assert.deepStrictEqual(
+      ofType(events, "message.updated").map((event) => [event.message.role, event.message.text]),
+      [
+        ["assistant", "Found the bug in a.ts."],
+        ["assistant", "Went on."],
+      ],
+    );
+  });
+
+  it("gives each launch's stand-in report its own message", () => {
+    const resumedSettled = settleDroidTaskResult(
+      resumed().subagent,
+      ctx,
+      taskResult(FRAMED_REPORT),
+      NOT_STOPPED,
+      104,
+      at(50),
+    )!.subagent;
+    const [first, again] = [settled(), resumedSettled].map((subagent) =>
+      ofType(droidChildThreadHistory(subagent, [], derive, at(60)), "message.updated").map(
+        (event) => event.message.id,
+      ),
+    );
+    assert.lengthOf(first!, 1);
+    assert.notDeepEqual(first, again);
   });
 
   it("keeps the ids of a replay, so reading the transcript again updates the same items", () => {

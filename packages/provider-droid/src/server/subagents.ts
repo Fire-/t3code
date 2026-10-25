@@ -259,6 +259,8 @@ function childThreadOpened(
     {
       type: "app_thread.created",
       driver: DROID_DRIVER,
+      // A Task `resume` launches the same child session again; its thread keeps its first title.
+      createOnly: true,
       appThread: makeSubagentChildThread({
         parentThread: parent.appThread,
         childThreadId: child.threadId,
@@ -285,7 +287,7 @@ function childThreadOpened(
           surface,
           child,
           {
-            nativeItemId: `${child.sessionId}:prompt`,
+            nativeItemId: `${child.sessionId}:prompt:${subagent.toolUseId}`,
             role: "user",
             text: subagent.prompt,
             ordinal: CHILD_PROMPT_ORDINAL,
@@ -541,9 +543,9 @@ export function settleDroidTaskResult(
 }
 
 /**
- * A child thread's history once its subagent has ended, from the child session's transcript. The
- * transcript's first user message is the Task prompt, already on the thread. When the transcript
- * holds no reply (it could not be read, or the child never answered), the report stands in.
+ * A child thread's history once its subagent has ended, from the child session's transcript, which
+ * holds every launch of that session so far. When the transcript holds no reply (it could not be
+ * read, or the child never answered), the report stands in.
  */
 export function droidChildThreadHistory(
   subagent: DroidSubagent,
@@ -556,10 +558,9 @@ export function droidChildThreadHistory(
   if (surface === undefined || child === null) return [];
   const at = (timestamp: string | undefined) =>
     Option.getOrElse(DateTime.make(timestamp ?? Number.NaN), () => now);
-  const promptIndex = entries.findIndex(
-    (entry) => entry.type === "message" && entry.role === "user",
-  );
-  const history = entries.filter((_, index) => index !== promptIndex);
+  // Every user message in a child session is a Task prompt: the first launch's, or a resume's
+  // follow-up in Droid's wrapping. Each launch already put its own on the thread.
+  const history = entries.filter((entry) => !(entry.type === "message" && entry.role === "user"));
   const events = history.flatMap((entry, index): ReadonlyArray<ProviderAdapterV2Event> => {
     const nativeItemId = `${child.sessionId}:history:${index}`;
     const ordinal = CHILD_PROMPT_ORDINAL + 1 + index;
@@ -630,7 +631,7 @@ export function droidChildThreadHistory(
       surface,
       child,
       {
-        nativeItemId: `${child.sessionId}:report`,
+        nativeItemId: `${child.sessionId}:report:${subagent.toolUseId}`,
         role: "assistant",
         text: subagent.result,
         ordinal: CHILD_PROMPT_ORDINAL + 1 + history.length,
