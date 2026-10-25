@@ -643,6 +643,24 @@ export const layer: Layer.Layer<
                   nodeId: input.event.turnItem.nodeId,
                 }),
               ];
+            case "steer.discarded": {
+              const steer = yield* projections.getTurnItem({
+                threadId: input.event.threadId,
+                itemId: idAllocator.derive.userTurnItem({ messageId: input.event.messageId }),
+              });
+              if (steer?.type !== "user_message" || steer.status === "cancelled") return [];
+              const updatedAt = yield* DateTime.now;
+              return [
+                yield* makeDomainEvent(input, {
+                  type: "turn-item.updated",
+                  threadId: steer.threadId,
+                  payload: { ...steer, status: "cancelled", updatedAt },
+                  runId: steer.runId,
+                  nodeId: steer.nodeId,
+                  occurredAt: updatedAt,
+                }),
+              ];
+            }
             case "runtime_request.updated":
               return [
                 yield* makeDomainEvent(input, {

@@ -4,12 +4,14 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  MessageId,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   type Project,
   ProjectId,
   ProviderDriverKind,
@@ -2939,6 +2941,93 @@ it.effect("ProviderSessionManagerV2 persists session-scoped runtime requests wit
       assert.equal(node?.status, "waiting");
       assert.equal(turnItem?.runId, null);
       assert.equal(turnItem?.status, "waiting");
+    });
+
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 persists a dropped steer without a run", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* idAllocator.allocate.project({
+        fixtureName: "provider-session-manager-dropped-steer",
+      });
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-dropped-steer",
+        projectId,
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const messageId = MessageId.make("message:provider-session-manager-dropped-steer");
+      const steer: OrchestrationV2TurnItem = {
+        createdBy: "user",
+        creationSource: "web",
+        id: idAllocator.derive.userTurnItem({ messageId }),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "user_message",
+        messageId,
+        inputIntent: "steer",
+        text: "never read",
+        attachments: [],
+      };
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+          {
+            id: yield* idAllocator.allocate.event({ threadId }),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: steer,
+          },
+        ],
+      });
+      yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const afterSequence = yield* eventSink.latestSequence({ threadId });
+      const persistedFiber = yield* eventSink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter((stored) => stored.event.type === "turn-item.updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const adapterEvents = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      assert.isDefined(adapterEvents);
+      yield* Queue.offer(adapterEvents!, {
+        type: "steer.discarded",
+        driver: CODEX_DRIVER,
+        threadId,
+        messageId,
+      });
+      yield* Fiber.join(persistedFiber);
+
+      const stored = yield* projectionStore.getTurnItem({ threadId, itemId: steer.id });
+      assert.equal(stored?.status, "cancelled");
     });
 
     yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));

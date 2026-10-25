@@ -1,6 +1,27 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveUserMessagePresentation } from "./userMessage.ts";
+import { resolveSteerMarker, resolveUserMessagePresentation } from "./userMessage.ts";
+
+describe("resolveSteerMarker", () => {
+  it("marks a steer the provider dropped as not delivered, whatever its origin", () => {
+    for (const inputIntent of ["steer", "promoted_queued_to_steer"] as const) {
+      expect(resolveSteerMarker({ inputIntent, undelivered: true })).toMatchObject({
+        label: "Not delivered",
+        delivered: false,
+      });
+    }
+  });
+
+  it("keeps the steer marker for a delivered steer and none for other messages", () => {
+    expect(resolveSteerMarker({ inputIntent: "steer" })).toMatchObject({
+      label: "Steer",
+      delivered: true,
+    });
+    for (const inputIntent of ["turn_start", "queued_turn", undefined] as const) {
+      expect(resolveSteerMarker({ inputIntent, undelivered: true })).toBeNull();
+    }
+  });
+});
 
 describe("resolveUserMessagePresentation", () => {
   const legacyText = "[Triggered by schedule task: Daily audit]\n\nCheck for crashes.\n";

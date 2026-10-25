@@ -121,6 +121,17 @@ export const ProviderAdapterV2Event = Schema.Union([
     turnItem: OrchestrationV2TurnItem,
   }),
   /**
+   * A steer the provider accepted but threw away before the agent read it,
+   * usually because the turn stopped first. The user's message stays in the
+   * thread, marked as not delivered.
+   */
+  Schema.Struct({
+    type: Schema.Literal("steer.discarded"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    messageId: MessageId,
+  }),
+  /**
    * Raw output from a running command. Never persisted: the session manager
    * hands it to the command output hub, which only clients showing the row see.
    * The item's final output still arrives in its `turn_item.updated`.

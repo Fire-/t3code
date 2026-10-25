@@ -724,6 +724,9 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         createdAt,
         updatedAt: DateTime.formatIso(item.updatedAt),
         ...(item.type === "user_message" ? { inputIntent: item.inputIntent } : {}),
+        ...(item.type === "user_message" && item.status === "cancelled"
+          ? { undelivered: true as const }
+          : {}),
       };
       committedMessageIds.add(message.id);
       entries.push({

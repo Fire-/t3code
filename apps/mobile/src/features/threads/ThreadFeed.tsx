@@ -28,7 +28,10 @@ import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
-import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import {
+  resolveSteerMarker,
+  resolveUserMessagePresentation,
+} from "@t3tools/client-runtime/user-message";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
@@ -268,7 +271,6 @@ import {
   resolveWorkspaceRelativeFilePath,
 } from "../files/filePath";
 import { waitForThreadShellReady } from "./threadForkNavigation";
-import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
 import { fileChipClipboardPath, fileChipMenu, resolveFileChipTarget } from "./fileChipMenu";
 import { useFileChipShare } from "./useFileChipShare";
 import {
@@ -1432,7 +1434,7 @@ function renderFeedEntry(
       const foldRowId = presentation.attribution === "agent" ? `agent:${message.id}` : null;
       const foldExpanded = foldRowId !== null && (props.expandedWorkRows[foldRowId] ?? false);
       const bubbleBodyVisible = foldRowId === null || foldExpanded;
-      const intentBadge = resolveUserMessageIntentBadge(message.inputIntent);
+      const intentBadge = resolveSteerMarker(message);
       const referenceIds = new Set(
         collectComposerContextReferences(message.text).map((reference) => reference.contextId),
       );
@@ -1583,10 +1585,14 @@ function renderFeedEntry(
               {intentBadge ? (
                 <View
                   accessible
-                  accessibilityLabel={intentBadge.accessibilityLabel}
+                  accessibilityLabel={`${intentBadge.label}. ${intentBadge.description}`}
                   className="flex-row items-center gap-1"
                 >
-                  <SymbolView name="arrow.uturn.forward" size={12} tintColor={iconSubtleColor} />
+                  <SymbolView
+                    name={intentBadge.delivered ? "arrow.uturn.forward" : "slash.circle"}
+                    size={12}
+                    tintColor={iconSubtleColor}
+                  />
                   <Text className="font-t3-medium text-xs text-foreground-secondary">
                     {intentBadge.label}
                   </Text>

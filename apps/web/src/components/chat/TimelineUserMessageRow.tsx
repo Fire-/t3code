@@ -1,6 +1,9 @@
 import { findRevealRef } from "./markdownFindContext";
 import { type MessageId, type ServerProviderSkill, ThreadId } from "@t3tools/contracts";
-import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import {
+  resolveSteerMarker,
+  resolveUserMessagePresentation,
+} from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { useQuietThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
@@ -24,6 +27,7 @@ import {
   DownloadIcon,
   EyeIcon,
   type LucideIcon,
+  MessageSquareOffIcon,
   MessagesSquareIcon,
   Redo2Icon,
   Undo2Icon,
@@ -155,10 +159,7 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
   return (
     <div className="group flex flex-col items-end gap-1" data-user-message-attribution="automation">
-      {row.message.inputIntent === "steer" ||
-      row.message.inputIntent === "promoted_queued_to_steer" ? (
-        <UserMessageIntentMarker intent={row.message.inputIntent} />
-      ) : null}
+      <UserMessageIntentMarker message={row.message} />
       <div
         className={cn(
           "min-w-0 max-w-[80%] rounded-2xl bg-message text-message-foreground",
@@ -427,10 +428,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           Sent by T3 Code
         </p>
       ) : null}
-      {row.message.inputIntent === "steer" ||
-      row.message.inputIntent === "promoted_queued_to_steer" ? (
-        <UserMessageIntentMarker intent={row.message.inputIntent} />
-      ) : null}
+      <UserMessageIntentMarker message={row.message} />
       <div
         className={cn(
           "relative min-w-0 max-w-[80%] rounded-2xl bg-message text-message-foreground",
@@ -630,28 +628,28 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 }
 
 function UserMessageIntentMarker({
-  intent,
+  message,
 }: {
-  readonly intent: "steer" | "promoted_queued_to_steer";
+  readonly message: Parameters<typeof resolveSteerMarker>[0];
 }) {
+  const marker = resolveSteerMarker(message);
+  if (marker === null) return null;
+  const Icon = marker.delivered ? Redo2Icon : MessageSquareOffIcon;
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <div
             className="me-1 flex items-center justify-end gap-1 text-xs leading-none text-muted-foreground"
-            data-user-message-intent={intent}
+            data-user-message-intent={message.inputIntent}
+            data-steer-delivered={marker.delivered}
           />
         }
       >
-        <Redo2Icon aria-hidden="true" className="size-3" />
-        Steer
+        <Icon aria-hidden="true" className="size-3" />
+        {marker.label}
       </TooltipTrigger>
-      <TooltipPopup side="top">
-        {intent === "promoted_queued_to_steer"
-          ? "Originally queued, then promoted to steer the active turn"
-          : "Steered the active turn"}
-      </TooltipPopup>
+      <TooltipPopup side="top">{marker.description}</TooltipPopup>
     </Tooltip>
   );
 }

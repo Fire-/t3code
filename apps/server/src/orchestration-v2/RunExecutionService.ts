@@ -481,6 +481,9 @@ export function routeProviderEvent(
     }
     case "message.updated":
       return [ownsRun(event.message.runId) || ownsChildThread(event.message.threadId), state];
+    case "steer.discarded":
+      // The session manager persists these itself; the run may already be gone.
+      return [false, state];
     case "turn_item.updated": {
       if (ownsRun(event.turnItem.runId) || ownsChildThread(event.turnItem.threadId)) {
         return [true, state];

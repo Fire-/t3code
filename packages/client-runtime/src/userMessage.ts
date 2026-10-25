@@ -1,8 +1,40 @@
 import {
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
+  type OrchestrationV2UserMessageInputIntent,
   ScheduledTaskId,
 } from "@t3tools/contracts";
+
+export interface SteerMarker {
+  readonly label: "Steer" | "Not delivered";
+  readonly delivered: boolean;
+  readonly description: string;
+}
+
+/** `undelivered` is a steer the provider dropped before the agent read it, usually on Stop. */
+export function resolveSteerMarker(message: {
+  readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
+  readonly undelivered?: boolean | undefined;
+}): SteerMarker | null {
+  if (message.inputIntent !== "steer" && message.inputIntent !== "promoted_queued_to_steer") {
+    return null;
+  }
+  if (message.undelivered === true) {
+    return {
+      label: "Not delivered",
+      delivered: false,
+      description: "The agent never received this message",
+    };
+  }
+  return {
+    label: "Steer",
+    delivered: true,
+    description:
+      message.inputIntent === "promoted_queued_to_steer"
+        ? "Originally queued, then promoted to steer the active turn"
+        : "Steered the active turn",
+  };
+}
 
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
 const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
