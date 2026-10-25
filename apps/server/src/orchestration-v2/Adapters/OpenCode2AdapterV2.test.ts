@@ -3463,7 +3463,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
-  it.effect("takes back a stranded steer again when its first cancel failed", () =>
+  it.effect("retakes a stranded steer after a failed cancel, then reports it dropped", () =>
     Effect.gen(function* () {
       const steerId = `msg_t3_steer_${SESSION}:message:opencode2-adapter:steer`;
       const cancelOut = out("session.inbox.cancel", { sessionID: SESSION, inboxID: steerId });
@@ -3505,6 +3505,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         event("session.execution.succeeded", { sessionID: SESSION }),
       ]);
       const seen: Array<string> = [];
+      const discarded: Array<string> = [];
       const ended = yield* Deferred.make<void>();
       const nextEnded = yield* Deferred.make<void>();
       // One consumer reads every terminal; a second reader would race it for the queue.
@@ -3512,6 +3513,9 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       yield* runtime.events.pipe(
         Stream.tap((event) =>
           Effect.gen(function* () {
+            if (event.type === "steer.discarded") {
+              discarded.push(`${event.threadId} ${event.messageId} after ${seen.length}`);
+            }
             if (event.type !== "turn.terminal") return;
             seen.push(event.status);
             if (seen.length === 1) yield* Deferred.succeed(ended, undefined);
@@ -3549,6 +3553,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         attemptId: RunAttemptId.make("attempt:opencode2-adapter:3"),
       });
       yield* Deferred.await(thirdEnded);
+      assert.deepEqual(discarded, [`${threadId} message:opencode2-adapter:steer after 2`]);
     }).pipe(Effect.scoped),
   );
 
