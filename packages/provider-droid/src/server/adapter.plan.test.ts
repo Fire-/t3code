@@ -743,6 +743,51 @@ describe("DroidAdapterV2 plan mode", () => {
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
+
+    it.effect("a TodoWrite made inside a Script also becomes the thread's todo list", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened);
+        yield* startTurn(opened.runtime, thread);
+        yield* fake.current().emit({
+          type: "tool_call",
+          toolUse: {
+            type: "tool_use",
+            id: "script-1",
+            name: "Script",
+            input: { script: "await tools.TodoWrite({ todos });" },
+          },
+        });
+        yield* fake.current().emit({
+          type: "create_message",
+          message: {
+            id: "message-inner-1",
+            role: "assistant",
+            visibility: "user_only",
+            content: [
+              {
+                type: "tool_use",
+                id: "inner-1",
+                name: "TodoWrite",
+                input: { todos: "1. [in_progress] Read\n2. [pending] Fix" },
+                scriptExecution: { runId: "script-1", outerToolUseId: "script-1" },
+              },
+            ],
+          },
+        });
+        yield* fake.current().emit(completed(1));
+        yield* opened.takeEvent(isTerminal);
+
+        assert.deepStrictEqual(
+          plansOf(opened.all).map((plan) => [
+            plan.kind,
+            plan.kind === "todo_list" ? plan.steps.map((step) => step.status) : [],
+          ]),
+          [["todo_list", ["running", "pending"]]],
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
   });
 
   describe("after the reply", () => {

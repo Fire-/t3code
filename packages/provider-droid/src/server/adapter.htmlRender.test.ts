@@ -40,6 +40,30 @@ const toolResult = (id: string, content: string, isError = false) => ({
   isError,
 });
 
+/** Droid reports a call made inside a Script only as a committed message with the tool use. */
+const scriptCall = (
+  scriptId: string,
+  id: string,
+  name: string,
+  input: Record<string, unknown>,
+) => ({
+  type: "create_message",
+  message: {
+    id: `message-${id}`,
+    role: "assistant",
+    visibility: "user_only",
+    content: [
+      {
+        type: "tool_use",
+        id,
+        name,
+        input,
+        scriptExecution: { runId: scriptId, outerToolUseId: scriptId },
+      },
+    ],
+  },
+});
+
 const SCRIPT = "await tools.t3_code.html_render({ html, title, height });\ntext('posted');";
 
 const finalItems = (events: Events) => {
@@ -63,14 +87,23 @@ const shownPages = (events: Events) =>
 describe("DroidAdapterV2 html_render pages", () => {
   for (const failed of [false, true]) {
     it.effect(
-      `a page a Script published shows as its own html_render item after the Script, even when the Script ${failed ? "failed" : "succeeded"}`,
+      `a page published from inside a Script shows on that call's own item under the Script, even when the Script ${failed ? "failed" : "succeeded"}`,
       () =>
         Effect.gen(function* () {
           const fake = yield* makeFakeDroid();
           const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
 
           yield* process.emit(toolCall("script-1", "Script", { script: SCRIPT }));
+          yield* process.emit(
+            scriptCall("script-1", "inner-1", "t3-code___html_render", PAGE_INPUT),
+          );
           yield* publish(pageReference("page-1"));
+          yield* process.emit(
+            toolResult(
+              "inner-1",
+              JSON.stringify({ htmlRender: pageReference("page-1"), message: "Shown." }),
+            ),
+          );
           yield* process.emit(
             toolResult("script-1", failed ? "Error: later step threw" : "posted", failed),
           );
@@ -82,22 +115,16 @@ describe("DroidAdapterV2 html_render pages", () => {
           );
           const shown = shownPages(opened.all);
           assert.deepStrictEqual(
-            shown.map(({ page }) => page),
-            [pageReference("page-1")],
+            shown.map(({ item, page }) => [item.toolName, page]),
+            [["mcp__t3-code__html_render", pageReference("page-1")]],
           );
           assert.strictEqual(shown[0]?.item.parentItemId, script?.id);
           assert.isAbove(shown[0]?.item.ordinal ?? -1, script?.ordinal ?? Infinity);
-
-          const sessions = yield* McpProviderSessions.McpProviderSessions;
-          assert.isUndefined(
-            yield* sessions.takeHtmlRender(THREAD_ID, PAGE_INPUT, pageReference("page-1")),
-            "the page is taken, so nothing shows it twice",
-          );
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   }
 
-  it.effect("a page a direct html_render call reported is not shown again by a later Script", () =>
+  it.effect("a direct html_render call shows its page on its own item", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeDroid();
       const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
@@ -110,14 +137,12 @@ describe("DroidAdapterV2 html_render pages", () => {
           JSON.stringify({ htmlRender: pageReference("page-1"), message: "Shown to the reader." }),
         ),
       );
-      yield* process.emit(toolCall("script-1", "Script", { script: "text('no pages');" }));
-      yield* process.emit(toolResult("script-1", "no pages"));
       yield* process.emit(completed(1));
       yield* opened.takeEvent(isTerminal);
 
       assert.deepStrictEqual(
-        shownPages(opened.all).map(({ item, page }) => [item.toolName, page]),
-        [["mcp__t3-code__html_render", pageReference("page-1")]],
+        shownPages(opened.all).map(({ item, page }) => [item.toolName, item.parentItemId, page]),
+        [["mcp__t3-code__html_render", null, pageReference("page-1")]],
       );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );

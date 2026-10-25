@@ -689,6 +689,68 @@ describe("tool calls and results [VAL-TURN-008]", () => {
     );
   });
 
+  it("[VAL-TURN-008] shows each call a Script makes as its own item under the Script", () => {
+    // Droid reports a call made inside a Script only as a `create_message` with the tool use;
+    // there is no `tool_call` frame for it.
+    const scriptCall = (name: string, input: unknown, id: string): Notification => ({
+      type: "create_message",
+      message: {
+        id: `message-${id}`,
+        role: "assistant",
+        visibility: "user_only",
+        content: [
+          {
+            type: "tool_use",
+            id,
+            name,
+            input,
+            scriptExecution: { runId: TOOL_ID, outerToolUseId: TOOL_ID },
+          },
+        ],
+      },
+    });
+    const { events } = feed([
+      toolCall("Script", { script: "text(await tools.Execute({ command: 'echo hi' }));" }),
+      scriptCall("Execute", { command: "echo hi" }, "inner-1"),
+      progress({ text: "", fullOutput: "hi\n", exitCode: 0 }, "Execute", "inner-1"),
+      toolResult("hi\n\n\n[Process exited with code 0]", false, "inner-1"),
+      scriptCall("Create", { file_path: "/tmp/project/p.txt", content: "p\n" }, "inner-2"),
+      toolResult('{"success":true,"file_path":"/tmp/project/p.txt"}', false, "inner-2"),
+      scriptCall("t3-code___ping", {}, "inner-3"),
+      toolResult("pong", false, "inner-3"),
+      toolResult([
+        { type: "text", text: "hi\npong" },
+        { type: "text", text: "[Script completed · 0.0 s elapsed · 3 calls]" },
+      ]),
+    ]);
+    const latest = new Map(turnItems(events).map((item) => [item.id, item]));
+    const [script, ...inner] = [...latest.values()].toSorted((a, b) => a.ordinal - b.ordinal);
+    assert.strictEqual(script?.type === "dynamic_tool" ? script.toolName : undefined, "js");
+    assert.strictEqual(script?.status, "completed");
+    const scriptId = script?.id ?? null;
+    assert.deepStrictEqual(
+      inner.map((item) => [
+        item.type,
+        item.type === "dynamic_tool" ? item.toolName : item.title,
+        item.status,
+        item.parentItemId,
+      ]),
+      [
+        ["command_execution", "Execute", "completed", scriptId],
+        ["file_change", "Create", "completed", scriptId],
+        ["dynamic_tool", "mcp__t3-code__ping", "completed", scriptId],
+      ],
+    );
+    const [command, , ping] = inner;
+    assert.strictEqual(command?.type === "command_execution" ? command.output : undefined, "hi");
+    assert.strictEqual(command?.type === "command_execution" ? command.exitCode : undefined, 0);
+    assert.deepStrictEqual(
+      ofType(events, "command_output.delta").map((event) => [event.itemId, event.chunk]),
+      [[command?.id, "hi\n"]],
+    );
+    assert.strictEqual(ping?.type === "dynamic_tool" ? ping.output : undefined, "pong");
+  });
+
   it("[VAL-SUB-001] leaves a Task call and its result to the subagent projection", () => {
     const { events } = feed([
       toolCall("Task", {}),

@@ -26,7 +26,6 @@ import {
 import type { IdAllocatorV2Derive } from "@t3tools/provider-core/server/IdAllocator";
 import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
-import { HTML_RENDER_TOOL_NAME, type HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import * as DateTime from "effect/DateTime";
 import * as Equal from "effect/Equal";
 import * as Predicate from "effect/Predicate";
@@ -114,6 +113,8 @@ interface ToolSurface {
 
 interface ToolState {
   readonly nativeItemId: string;
+  /** The Script whose JavaScript made this call. */
+  readonly parentNativeItemId: string | undefined;
   readonly name: string;
   readonly input: unknown;
   readonly surface: ToolSurface | undefined;
@@ -618,6 +619,9 @@ function mapCreateMessage(
 ): DroidMapResult {
   const message = notification["message"];
   if (!Predicate.isObject(message)) return unchanged(state);
+  // A Script's call is not a model reply, so it says nothing about which model answered.
+  const scriptCalls = droidScriptCalls(notification);
+  if (scriptCalls.length > 0) return mapScriptCalls(state, ctx, scriptCalls, now);
   if (message["visibility"] === "user_only" && message["role"] !== "assistant") {
     return droidNotice(state, ctx, message, now);
   }
@@ -833,6 +837,14 @@ function toolItemEvent(
     driver: DROID_DRIVER,
     turnItem: {
       ...itemBase(ctx, tool.nativeItemId, surface.ordinal, surface.startedAt, now),
+      ...(tool.parentNativeItemId === undefined
+        ? {}
+        : {
+            parentItemId: ctx.derive.turnItemFromProviderItem({
+              driver: DROID_DRIVER,
+              nativeItemId: tool.parentNativeItemId,
+            }),
+          }),
       completedAt: settlement === undefined ? null : now,
       ...droidToolItemFields(tool, surface.itemType, settlement),
     },
@@ -896,8 +908,58 @@ function mapToolCall(
   now: DateTime.Utc,
 ): DroidMapResult {
   const toolUse = notification["toolUse"];
-  const toolUseId = Predicate.isObject(toolUse) ? asTrimmed(toolUse["id"]) : undefined;
-  if (!Predicate.isObject(toolUse) || toolUseId === undefined) return unchanged(state);
+  if (!Predicate.isObject(toolUse)) return unchanged(state);
+  return recordToolUse(state, ctx, toolUse, undefined, now);
+}
+
+/**
+ * The calls a Script's JavaScript made. Droid reports each only as a committed assistant message
+ * holding the `tool_use`, with no `tool_call` frame; its `tool_result` follows as usual.
+ */
+export function droidScriptCalls(notification: DroidNotification): ReadonlyArray<{
+  readonly toolUse: Readonly<Record<string, unknown>>;
+  readonly scriptToolUseId: string;
+}> {
+  if (notification.type !== "create_message") return [];
+  const message = notification["message"];
+  if (!Predicate.isObject(message) || message["role"] !== "assistant") return [];
+  const content = message["content"];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block) => {
+    if (!Predicate.isObject(block) || block["type"] !== "tool_use") return [];
+    const execution = block["scriptExecution"];
+    const scriptToolUseId = Predicate.isObject(execution)
+      ? asTrimmed(execution["outerToolUseId"])
+      : undefined;
+    return scriptToolUseId === undefined ? [] : [{ toolUse: block, scriptToolUseId }];
+  });
+}
+
+function mapScriptCalls(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  calls: ReturnType<typeof droidScriptCalls>,
+  now: DateTime.Utc,
+): DroidMapResult {
+  let next = state;
+  const events: Array<ProviderAdapterV2Event> = [];
+  for (const { toolUse, scriptToolUseId } of calls) {
+    const mapped = recordToolUse(next, ctx, toolUse, toolNativeItemId(ctx, scriptToolUseId), now);
+    next = mapped.state;
+    events.push(...mapped.events);
+  }
+  return { state: next, events };
+}
+
+function recordToolUse(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  toolUse: Readonly<Record<string, unknown>>,
+  parentNativeItemId: string | undefined,
+  now: DateTime.Utc,
+): DroidMapResult {
+  const toolUseId = asTrimmed(toolUse["id"]);
+  if (toolUseId === undefined) return unchanged(state);
   const name = asTrimmed(toolUse["name"]);
   // A Task is a subagent, not a tool row: `subagents.ts` projects it.
   if (name !== undefined && droidToolKind(name) === "task") return unchanged(state);
@@ -906,6 +968,7 @@ function mapToolCall(
   if (existing?.completed) return unchanged(state);
   const tool: ToolState = {
     nativeItemId,
+    parentNativeItemId: existing?.parentNativeItemId ?? parentNativeItemId,
     name: name ?? existing?.name ?? "Tool",
     input: toolUse["input"] ?? existing?.input ?? {},
     surface: existing?.surface,
@@ -935,63 +998,6 @@ function mapToolResult(
     status: notification["isError"] === true ? errorStatus : "completed",
     content: notification["content"],
   });
-}
-
-/** The tool a `tool_result` settles, while it is still open. */
-export function droidToolSettledBy(
-  state: DroidMapperState,
-  ctx: DroidEventContext,
-  notification: DroidNotification,
-): { readonly toolUseId: string; readonly name: string; readonly input: unknown } | undefined {
-  if (notification.type !== "tool_result") return undefined;
-  const toolUseId = asTrimmed(notification["toolUseId"]);
-  if (toolUseId === undefined) return undefined;
-  const tool = state.tools.get(toolNativeItemId(ctx, toolUseId));
-  return tool === undefined || tool.completed
-    ? undefined
-    : { toolUseId, name: tool.name, input: tool.input };
-}
-
-const HTML_RENDER_TOOL = droidMcpToolName(`t3-code___${HTML_RENDER_TOOL_NAME}`);
-
-/**
- * Pages a Script published through T3's `html_render`. Droid reports only what the script
- * printed, so each page gets the item a direct call would have had: clients draw pages from it.
- */
-export function mapDroidScriptPages(
-  state: DroidMapperState,
-  ctx: DroidEventContext,
-  scriptToolUseId: string,
-  pages: ReadonlyArray<HtmlRenderReference>,
-  now: DateTime.Utc,
-): DroidMapResult {
-  const scriptNativeItemId = toolNativeItemId(ctx, scriptToolUseId);
-  const events = pages.flatMap((page, index): ReadonlyArray<ProviderAdapterV2Event> => {
-    const nativeItemId = `${scriptNativeItemId}:${HTML_RENDER_TOOL_NAME}:${page.attachmentId}`;
-    return [
-      nodeEvent(ctx, nativeItemId, "tool_call", "completed", now, now),
-      {
-        type: "turn_item.updated",
-        driver: DROID_DRIVER,
-        turnItem: {
-          ...itemBase(ctx, nativeItemId, state.nextItemOrdinal + index, now, now),
-          parentItemId: ctx.derive.turnItemFromProviderItem({
-            driver: DROID_DRIVER,
-            nativeItemId: scriptNativeItemId,
-          }),
-          completedAt: now,
-          status: "completed",
-          type: "dynamic_tool",
-          title: HTML_RENDER_TOOL,
-          ...mcpToolPresentation({ toolName: HTML_RENDER_TOOL }),
-          toolName: HTML_RENDER_TOOL,
-          input: { title: page.title, height: page.height },
-          output: { htmlRender: page },
-        },
-      },
-    ];
-  });
-  return { state: { ...state, nextItemOrdinal: state.nextItemOrdinal + pages.length }, events };
 }
 
 /**
