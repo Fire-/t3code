@@ -130,6 +130,7 @@ import {
   noteDroidTaskCall,
   settleDroidSubagent,
   settleDroidTaskResult,
+  settleDroppedDroidTaskResult,
   type DroidSubagent,
   type DroidSubagentOutcome,
   type DroidSubagentUpdate,
@@ -724,7 +725,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
        */
       const fillChildThread = Effect.fnUntraced(function* (subagent: DroidSubagent) {
         const child = subagent.surface?.child;
-        if (child === undefined || child === null) return;
+        // A dropped launch ends while another subagent still runs its child.
+        if (child === undefined || child === null || subagent.heldBy !== undefined) return;
         const records = yield* findDroidSessionTranscript(droidHome, child.sessionId).pipe(
           Effect.flatMap((file) =>
             file === undefined
@@ -1241,27 +1243,37 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         const now = yield* DateTime.now;
         const ctx = eventContext(state, turn);
         const ordinal = turn.mapper.nextItemOrdinal;
+        const stop = {
+          interrupted: turn.mapper.interruptRequested,
+          declined: known !== undefined && turn.mapper.declinedToolUseIds.has(known.toolUseId),
+        };
         const update =
           notification.type === "child_session_available"
-            ? launchDroidSubagent(known, ctx, notification, ordinal, now, {
-                appThread: turn.turnInput.appThread,
-                modelSelection: turn.turnInput.modelSelection,
-                number:
-                  [...state.subagents.values()].filter((subagent) => subagent.surface !== undefined)
-                    .length + 1,
-              })
-            : settleDroidTaskResult(
+            ? launchDroidSubagent(
                 known,
                 ctx,
                 notification,
-                {
-                  interrupted: turn.mapper.interruptRequested,
-                  declined:
-                    known !== undefined && turn.mapper.declinedToolUseIds.has(known.toolUseId),
-                },
                 ordinal,
                 now,
-              );
+                {
+                  appThread: turn.turnInput.appThread,
+                  modelSelection: turn.turnInput.modelSelection,
+                  number:
+                    [...state.subagents.values()].filter(
+                      (subagent) => subagent.surface !== undefined,
+                    ).length + 1,
+                },
+                state.subagents.values(),
+              )
+            : known?.heldBy !== undefined
+              ? settleDroppedDroidTaskResult(
+                  known,
+                  state.subagents.get(known.heldBy),
+                  notification,
+                  stop,
+                  now,
+                )
+              : settleDroidTaskResult(known, ctx, notification, stop, ordinal, now);
         if (update !== undefined) yield* publishSubagents(state, turn, [update]);
         return true;
       });
@@ -1939,8 +1951,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         [...state.subagents.values()].some(
           (subagent) =>
             !subagent.background &&
-            (subagent.status === "pending" || subagent.status === "running") &&
-            subagent.providerTurnId === turn.providerTurn.id,
+            subagent.providerTurnId === turn.providerTurn.id &&
+            (subagent.heldBy === undefined
+              ? subagent.status === "pending" || subagent.status === "running"
+              : // An awaited launch Droid dropped returns once the subagent running its child ends.
+                state.subagents.get(subagent.heldBy)?.status === "running"),
         );
 
       /**

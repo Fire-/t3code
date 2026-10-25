@@ -106,6 +106,12 @@ export interface DroidSubagent {
   readonly surface: SubagentSurface | undefined;
   /** The report it settled with. */
   readonly result: string | null;
+  /**
+   * For a launch whose child session another subagent was still running: that subagent's Task
+   * call. Droid drops such a launch's prompt, and an awaited one returns the running subagent's
+   * outcome instead.
+   */
+  readonly heldBy: string | undefined;
 }
 
 /** What a child thread copies from the thread whose turn launched the subagent. */
@@ -175,6 +181,7 @@ export function noteDroidTaskCall(
     status: "pending",
     surface: undefined,
     result: null,
+    heldBy: undefined,
   };
 }
 
@@ -311,7 +318,7 @@ function subagentEvents(
   return [
     // A background subagent's run stops listening once the subagent's own item settles, so its
     // child thread ends first.
-    ...(settled && surface.child !== null
+    ...(settled && surface.child !== null && subagent.heldBy === undefined
       ? [childRootNodeEvent(surface, surface.child, status, completedAt)]
       : []),
     {
@@ -440,7 +447,7 @@ function announce(
   return {
     subagent,
     events: [
-      ...(child === null || launch === undefined
+      ...(child === null || launch === undefined || known.heldBy !== undefined
         ? []
         : childThreadOpened(subagent, surface, child, launch.parent, ctx.derive, now)),
       ...subagentEvents(subagent, surface, "running", null, now),
@@ -449,10 +456,16 @@ function announce(
   };
 }
 
+const DROPPED_FOLLOW_UP = "Droid dropped this follow-up because the subagent was still running.";
+
 /**
  * `child_session_available` starts the subagent. Droid has named the child by now, which is why
  * the subagent starts here and not at the Task call. Returns nothing for a duplicate or a late
  * frame of a subagent that has started or ended: those never reopen it.
+ *
+ * A Task `resume` of a child another subagent is still running gets a child session too, but
+ * Droid never delivers its prompt: the child goes on with what it was doing. That launch ends
+ * failed at once and leaves the child thread to the subagent running it.
  */
 export function launchDroidSubagent(
   known: DroidSubagent | undefined,
@@ -461,6 +474,7 @@ export function launchDroidSubagent(
   ordinal: number,
   now: DateTime.Utc,
   parent: DroidSubagentParent,
+  subagents: Iterable<DroidSubagent>,
 ): DroidSubagentUpdate | undefined {
   const toolUseId = asTrimmed(notification["toolUseId"]);
   const childSessionId = asTrimmed(notification["childSessionId"]);
@@ -477,8 +491,29 @@ export function launchDroidSubagent(
     status: "pending",
     surface: undefined,
     result: null,
+    heldBy: undefined,
   };
-  return announce(call, ctx, { childSessionId, parent }, ordinal, now);
+  const holder = [...subagents].find(
+    (subagent) =>
+      subagent.toolUseId !== toolUseId &&
+      subagent.status === "running" &&
+      subagent.childSessionId === childSessionId,
+  );
+  const announced = announce(
+    { ...call, heldBy: holder?.toolUseId },
+    ctx,
+    { childSessionId, parent },
+    ordinal,
+    now,
+  );
+  if (holder === undefined) return announced;
+  const dropped = settleDroidSubagent(
+    announced.subagent,
+    { status: "failed", result: DROPPED_FOLLOW_UP },
+    now,
+  );
+  if (dropped === undefined) return announced;
+  return { ...dropped, events: [...announced.events, ...dropped.events], surfaced: true };
 }
 
 export function settleDroidSubagent(
@@ -495,6 +530,41 @@ export function settleDroidSubagent(
   };
 }
 
+interface DroidTaskStop {
+  readonly interrupted: boolean;
+  readonly declined: boolean;
+}
+
+/**
+ * A background launch's result only acknowledges it, and marks the subagent as one. Returns
+ * "awaited" for a result that ends the Task instead.
+ */
+function noteDroidBackgroundLaunch(
+  known: DroidSubagent,
+  notification: DroidNotification,
+): DroidSubagentUpdate | "awaited" | undefined {
+  if (notification["isError"] === true) return "awaited";
+  if (!known.background && !isDroidBackgroundTaskLaunch(notification["content"])) return "awaited";
+  return known.background
+    ? undefined
+    : { subagent: { ...known, background: true }, events: [], surfaced: false };
+}
+
+const droidTaskResultOutcome = (
+  notification: DroidNotification,
+  stop: DroidTaskStop,
+): DroidSubagentOutcome => ({
+  status:
+    notification["isError"] !== true
+      ? "completed"
+      : stop.interrupted
+        ? "interrupted"
+        : stop.declined
+          ? "cancelled"
+          : "failed",
+  result: droidTaskResultReport(notification["content"]) ?? null,
+});
+
 /**
  * The `tool_result` of a Task. An awaited Task's result is the report and ends the subagent. A
  * background Task's result only acknowledges the launch, unless it is an error: then the launch
@@ -505,33 +575,20 @@ export function settleDroidTaskResult(
   known: DroidSubagent | undefined,
   ctx: DroidEventContext,
   notification: DroidNotification,
-  stop: { readonly interrupted: boolean; readonly declined: boolean },
+  stop: DroidTaskStop,
   ordinal: number,
   now: DateTime.Utc,
 ): DroidSubagentUpdate | undefined {
   if (known === undefined || isSettledDroidSubagent(known)) return undefined;
-  const failed = notification["isError"] === true;
-  if (!failed && (known.background || isDroidBackgroundTaskLaunch(notification["content"]))) {
-    return known.background
-      ? undefined
-      : { subagent: { ...known, background: true }, events: [], surfaced: false };
-  }
+  const launch = noteDroidBackgroundLaunch(known, notification);
+  if (launch !== "awaited") return launch;
   const announced =
     known.surface === undefined
       ? announce(known, ctx, undefined, ordinal, now)
       : { subagent: known, events: [], surfaced: false };
   const settled = settleDroidSubagent(
     announced.subagent,
-    {
-      status: !failed
-        ? "completed"
-        : stop.interrupted
-          ? "interrupted"
-          : stop.declined
-            ? "cancelled"
-            : "failed",
-      result: droidTaskResultReport(notification["content"]) ?? null,
-    },
+    droidTaskResultOutcome(notification, stop),
     now,
   );
   if (settled === undefined) return undefined;
@@ -540,6 +597,23 @@ export function settleDroidTaskResult(
     events: [...announced.events, ...settled.events],
     surfaced: announced.surfaced,
   };
+}
+
+/**
+ * The `tool_result` of a launch Droid dropped because its child was busy. An awaited one waited
+ * for the subagent running the child and carries that subagent's outcome, so it ends that one.
+ */
+export function settleDroppedDroidTaskResult(
+  dropped: DroidSubagent,
+  holder: DroidSubagent | undefined,
+  notification: DroidNotification,
+  stop: DroidTaskStop,
+  now: DateTime.Utc,
+): DroidSubagentUpdate | undefined {
+  const launch = noteDroidBackgroundLaunch(dropped, notification);
+  if (launch !== "awaited") return launch;
+  if (holder === undefined) return undefined;
+  return settleDroidSubagent(holder, droidTaskResultOutcome(notification, stop), now);
 }
 
 /**

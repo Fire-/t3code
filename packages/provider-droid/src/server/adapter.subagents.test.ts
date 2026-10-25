@@ -814,3 +814,122 @@ describe("Pending background tasks are set on start and cleared on completion, f
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
+
+describe("A Task resume of a child that is still running", () => {
+  const RESUME_TOOL_USE_ID = "chatcmpl-tool-7a41c0de9b2e4f6a8c3d5e7f9a1b3c5d";
+
+  // Droid 0.247.0 accepts the resume, starts the same child session again, and drops the prompt.
+  const resumeTask = Effect.fnUntraced(function* (
+    process: FakeDroidProcess,
+    options: { readonly await?: boolean } = {},
+  ) {
+    const call = (input: Record<string, unknown>) => ({
+      type: "tool_call",
+      toolUse: { type: "tool_use", id: RESUME_TOOL_USE_ID, name: "Task", input },
+    });
+    yield* process.emit(call({}));
+    yield* process.emit(
+      call({
+        subagent_type: "worker",
+        description: "dig more",
+        prompt: "Go on.",
+        resume: CHILD,
+        ...(options.await === undefined ? {} : { await: options.await }),
+      }),
+    );
+    yield* process.emit({
+      ...childSession,
+      toolUseId: RESUME_TOOL_USE_ID,
+      description: "dig more",
+    });
+  });
+
+  const resumeResult = (content: string) => ({
+    ...taskResult(content),
+    toolUseId: RESUME_TOOL_USE_ID,
+  });
+
+  const byPrompt = (events: Events, prompt: string) =>
+    subagentUpdates(events)
+      .filter((subagent) => subagent.prompt === prompt)
+      .map((subagent) => [subagent.status, subagent.result]);
+
+  const isDropped = (event: Events[number]) =>
+    event.type === "subagent.updated" &&
+    event.subagent.prompt === "Go on." &&
+    event.subagent.status === "failed";
+
+  const childThreadMessages = (events: Events) =>
+    events.flatMap((event) =>
+      event.type === "message.updated" && event.message.threadId === CHILD_THREAD
+        ? [event.message.text]
+        : [],
+    );
+
+  const childRootStatuses = (events: Events) =>
+    events.flatMap((event) =>
+      event.type === "node.updated" && event.node.threadId === CHILD_THREAD
+        ? [event.node.status]
+        : [],
+    );
+
+  it.effect(
+    "ends the resume failed at once, keeps its prompt off the child thread, and the report completes the running subagent",
+    () =>
+      Effect.gen(function* () {
+        const begun = yield* withBackgroundTask;
+        const { opened, process, providerThread } = begun;
+        yield* startTurn(opened.runtime, providerThread, { runOrdinal: 2, runtimeMode: "auto" });
+
+        yield* resumeTask(process);
+        yield* opened.takeEvent(isDropped);
+        yield* process.emit(resumeResult(LAUNCH_ACKNOWLEDGEMENT));
+        yield* process.emit(completed(2));
+        yield* opened.takeEvent((event) => isTerminal(event) && event.runOrdinal === 2);
+        assert.deepStrictEqual(childRootStatuses(opened.all), ["running"], "the child runs on");
+
+        yield* process.emit(completionMessage(completionReport("completed", "sub-ok")));
+        yield* opened.takeEvent(isSubagentWith("completed"));
+
+        const [dropped] = byPrompt(opened.all, "Go on.").slice(-1);
+        assert.strictEqual(dropped?.[0], "failed");
+        assert.include(String(dropped?.[1]), "still running");
+        assert.deepStrictEqual(byPrompt(opened.all, "Dig in."), [
+          ["running", null],
+          ["completed", "sub-ok"],
+        ]);
+        assert.notInclude(childThreadMessages(opened.all), "Go on.");
+        assert.deepStrictEqual(childRootStatuses(opened.all), ["running", "completed"]);
+        assert.deepStrictEqual(rosters(opened.all).at(-1), []);
+        assert.deepStrictEqual(openItems(opened.all), [], "no row is left running");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "an awaited resume's report completes the subagent running the child, and Droid's later stop notice changes nothing",
+    () =>
+      Effect.gen(function* () {
+        const begun = yield* withBackgroundTask;
+        const { opened, process, providerThread } = begun;
+        yield* startTurn(opened.runtime, providerThread, { runOrdinal: 2, runtimeMode: "auto" });
+
+        yield* resumeTask(process, { await: true });
+        yield* opened.takeEvent(isDropped);
+        yield* process.emit(resumeResult(AWAITED_REPORT("first-done")));
+        yield* opened.takeEvent(isSubagentWith("completed"));
+        yield* process.emit(completionMessage(completionReport("stopped", "No output available")));
+        yield* process.emit(completed(2));
+        yield* opened.takeEvent((event) => isTerminal(event) && event.runOrdinal === 2);
+
+        assert.deepStrictEqual(byPrompt(opened.all, "Dig in."), [
+          ["running", null],
+          ["completed", "first-done"],
+        ]);
+        assert.strictEqual(byPrompt(opened.all, "Go on.").at(-1)?.[0], "failed");
+        assert.notInclude(childThreadMessages(opened.all), "Go on.");
+        assert.deepStrictEqual(childRootStatuses(opened.all), ["running", "completed"]);
+        assert.deepStrictEqual(rosters(opened.all).at(-1), []);
+        assert.deepStrictEqual(openItems(opened.all), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});

@@ -143,7 +143,7 @@ const noteCall = (known: DroidSubagent | undefined, notification: DroidNotificat
 
 const launched = (input: Record<string, unknown> = AWAITED_INPUT) => {
   const called = noteCall(noteCall(undefined, taskCall({})), taskCall(input));
-  const update = launchDroidSubagent(called, ctx, childSession(), 101, at(10), PARENT);
+  const update = launchDroidSubagent(called, ctx, childSession(), 101, at(10), PARENT, []);
   assert.isDefined(update);
   return update!;
 };
@@ -164,6 +164,7 @@ const resumed = () => {
     103,
     at(40),
     PARENT,
+    [],
   );
   assert.isDefined(update);
   return update!;
@@ -322,7 +323,9 @@ describe("awaited Task subagent", () => {
       // A duplicate Task call keeps the finished record.
       assert.strictEqual(noteCall(settled, taskCall(AWAITED_INPUT)), settled);
       assert.strictEqual(noteCall(settled, taskCall({})), settled);
-      assert.isUndefined(launchDroidSubagent(settled, ctx, childSession(), 103, at(30), PARENT));
+      assert.isUndefined(
+        launchDroidSubagent(settled, ctx, childSession(), 103, at(30), PARENT, []),
+      );
       assert.isUndefined(
         settleDroidTaskResult(settled, ctx, taskResult(FRAMED_REPORT), NOT_STOPPED, 103, at(30)),
       );
@@ -336,7 +339,7 @@ describe("awaited Task subagent", () => {
   it("does not start a subagent twice for a repeated child_session_available", () => {
     const running = launched();
     assert.isUndefined(
-      launchDroidSubagent(running.subagent, ctx, childSession(), 102, at(11), PARENT),
+      launchDroidSubagent(running.subagent, ctx, childSession(), 102, at(11), PARENT, []),
     );
   });
 

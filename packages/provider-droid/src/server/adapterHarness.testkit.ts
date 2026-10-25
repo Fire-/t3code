@@ -429,7 +429,7 @@ export const assistantSays = Effect.fnUntraced(function* (
   yield* process.emit({ type: "assistant_text_complete", messageId, blockIndex: 0 });
 });
 
-const BACKGROUND_TASK_ID = "5fd3ffdd-4f3f-41c8-8873-e1fd3f6a1378";
+export const BACKGROUND_TASK_ID = "5fd3ffdd-4f3f-41c8-8873-e1fd3f6a1378";
 
 /** A background Task subagent: the launch Droid streams and its acknowledgement, so the task runs on. */
 export const launchBackgroundTask = Effect.fnUntraced(function* (process: FakeDroidProcess) {

@@ -7,6 +7,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import {
   assistantSays,
+  BACKGROUND_TASK_ID,
   beginTurn,
   captureLogs,
   completed,
@@ -230,6 +231,61 @@ describe("DroidAdapterV2 inactivity watchdog", () => {
 
         yield* process.emit(EXEC_RESULT);
         yield* observe(opened, isCommandItem("completed"));
+
+        yield* TestClock.adjust(JUST_UNDER_TEN_MINUTES);
+        assert.strictEqual(terminals(opened.all).length, 0, "the window began at the result");
+        yield* TestClock.adjust(ONE_MILLI);
+        const terminal = yield* opened.takeEvent(isTerminal);
+
+        assertWatchdogTerminal(opened, terminal);
+        yield* assertTornDown(opened, process);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "it waits while an awaited Task resume of a still-running child blocks the turn, and fires ten silent minutes after its result",
+    () =>
+      Effect.gen(function* () {
+        const { opened, process } = yield* silentTurn();
+        yield* launchBackgroundTask(process);
+        const resumeId = "chatcmpl-tool-resume";
+        const input = { description: "dig more", prompt: "Go on.", resume: BACKGROUND_TASK_ID };
+        yield* process.emit({
+          type: "tool_call",
+          toolUse: {
+            type: "tool_use",
+            id: resumeId,
+            name: "Task",
+            input: { ...input, await: true },
+          },
+        });
+        yield* process.emit({
+          type: "child_session_available",
+          childSessionId: BACKGROUND_TASK_ID,
+          toolUseId: resumeId,
+          description: "dig more",
+        });
+        yield* observe(
+          opened,
+          (event) =>
+            event.type === "subagent.updated" &&
+            event.subagent.prompt === "Go on." &&
+            event.subagent.status === "failed",
+        );
+
+        yield* TestClock.adjust(Duration.minutes(25));
+        assert.strictEqual(terminals(opened.all).length, 0, "Droid is waiting on the child");
+
+        yield* process.emit({
+          type: "tool_result",
+          toolUseId: resumeId,
+          content: `session_id: ${BACKGROUND_TASK_ID}\n\nfirst-done`,
+          isError: false,
+        });
+        yield* observe(
+          opened,
+          (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+        );
 
         yield* TestClock.adjust(JUST_UNDER_TEN_MINUTES);
         assert.strictEqual(terminals(opened.all).length, 0, "the window began at the result");
