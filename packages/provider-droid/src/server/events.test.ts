@@ -662,6 +662,7 @@ describe("tool calls and results [VAL-TURN-008]", () => {
       'const page = await tools.FetchUrl({ url: "https://example.com" });',
       'await tools.Execute({ command: "ls" });',
       'text(await tools.FetchUrl({ url: "https://example.org" }));',
+      'await tools.t3_code.html_render({ html: "<p>hi</p>", title: "Hi", height: 80 });',
     ].join("\n");
     const { events } = feed([
       toolCall("Script", {}),
@@ -670,14 +671,15 @@ describe("tool calls and results [VAL-TURN-008]", () => {
     ]);
     const items = turnItems(events);
     assert.strictEqual(new Set(items.map((item) => item.id)).size, 1);
+    const title = "Script: FetchUrl, Execute, t3_code.html_render";
     assert.deepStrictEqual(
       items.map((item) =>
         item.type === "dynamic_tool" ? [item.toolName, item.title, item.input] : [item.type],
       ),
       [
         ["js", "Script", {}],
-        ["js", "Script: FetchUrl, Execute", { code: script }],
-        ["js", "Script: FetchUrl, Execute", { code: script }],
+        ["js", title, { code: script }],
+        ["js", title, { code: script }],
       ],
     );
     const final = items.at(-1);
