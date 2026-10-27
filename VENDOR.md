@@ -10,7 +10,7 @@ upstream `main` while carrying our own infra config.
 
 ```
 origin/main               ← upstream (never commit here)
-├── overlay/dev-infra     ← .mise.toml, VENDOR.md
+├── overlay/dev-infra     ← .mise.toml, VENDOR.md, UPGRADING.md
 └── main                  ← local integration branch (merge commits ONLY)
 ```
 
@@ -63,7 +63,7 @@ fails if their patches differ; amend every copy together or none.
 | `mise run sync`                               | Fetch origin/main, re-overlay `overlay/*` branches that lack it, return to original branch; overlays that would conflict are left untouched and listed, so fix those by hand and rerun |
 | `mise run rebuild-local`                      | Reset `local` to origin/main, re-merge all `overlay/*` branches, end on `local`                                                                                                        |
 | `mise run check-overlays`                     | Fail if overlays stack (share the very same commit) or a commit cherry-picked into several overlays differs between them                                                               |
-| `mise run build`                              | Build all workspace packages                                                                                                                                                           |
+| `mise run build`                              | Build all workspace packages; write the commit to `apps/server/dist/build-info.json`, which `swap` carries into the tier                                                               |
 | `mise run smoke-test`                         | Boot-check the built server bundle (`bin.mjs --version`)                                                                                                                               |
 | `mise run swap`                               | Promote the build to `~/.t3/code/dist/current` (shifts current→bak)                                                                                                                    |
 | `mise run swap-back`                          | Restore the previous build from bak to current                                                                                                                                         |
@@ -120,8 +120,9 @@ what actually serves.
   dependency closure. `scripts/runtime-natives.mjs` copies them BUILT and
   PATCHED from this vendor install, so a tier runs exactly what was tested
   and needs no registry. `swap` boots the staged tier before promoting it.
-- Daily flow: `mise run upgrade` (updates the runtime via swap), phone pairs
-  against the running server. Fallback to the stable tier: `rm -rf
+- Daily flow: an agent follows [UPGRADING.md](UPGRADING.md) (checked,
+  rehearsed, and recorded; `mise run upgrade` is the unchecked manual
+  version), phone pairs against the running server. Fallback to the stable tier: `rm -rf
 ~/.t3/code/dist/current && cp -R ~/.t3/code/dist/stable
 ~/.t3/code/dist/current` (or `mise run swap-back` if bak is healthy).
 - On PATH via the labeled `~/.zshrc` block:

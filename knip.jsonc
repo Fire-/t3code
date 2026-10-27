@@ -21,8 +21,8 @@
       // worktree setup (from t3.json) run directly. release-desktop.yml bundles the
       // Windows verify script with esbuild through a path knip does not trace,
       // electron-builder loads the macOS signer by path, mobile-e2e.ts runs
-      // agent-device's CLI by path, and the mise build tasks and
-      // generate-runtime.sh run runtime-natives.mjs directly.
+      // agent-device's CLI by path, the mise build tasks and generate-runtime.sh
+      // run runtime-natives.mjs directly, and UPGRADING.md runs upgrade.mjs.
       "entry": [
         // These fixture scripts are injected into a browser page by path.
         "fixtures/*/*.js",
@@ -31,6 +31,7 @@
         "runtime-natives.mjs",
         "setup-worktree.ts",
         "sign-macos.ts",
+        "upgrade.mjs",
         "verify-windows-desktop-artifact.ts",
       ],
       "ignoreDependencies": ["agent-device", "esbuild"],
