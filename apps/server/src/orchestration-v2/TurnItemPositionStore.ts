@@ -27,6 +27,11 @@ export interface TurnItemPositionStoreV2Shape {
     item: OrchestrationV2TurnItem,
     runOrdinal?: number,
   ) => Effect.Effect<OrchestrationV2TurnItem, TurnItemPositionStoreError>;
+  /** Like normalize, but an item that already has a position moves after the rest of its run's items. */
+  readonly reposition: (
+    item: OrchestrationV2TurnItem,
+    runOrdinal?: number,
+  ) => Effect.Effect<OrchestrationV2TurnItem, TurnItemPositionStoreError>;
 }
 
 export class TurnItemPositionStoreV2 extends Context.Service<
@@ -101,17 +106,36 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           ),
       );
 
-    return TurnItemPositionStoreV2.of({
-      allocate,
-      // Per-event normalization shares the enclosing orchestration span.
-      normalize: Effect.fnUntraced(function* (item, runOrdinal) {
+    // Per-event normalization shares the enclosing orchestration span.
+    const normalize: TurnItemPositionStoreV2Shape["normalize"] = Effect.fnUntraced(
+      function* (item, runOrdinal) {
         return yield* allocate({
           threadId: item.threadId,
           turnItemId: item.id,
           runId: item.runId,
           ...(runOrdinal === undefined ? {} : { runOrdinal }),
         }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal })));
-      }),
+      },
+    );
+
+    return TurnItemPositionStoreV2.of({
+      allocate,
+      normalize,
+      reposition: (item, runOrdinal) =>
+        sql`
+          DELETE FROM orchestration_v2_turn_item_positions
+          WHERE thread_id = ${item.threadId} AND turn_item_id = ${item.id}
+        `.pipe(
+          Effect.mapError(
+            (cause) =>
+              new TurnItemPositionStoreError({
+                threadId: item.threadId,
+                turnItemId: item.id,
+                cause,
+              }),
+          ),
+          Effect.andThen(normalize(item, runOrdinal)),
+        ),
     });
   }),
 );

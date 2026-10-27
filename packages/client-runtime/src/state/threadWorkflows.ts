@@ -108,6 +108,21 @@ export function threadSupportsProviderHandoff(projection: Projection | null | un
   );
 }
 
+/**
+ * A live session that takes mode changes in place gets a picked runtime mode
+ * right away; any other session would restart, so the pick waits for the next send.
+ */
+export function threadSwitchesRuntimeModeLive(projection: Projection | null | undefined): boolean {
+  if (projection == null) return false;
+  const session = resolveThreadProviderSession(projection);
+  return (
+    session !== null &&
+    session.status !== "stopped" &&
+    session.status !== "error" &&
+    session.capabilities.sessions.supportsRuntimeModeSwitchInSession
+  );
+}
+
 export function getUserQueuedThreadRuns(
   projection: Pick<Projection, "runs" | "messages">,
 ): ReadonlyArray<Run> {
