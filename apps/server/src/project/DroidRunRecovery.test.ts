@@ -16,6 +16,7 @@ import {
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { historicalMessage } from "@t3tools/provider-core/server/handoffBudget";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { droidTranscriptEntries } from "@t3tools/provider-droid/server";
 import * as DateTime from "effect/DateTime";
@@ -290,6 +291,52 @@ describe("droidRunRecovery", () => {
         ["node:t-b", "failed"],
         ["node:t-c", "interrupted"],
       ],
+    );
+  });
+
+  it("hands the next turn each AskUser exchange as a question and an answer, without adding them to the thread", () => {
+    const questionnaire = "1. [question] Which file?\n[option] a.ts\n[option] b.ts";
+    const entries = droidTranscriptEntries([
+      record("u1", 0, "user", [text("Fix it")]),
+      record("a1", 1, "assistant", [toolUse("t-ask", "AskUser", { questionnaire })]),
+      record("r1", 3, "user", [toolResult("t-ask", "1. [question] Which file?\n[answer] a.ts")]),
+      record("a2", 4, "assistant", [text("Fixing a.ts.")]),
+      record("a3", 5, "assistant", [toolUse("t-ask-2", "AskUser", { questionnaire })]),
+    ]);
+
+    const recovery = droidRunRecovery({
+      run,
+      projection: {
+        attempts: [attempt],
+        nodes: [node(rootNodeId, "root_turn", 0)],
+        providerTurns: [providerTurn],
+        turnItems: [userMessage("u1", 1, 0, "Fix it")],
+        messages: [],
+      },
+      entries,
+      derive: IdAllocator.derive,
+    });
+
+    assert.deepStrictEqual(
+      recovery.handoffItems.flatMap((item) => {
+        const message = historicalMessage(item);
+        return message === null ? [] : [[message.role, message.status, message.text]];
+      }),
+      [
+        ["user", "completed", "Fix it"],
+        ["assistant", "completed", `<ask_user>\n${questionnaire}\n</ask_user>`],
+        [
+          "user",
+          "completed",
+          "<ask_user_response>\n1. [question] Which file?\n[answer] a.ts\n</ask_user_response>",
+        ],
+        ["assistant", "completed", "Fixing a.ts."],
+        ["assistant", "interrupted", `<ask_user>\n${questionnaire}\n</ask_user>`],
+      ],
+    );
+    assert.deepStrictEqual(
+      recovery.items.map((item) => item.type),
+      ["user_message", "dynamic_tool", "assistant_message", "dynamic_tool"],
     );
   });
 });

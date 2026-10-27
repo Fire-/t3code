@@ -29,6 +29,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import * as ContextHandoffService from "../orchestration-v2/ContextHandoffService.ts";
@@ -45,6 +46,8 @@ export interface DroidRunRecovery {
   readonly run: OrchestrationV2Run;
   /** Every item of the run, in the order the thread shows them. */
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
+  /** The items plus each AskUser exchange as messages; for the next turn's handoff, not the thread. */
+  readonly handoffItems: ReadonlyArray<OrchestrationV2TurnItem>;
   /** Replies the live turn never showed. */
   readonly messages: ReadonlyArray<OrchestrationV2ConversationMessage>;
   readonly attempts: ReadonlyArray<OrchestrationV2RunAttempt>;
@@ -68,8 +71,60 @@ type Step =
       readonly message?: OrchestrationV2ConversationMessage;
     };
 
-/**
- * The run as the transcript tells it. Tool rows the live turn showed keep their ids and place;
+/** Handoff history keeps only messages, so each AskUser exchange is retold as a question and an answer. */
+function withAskUserExchanges(
+  items: ReadonlyArray<OrchestrationV2TurnItem>,
+  derive: IdAllocator.IdAllocatorV2Derive,
+): ReadonlyArray<OrchestrationV2TurnItem> {
+  return items.flatMap((item): ReadonlyArray<OrchestrationV2TurnItem> => {
+    if (item.type !== "dynamic_tool" || item.toolName !== "AskUser") return [item];
+    const questionnaire = Predicate.isObject(item.input) ? item.input["questionnaire"] : undefined;
+    if (typeof questionnaire !== "string") return [item];
+    const synthetic = (part: "question" | "response") => {
+      const nativeItemId = `${item.nativeItemRef?.nativeId ?? item.id}:ask-user:${part}`;
+      return {
+        id: derive.turnItemFromProviderItem({ driver: DROID, nativeItemId }),
+        messageId: derive.messageFromProviderItem({ driver: DROID, nativeItemId }),
+        threadId: item.threadId,
+        runId: item.runId,
+        nodeId: item.nodeId,
+        providerThreadId: item.providerThreadId,
+        providerTurnId: item.providerTurnId,
+        nativeItemRef: { driver: DROID, nativeId: nativeItemId, strength: "weak" as const },
+        parentItemId: null,
+        ordinal: item.ordinal,
+        title: null,
+        startedAt: item.startedAt,
+        completedAt: item.completedAt,
+        updatedAt: item.updatedAt,
+      };
+    };
+    const question: OrchestrationV2TurnItem = {
+      ...synthetic("question"),
+      type: "assistant_message",
+      status: item.status,
+      text: `<ask_user>\n${questionnaire}\n</ask_user>`,
+      streaming: false,
+    };
+    if (typeof item.output !== "string" || item.output.trim() === "") return [item, question];
+    return [
+      item,
+      question,
+      {
+        ...synthetic("response"),
+        type: "user_message",
+        status: "completed",
+        createdBy: "user",
+        creationSource: "provider",
+        inputIntent: "steer",
+        text: `<ask_user_response>\n${item.output}\n</ask_user_response>`,
+        attachments: [],
+      },
+    ];
+  });
+}
+
+/** * The run as the transcript tells it. Tool rows the live turn showed keep their ids and place;
  * each one settles with its result, or as interrupted if it never got one. Thinking, replies,
  * notices, and calls the live turn never showed go between them in transcript order. A Script's
  * own calls stay out, as they do live. User messages are already on the thread.
@@ -324,6 +379,7 @@ export function droidRunRecovery(input: {
   return {
     run: { ...run, status: "interrupted", queuePosition: null, completedAt: endedAt },
     items,
+    handoffItems: withAskUserExchanges(items, derive),
     messages: [
       ...steps.flatMap((step) =>
         step.kind === "added" && step.message !== undefined ? [step.message] : [],
@@ -400,7 +456,7 @@ export const recoverDroidRun = Effect.fn("DroidRunRecovery.recover")(function* (
     coveredRunOrdinals: { from: run.ordinal, to: run.ordinal },
     strategy: "delta_since_target_last_seen",
     runs: projection.runs.map((candidate) => (candidate.id === run.id ? recovery.run : candidate)),
-    items: recovery.items,
+    items: recovery.handoffItems,
     createdAt: now,
   });
 
