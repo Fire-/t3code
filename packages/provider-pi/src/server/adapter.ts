@@ -6,6 +6,7 @@ import * as Predicate from "effect/Predicate";
 import {
   ProviderDriverKind,
   type ChatAttachment,
+  type MessageId,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
@@ -21,6 +22,7 @@ import {
   type ProviderApprovalDecision,
   type ProviderInstanceId,
   type OrchestrationV2ProviderTurnTokenUsage,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { PiSettings } from "../settings.ts";
 import * as Cause from "effect/Cause";
@@ -563,6 +565,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const pendingPromptResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
         readonly kind: "turn_start" | "steer";
+        readonly steer?: { readonly threadId: ThreadId; readonly messageId: MessageId };
       }> = [];
       const pendingCompactResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
@@ -1971,6 +1974,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               yield* Effect.logWarning("Pi rejected a steer message.", {
                 errorLength: recordString(event, "error")?.length,
               });
+              if (pendingPrompt?.steer !== undefined) {
+                yield* emit({
+                  type: "steer.discarded",
+                  driver: PI_PROVIDER,
+                  ...pendingPrompt.steer,
+                });
+              }
               return;
             }
             const failedTurn =
@@ -2601,6 +2611,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   pendingPromptResponses.push({
                     providerTurnId: turn.providerTurn.id,
                     kind: "steer",
+                    steer: {
+                      threadId: steerInput.threadId,
+                      messageId: steerInput.message.messageId,
+                    },
                   });
                 }
                 turn.settleProbeGeneration += 1;
