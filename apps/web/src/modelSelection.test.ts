@@ -98,11 +98,18 @@ describe("instance-scoped model selection", () => {
       {
         slug: "claude-opus-5-5",
         name: "Claude Opus 5.5 (2x)",
+        shortName: "Opus 5.5 (2x)",
         subProvider: "Anthropic",
         isCustom: false,
         isDefault: true,
       },
-      { slug: "gpt-6-sol", name: "GPT-6 Sol (1.5x)", subProvider: "OpenAI", isCustom: false },
+      {
+        slug: "gpt-6-sol",
+        name: "GPT-6 Sol (1.5x)",
+        shortName: "6 Sol (1.5x)",
+        subProvider: "OpenAI",
+        isCustom: false,
+      },
       { slug: "glm-5.3", name: "GLM 5.3 (0.4x)", subProvider: "Droid Core", isCustom: false },
     ]);
   });
