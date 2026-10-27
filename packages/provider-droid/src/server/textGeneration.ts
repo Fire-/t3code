@@ -48,112 +48,112 @@ export const makeDroidTextGenerationRunner = Effect.fn("makeDroidTextGenerationR
   const droidText = (text: string) =>
     limitSection(apiKey ? text.replaceAll(apiKey, "[redacted]") : text, DETAIL_MAX_CHARS);
 
-  const runDroid: TextGenerationOperations.Runner = (request) => {
-    const { operation, prompt, modelSelection } = request;
-    const model = modelSelection.model;
-    const requestedEffort = getModelSelectionStringOptionValue(modelSelection, "reasoningEffort");
-    const effort = model === DROID_ROUTER_MODEL ? undefined : requestedEffort;
-    const failure = (detail: string, cause?: unknown) =>
-      new TextGenerationError({ operation, detail, cause });
+  const runDroid: TextGenerationOperations.Runner = Effect.fn("DroidTextGeneration.runDroid")(
+    function* (request) {
+      const { operation, prompt, modelSelection } = request;
+      const model = modelSelection.model;
+      const requestedEffort = getModelSelectionStringOptionValue(modelSelection, "reasoningEffort");
+      const effort = model === DROID_ROUTER_MODEL ? undefined : requestedEffort;
+      const failure = (detail: string, cause?: unknown) =>
+        new TextGenerationError({ operation, detail, cause });
 
-    const writeTempFile = (prefix: string, content: string, suffix?: string) =>
-      fileSystem.makeTempFileScoped({ prefix: `t3code-droid-${prefix}-`, suffix }).pipe(
-        Effect.tap((path) => fileSystem.writeFileString(path, content)),
-        Effect.mapError((cause) => failure("Failed to write a temporary file for Droid.", cause)),
-      );
-
-    const collectText = <E>(stream: Stream.Stream<Uint8Array, E>) =>
-      stream.pipe(
-        Stream.decodeText(),
-        Stream.runFold(
-          () => "",
-          (text, chunk) => text + chunk,
-        ),
-        Effect.mapError((cause) => failure("Failed to read Droid CLI output.", cause)),
-      );
-
-    const runCommand: Effect.Effect<
-      { readonly stdout: string; readonly stderr: string; readonly exitCode: number },
-      TextGenerationError,
-      Scope.Scope
-    > = Effect.gen(function* () {
-      // Droid starts the MCP servers listed in `<cwd>/.factory/mcp.json`, and titles are
-      // generated for any project automatically, so never run inside the project. The
-      // prompt already carries everything the model needs.
-      const workingDirectory = yield* fileSystem
-        .makeTempDirectoryScoped({ prefix: "t3code-droid-cwd-" })
-        .pipe(
-          Effect.mapError((cause) =>
-            failure("Failed to create a temporary directory for Droid.", cause),
-          ),
+      const writeTempFile = (prefix: string, content: string, suffix?: string) =>
+        fileSystem.makeTempFileScoped({ prefix: `t3code-droid-${prefix}-`, suffix }).pipe(
+          Effect.tap((path) => fileSystem.writeFileString(path, content)),
+          Effect.mapError((cause) => failure("Failed to write a temporary file for Droid.", cause)),
         );
-      const promptPath = yield* writeTempFile("prompt", prompt);
-      const settingsPath = yield* writeTempFile("settings", DROID_HOOKS_OFF_SETTINGS, ".json");
-      const spawnCommand = yield* resolveSpawnCommand(
-        binary,
-        [
-          "exec",
-          "-o",
-          "json",
-          "-m",
-          model,
-          ...(effort === undefined ? [] : ["-r", effort]),
-          // Spec-mode flags always mirror the chosen model so a spec model configured in the
-          // user's Droid settings can never take over the run.
-          "--spec-model",
-          model,
-          ...(effort === undefined ? [] : ["--spec-reasoning-effort", effort]),
-          "--cwd",
-          workingDirectory,
-          "-f",
-          promptPath,
-          // The prompts carry untrusted diff text, so allow no tool that reads or fetches
-          // data (Read, FetchUrl, WebSearch, connectors). The flag rejects an empty value
-          // and unknown ids, so TodoWrite is the harmless placeholder.
-          "--only-tools",
-          "TodoWrite",
-          "--settings",
-          settingsPath,
-        ],
-        { env: environment, extendEnv: true },
-      );
-      const child = yield* spawner
-        .spawn(
-          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-            cwd: workingDirectory,
-            env: environment,
-            extendEnv: true,
-            shell: spawnCommand.shell,
-            // The prompt comes from -f; the child must never wait on stdin.
-            stdin: "ignore",
-            killSignal: "SIGTERM",
-            forceKillAfter: "5 seconds",
-          }),
-        )
-        .pipe(
-          Effect.mapError((cause) =>
-            isCommandMissingCause(cause)
-              ? failure(
-                  `Droid CLI (\`${binary}\`) was not found. Check the binary path in Droid settings.`,
-                  cause,
-                )
-              : failure("Failed to start the Droid CLI process.", cause),
-          ),
-        );
-      const [stdout, stderr, exitCode] = yield* Effect.all(
-        [
-          collectText(child.stdout),
-          collectText(child.stderr),
-          child.exitCode.pipe(
-            Effect.mapError((cause) => failure("Failed to read the Droid CLI exit code.", cause)),
-          ),
-        ],
-        { concurrency: "unbounded" },
-      );
-      return { stdout, stderr, exitCode };
-    });
 
-    return Effect.gen(function* () {
+      const collectText = <E>(stream: Stream.Stream<Uint8Array, E>) =>
+        stream.pipe(
+          Stream.decodeText(),
+          Stream.runFold(
+            () => "",
+            (text, chunk) => text + chunk,
+          ),
+          Effect.mapError((cause) => failure("Failed to read Droid CLI output.", cause)),
+        );
+
+      const runCommand: Effect.Effect<
+        { readonly stdout: string; readonly stderr: string; readonly exitCode: number },
+        TextGenerationError,
+        Scope.Scope
+      > = Effect.gen(function* () {
+        // Droid starts the MCP servers listed in `<cwd>/.factory/mcp.json`, and titles are
+        // generated for any project automatically, so never run inside the project. The
+        // prompt already carries everything the model needs.
+        const workingDirectory = yield* fileSystem
+          .makeTempDirectoryScoped({ prefix: "t3code-droid-cwd-" })
+          .pipe(
+            Effect.mapError((cause) =>
+              failure("Failed to create a temporary directory for Droid.", cause),
+            ),
+          );
+        const promptPath = yield* writeTempFile("prompt", prompt);
+        const settingsPath = yield* writeTempFile("settings", DROID_HOOKS_OFF_SETTINGS, ".json");
+        const spawnCommand = yield* resolveSpawnCommand(
+          binary,
+          [
+            "exec",
+            "-o",
+            "json",
+            "-m",
+            model,
+            ...(effort === undefined ? [] : ["-r", effort]),
+            // Spec-mode flags always mirror the chosen model so a spec model configured in the
+            // user's Droid settings can never take over the run.
+            "--spec-model",
+            model,
+            ...(effort === undefined ? [] : ["--spec-reasoning-effort", effort]),
+            "--cwd",
+            workingDirectory,
+            "-f",
+            promptPath,
+            // The prompts carry untrusted diff text, so allow no tool that reads or fetches
+            // data (Read, FetchUrl, WebSearch, connectors). The flag rejects an empty value
+            // and unknown ids, so TodoWrite is the harmless placeholder.
+            "--only-tools",
+            "TodoWrite",
+            "--settings",
+            settingsPath,
+          ],
+          { env: environment, extendEnv: true },
+        );
+        const child = yield* spawner
+          .spawn(
+            ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+              cwd: workingDirectory,
+              env: environment,
+              extendEnv: true,
+              shell: spawnCommand.shell,
+              // The prompt comes from -f; the child must never wait on stdin.
+              stdin: "ignore",
+              killSignal: "SIGTERM",
+              forceKillAfter: "5 seconds",
+            }),
+          )
+          .pipe(
+            Effect.mapError((cause) =>
+              isCommandMissingCause(cause)
+                ? failure(
+                    `Droid CLI (\`${binary}\`) was not found. Check the binary path in Droid settings.`,
+                    cause,
+                  )
+                : failure("Failed to start the Droid CLI process.", cause),
+            ),
+          );
+        const [stdout, stderr, exitCode] = yield* Effect.all(
+          [
+            collectText(child.stdout),
+            collectText(child.stderr),
+            child.exitCode.pipe(
+              Effect.mapError((cause) => failure("Failed to read the Droid CLI exit code.", cause)),
+            ),
+          ],
+          { concurrency: "unbounded" },
+        );
+        return { stdout, stderr, exitCode };
+      });
+
       // The scope closes (child killed, temp files removed) before a timeout is reported.
       const { stdout, stderr, exitCode } = yield* runCommand.pipe(
         Effect.scoped,
@@ -199,8 +199,8 @@ export const makeDroidTextGenerationRunner = Effect.fn("makeDroidTextGenerationR
           ),
         ),
       );
-    });
-  };
+    },
+  );
 
   return runDroid;
 });

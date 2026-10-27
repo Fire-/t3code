@@ -68,130 +68,136 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
   },
   configSchema: DroidSettings,
   defaultConfig: (): DroidSettings => decodeDroidSettings({}),
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
-    Effect.gen(function* () {
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
-      const httpClient = yield* HttpClient.HttpClient;
-      const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
-      // Inherits the host environment, so FACTORY_API_KEY reaches Droid when it is set there.
-      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
-      const continuationIdentity = defaultProviderContinuationIdentity({
-        driverKind: DRIVER_KIND,
-        instanceId,
-      });
-      const stampIdentity = withInstanceIdentity({
-        instanceId,
-        driverKind: DRIVER_KIND,
-        displayName,
-        accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
-      });
-      const effectiveConfig = { ...config, enabled } satisfies DroidSettings;
-      const textGeneration = yield* makeDroidTextGeneration(effectiveConfig, processEnv);
-      const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
-        Effect.succeed(MANUAL_MAINTENANCE),
+  create: Effect.fn("DroidDriver.create")(function* ({
+    instanceId,
+    displayName,
+    accentColor,
+    environment,
+    enabled,
+    config,
+  }) {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const httpClient = yield* HttpClient.HttpClient;
+    const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+    // Inherits the host environment, so FACTORY_API_KEY reaches Droid when it is set there.
+    const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+    const continuationIdentity = defaultProviderContinuationIdentity({
+      driverKind: DRIVER_KIND,
+      instanceId,
+    });
+    const stampIdentity = withInstanceIdentity({
+      instanceId,
+      driverKind: DRIVER_KIND,
+      displayName,
+      accentColor,
+      continuationGroupKey: continuationIdentity.continuationKey,
+    });
+    const effectiveConfig = { ...config, enabled } satisfies DroidSettings;
+    const textGeneration = yield* makeDroidTextGeneration(effectiveConfig, processEnv);
+    const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
+      Effect.succeed(MANUAL_MAINTENANCE),
+    );
+
+    // Set by a turn the adapter ends `model_authentication_failed`, cleared by the next completed
+    // one. Either change re-probes so the snapshot shows it.
+    const scope = yield* Effect.scope;
+    const authFailed = yield* Ref.make(false);
+    let refreshSnapshot: Effect.Effect<void> = Effect.void;
+    const setAuthFailed = (next: boolean) =>
+      Ref.getAndSet(authFailed, next).pipe(
+        Effect.flatMap((previous) =>
+          previous === next
+            ? Effect.void
+            : Effect.suspend(() => refreshSnapshot).pipe(
+                Effect.ignoreCause({ log: true }),
+                Effect.forkIn(scope),
+                Effect.asVoid,
+              ),
+        ),
       );
+    const authSignal = {
+      authenticationFailed: setAuthFailed(true),
+      authenticated: setAuthFailed(false),
+    };
 
-      // Set by a turn the adapter ends `model_authentication_failed`, cleared by the next completed
-      // one. Either change re-probes so the snapshot shows it.
-      const scope = yield* Effect.scope;
-      const authFailed = yield* Ref.make(false);
-      let refreshSnapshot: Effect.Effect<void> = Effect.void;
-      const setAuthFailed = (next: boolean) =>
-        Ref.getAndSet(authFailed, next).pipe(
-          Effect.flatMap((previous) =>
-            previous === next
-              ? Effect.void
-              : Effect.suspend(() => refreshSnapshot).pipe(
-                  Effect.ignoreCause({ log: true }),
-                  Effect.forkIn(scope),
-                  Effect.asVoid,
-                ),
+    const orchestrationAdapter = yield* DroidAdapterV2Driver.create({
+      instanceId,
+      displayName,
+      accentColor,
+      environment,
+      enabled,
+      config,
+    }).pipe(
+      Effect.provideService(DroidAuthSignal, authSignal),
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to build Droid orchestration adapter.",
+            cause,
+          }),
+      ),
+    );
+
+    const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
+    const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<DroidSettings>>({
+      resolveMaintenance,
+      getSettings: snapshotSettings.getSettings,
+      streamSettings: snapshotSettings.streamSettings,
+      haveSettingsChanged: haveProviderSnapshotSettingsChanged,
+      initialSnapshot: (settings) =>
+        buildInitialDroidProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
+      checkProvider: checkDroidProviderStatus(effectiveConfig, processEnv).pipe(
+        Effect.flatMap((draft) =>
+          Ref.get(authFailed).pipe(
+            Effect.map((failed) => (failed ? withDroidAuthFailure(draft) : draft)),
           ),
-        );
-      const authSignal = {
-        authenticationFailed: setAuthFailed(true),
-        authenticated: setAuthFailed(false),
-      };
-
-      const orchestrationAdapter = yield* DroidAdapterV2Driver.create({
-        instanceId,
-        displayName,
-        accentColor,
-        environment,
-        enabled,
-        config,
-      }).pipe(
-        Effect.provideService(DroidAuthSignal, authSignal),
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build Droid orchestration adapter.",
-              cause,
+        ),
+        Effect.map(stampIdentity),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, pathService),
+      ),
+      enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
+        resolveMaintenance().pipe(
+          Effect.flatMap((maintenanceCapabilities) =>
+            enrichDroidSnapshot({
+              snapshot: currentSnapshot,
+              maintenanceCapabilities,
+              enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              publishSnapshot,
             }),
-        ),
-      );
-
-      const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<DroidSettings>>({
-        resolveMaintenance,
-        getSettings: snapshotSettings.getSettings,
-        streamSettings: snapshotSettings.streamSettings,
-        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
-        initialSnapshot: (settings) =>
-          buildInitialDroidProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
-        checkProvider: checkDroidProviderStatus(effectiveConfig, processEnv).pipe(
-          Effect.flatMap((draft) =>
-            Ref.get(authFailed).pipe(
-              Effect.map((failed) => (failed ? withDroidAuthFailure(draft) : draft)),
-            ),
           ),
-          Effect.map(stampIdentity),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, pathService),
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
         ),
-        enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
-          resolveMaintenance().pipe(
-            Effect.flatMap((maintenanceCapabilities) =>
-              enrichDroidSnapshot({
-                snapshot: currentSnapshot,
-                maintenanceCapabilities,
-                enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-                publishSnapshot,
-              }),
-            ),
-            Effect.provideService(HttpClient.HttpClient, httpClient),
-            Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
-          ),
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build Droid snapshot.",
-              cause,
-            }),
-        ),
-      );
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to build Droid snapshot.",
+            cause,
+          }),
+      ),
+    );
 
-      refreshSnapshot = snapshot.refresh.pipe(Effect.asVoid);
+    refreshSnapshot = snapshot.refresh.pipe(Effect.asVoid);
 
-      return {
-        instanceId,
-        driverKind: DRIVER_KIND,
-        continuationIdentity,
-        displayName,
-        accentColor,
-        enabled,
-        snapshot,
-        orchestrationAdapter,
-        textGeneration,
-      } satisfies ProviderInstance;
-    }),
+    return {
+      instanceId,
+      driverKind: DRIVER_KIND,
+      continuationIdentity,
+      displayName,
+      accentColor,
+      enabled,
+      snapshot,
+      orchestrationAdapter,
+      textGeneration,
+    } satisfies ProviderInstance;
+  }),
 };

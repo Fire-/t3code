@@ -763,21 +763,23 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     yield* writeResponse(id, body);
   });
 
-  const answer = <E>(id: string, handler: Effect.Effect<unknown, E>) =>
-    Effect.gen(function* () {
-      if (!(yield* Ref.get(openInbound)).has(id)) {
-        return yield* new DroidRpcUnknownInboundRequestError({ id });
-      }
-      const exit = yield* Effect.exit(handler);
-      yield* Exit.isSuccess(exit)
-        ? respondWith(id, { result: exit.value })
-        : respondWith(id, {
-            error: {
-              code: JSON_RPC_INTERNAL_ERROR,
-              message: describeError(Cause.squash(exit.cause)),
-            },
-          });
-    });
+  const answer = Effect.fn("DroidRpc.answer")(function* <E>(
+    id: string,
+    handler: Effect.Effect<unknown, E>,
+  ) {
+    if (!(yield* Ref.get(openInbound)).has(id)) {
+      return yield* new DroidRpcUnknownInboundRequestError({ id });
+    }
+    const exit = yield* Effect.exit(handler);
+    yield* Exit.isSuccess(exit)
+      ? respondWith(id, { result: exit.value })
+      : respondWith(id, {
+          error: {
+            code: JSON_RPC_INTERNAL_ERROR,
+            message: describeError(Cause.squash(exit.cause)),
+          },
+        });
+  });
 
   const close = Effect.gen(function* () {
     const alreadyClosing = yield* Ref.getAndSet(closing, true);
@@ -814,8 +816,12 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
   return DroidRpcRuntime.of({
     events: Stream.fromQueue(events),
     request,
-    respond: (id, result) => respondWith(id, { result }),
-    respondError: (id, error) => respondWith(id, { error }),
+    respond: Effect.fn("DroidRpc.respond")(function (id, result) {
+      return respondWith(id, { result });
+    }),
+    respondError: Effect.fn("DroidRpc.respondError")(function (id, error) {
+      return respondWith(id, { error });
+    }),
     answer,
     peerProtocolVersion: Ref.get(peerVersion),
     stderrTail: readStderrTail,

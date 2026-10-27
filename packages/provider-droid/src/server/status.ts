@@ -230,20 +230,22 @@ const authHintMessage = (hint: "api-key" | "auth-file" | undefined): string =>
       ? " Droid credentials found under ~/.factory."
       : " Set FACTORY_API_KEY or run `droid` once to sign in.";
 
-const runDroidVersionCommand = (droidSettings: DroidSettings, environment: NodeJS.ProcessEnv) =>
-  Effect.gen(function* () {
-    const command = droidSettings.binaryPath || "droid";
-    const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
-      env: environment,
-    });
-    return yield* spawnAndCollect(
-      command,
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: environment,
-        shell: spawnCommand.shell,
-      }),
-    );
+const runDroidVersionCommand = Effect.fn("DroidProviderStatus.runDroidVersionCommand")(function* (
+  droidSettings: DroidSettings,
+  environment: NodeJS.ProcessEnv,
+) {
+  const command = droidSettings.binaryPath || "droid";
+  const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
+    env: environment,
   });
+  return yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      env: environment,
+      shell: spawnCommand.shell,
+    }),
+  );
+});
 
 const unknownAuth = { status: "unknown" } as const;
 

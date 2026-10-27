@@ -559,8 +559,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: DROID_PROVIDER,
-    getCapabilities: () => Effect.succeed(DroidProviderCapabilitiesV2),
-    planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
+    getCapabilities: Effect.fn("DroidAdapter.getCapabilities")(function () {
+      return Effect.succeed(DroidProviderCapabilitiesV2);
+    }),
+    planSelectionTransition: Effect.fn("DroidAdapter.planSelectionTransition")(function () {
+      return Effect.succeed(turnScopedSelectionTransition());
+    }),
     openSession: Effect.fn("DroidAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
@@ -660,12 +664,13 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
 
-      const updateProviderSession = (
-        status: OrchestrationV2ProviderSession["status"],
-        lastError: string | null = sessionEntity.lastError,
-        model: string | null = sessionEntity.model,
-      ) =>
-        Effect.gen(function* () {
+      const updateProviderSession =
+        /* Provider events include streaming deltas; avoid a span for each update. */
+        Effect.fnUntraced(function* (
+          status: OrchestrationV2ProviderSession["status"],
+          lastError: string | null = sessionEntity.lastError,
+          model: string | null = sessionEntity.model,
+        ) {
           const updatedAt = yield* DateTime.now;
           sessionEntity = { ...sessionEntity, status, lastError, model, updatedAt };
           yield* emit({
@@ -681,11 +686,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
        */
       const rosterOf = (state: DroidThreadState) => droidSubagentRoster(state.subagents.values());
 
-      const updateProviderThread = (
-        state: DroidThreadState,
-        patch: Partial<OrchestrationV2ProviderThread>,
-      ) =>
-        Effect.gen(function* () {
+      const updateProviderThread =
+        /* Provider events include streaming deltas; avoid a span for each update. */
+        Effect.fnUntraced(function* (
+          state: DroidThreadState,
+          patch: Partial<OrchestrationV2ProviderThread>,
+        ) {
           const updatedAt = yield* DateTime.now;
           state.providerThread = {
             ...state.providerThread,
