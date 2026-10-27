@@ -742,7 +742,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }),
   );
 
-  it.effect("rejects non-ready rollback targets before persisting events or effects", () =>
+  it.effect("rejects file rollback to non-ready targets but rewinds their conversation", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const eventSink = yield* EventSink.EventSinkV2;
@@ -898,6 +898,28 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
             [],
           );
           assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+
+          const conversationOnly = orchestrator.dispatch({
+            type: "checkpoint.rollback",
+            commandId: CommandId.make(`runtime-rollback-${status}-conversation`),
+            threadId,
+            checkpointId,
+            scopeId: scope.id,
+            restoreFiles: false,
+          });
+          if (status === "stale") {
+            const staleError = yield* conversationOnly.pipe(Effect.flip);
+            assert.instanceOf(staleError, Orchestrator.OrchestratorDispatchError);
+            assert.equal(
+              staleError.cause,
+              `Checkpoint ${checkpointId} is stale and cannot be restored.`,
+            );
+          } else {
+            assert.deepEqual(
+              (yield* conversationOnly).storedEvents.map((stored) => stored.event.type),
+              ["thread.metadata-updated", "checkpoint.rollback-requested"],
+            );
+          }
         }
       }
     }).pipe(Effect.provide(Layer.fresh(layerTest))),

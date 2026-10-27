@@ -1,4 +1,5 @@
 import {
+  canRollbackToCheckpoint,
   CheckpointId,
   CheckpointScopeId,
   latestProviderTurnForAttempt,
@@ -150,7 +151,7 @@ export const layer: Layer.Layer<
         checkpoint === undefined ||
         scope === undefined ||
         checkpoint.scopeId !== scope.id ||
-        checkpoint.status !== "ready"
+        !canRollbackToCheckpoint(checkpoint.status, input.restoreFiles !== false)
       ) {
         return yield* new CheckpointRollbackExecutionError({
           reason: "rollback-target-invalid",
