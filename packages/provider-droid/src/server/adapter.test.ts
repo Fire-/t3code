@@ -8,6 +8,7 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -541,6 +542,70 @@ describe("DroidAdapterV2", () => {
             "droid.initialize_session",
           ]);
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "a load_session that times out stops the process, so its late answer cannot move Droid off the thread's session",
+      () =>
+        Effect.gen(function* () {
+          const loadSent = yield* Deferred.make<void>();
+          const fake = yield* makeFakeDroid({
+            sessions: stored,
+            overrides: {
+              "droid.load_session": () => {
+                Deferred.doneUnsafe(loadSent, Exit.void);
+                return "silent";
+              },
+            },
+          });
+          yield* fake.deliverGroupSignals;
+          const opened = yield* openRuntime(fake);
+          const row = yield* makeProviderThread("stored-session");
+          const resuming = yield* opened.runtime
+            .resumeThread({ providerThread: row })
+            .pipe(Effect.exit, Effect.forkScoped);
+          yield* Deferred.await(loadSent);
+          yield* TestClock.adjust("5 minutes");
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(resuming)));
+          assert.isNotEmpty(fake.current().signals(), "the process was stopped");
+
+          // T3 falls back to a fresh session after a failed resume; this process must not get it.
+          const fallback = yield* opened.runtime
+            .ensureThread({
+              threadId: THREAD_ID,
+              modelSelection: selection("high"),
+              runtimePolicy: policy(),
+              existingProviderThread: { ...row, nativeThreadRef: null },
+            })
+            .pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(fallback));
+          assert.deepStrictEqual(methodsOf(fake), ["droid.load_session"]);
+          yield* Deferred.await(opened.streamEnded);
+          assert.strictEqual(sessionStatuses(opened.all).at(-1), "stopped");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("an initialize_session that times out stops the process too", () =>
+      Effect.gen(function* () {
+        const initializeSent = yield* Deferred.make<void>();
+        const fake = yield* makeFakeDroid({
+          overrides: {
+            "droid.initialize_session": () => {
+              Deferred.doneUnsafe(initializeSent, Exit.void);
+              return "silent";
+            },
+          },
+        });
+        yield* fake.deliverGroupSignals;
+        const opened = yield* openRuntime(fake);
+        const ensuring = yield* ensure(opened).pipe(Effect.exit, Effect.forkScoped);
+        yield* Deferred.await(initializeSent);
+        yield* TestClock.adjust("5 minutes");
+        assert.isTrue(Exit.isFailure(yield* Fiber.join(ensuring)));
+        assert.isNotEmpty(fake.current().signals(), "the process was stopped");
+        yield* Deferred.await(opened.streamEnded);
+        assert.strictEqual(sessionStatuses(opened.all).at(-1), "stopped");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 

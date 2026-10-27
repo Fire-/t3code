@@ -253,6 +253,14 @@ const INACTIVITY_LIMIT_MILLIS = 10 * 60 * 1000;
 /** How long the interrupt that precedes a watchdog kill may take. */
 const WATCHDOG_INTERRUPT_TIMEOUT = "2 seconds";
 
+/** Each leaves Droid on another session whenever Droid gets to it, however late. */
+const SESSION_SWITCHING_METHODS: ReadonlySet<string> = new Set([
+  "droid.initialize_session",
+  "droid.load_session",
+  "droid.fork_session",
+  "droid.execute_rewind",
+]);
+
 type TurnDisposition = "reusable" | "broken";
 
 type TurnOutcome =
@@ -649,7 +657,27 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
 
       const logWarning = (message: string) => Effect.logWarning(redactor.text(message));
       const logDebug = (message: string) => Effect.logDebug(redactor.text(message));
-      const request = (method: string, params: object = {}) => rpc.request(method, params);
+      /**
+       * A process that let a session request time out may still switch to that session later, so
+       * turns could run where the adapter does not listen. It is stopped; the next turn gets a new one.
+       */
+      const abandonProcess = Effect.fnUntraced(function* (method: string) {
+        stopRequested = true;
+        stopReason = `Droid did not answer ${method} in time.`;
+        // Nothing more is sent to a process on its way out.
+        ended = true;
+        yield* Effect.uninterruptible(rpc.kill);
+      });
+      const request = (method: string, params: object = {}) =>
+        rpc
+          .request(method, params)
+          .pipe(
+            Effect.tapError((error) =>
+              error._tag === "DroidRpcTimeoutError" && SESSION_SWITCHING_METHODS.has(method)
+                ? abandonProcess(method)
+                : Effect.void,
+            ),
+          );
       /** `threadId` is the app thread the session will serve; its T3 tools act on that thread. */
       const t3McpServers = (threadId: ThreadId | null) =>
         mcpSessions.read(threadId ?? input.threadId).pipe(Effect.map(droidT3McpServers));

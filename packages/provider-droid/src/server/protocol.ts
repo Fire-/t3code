@@ -67,6 +67,8 @@ export function timeoutForMethod(method: string): Duration.Duration {
   switch (method) {
     case "droid.initialize_session":
     case "droid.load_session":
+      // A new process answers its first request only after its startup, which can take minutes.
+      return Duration.minutes(5);
     case "droid.execute_rewind":
       return Duration.seconds(60);
     case "droid.compact_session":

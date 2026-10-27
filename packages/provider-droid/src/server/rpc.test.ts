@@ -363,13 +363,13 @@ const yieldSome = Effect.forEach(Array.from({ length: 16 }), () => Effect.yieldN
 });
 
 describe("timeoutForMethod", () => {
-  it("[VAL-RPC-008] uses 30 s by default, 60 s for session loading and rewind, 240 s for compaction", () => {
+  it("[VAL-RPC-008] uses 30 s by default, 60 s for rewind, 240 s for compaction, 300 s for session loading", () => {
     const seconds = (method: string) => Duration.toSeconds(timeoutForMethod(method));
     assert.strictEqual(seconds("droid.add_user_message"), 30);
     assert.strictEqual(seconds("droid.list_models"), 30);
     assert.strictEqual(seconds("droid.close_session"), 30);
-    assert.strictEqual(seconds("droid.initialize_session"), 60);
-    assert.strictEqual(seconds("droid.load_session"), 60);
+    assert.strictEqual(seconds("droid.initialize_session"), 300);
+    assert.strictEqual(seconds("droid.load_session"), 300);
     assert.strictEqual(seconds("droid.execute_rewind"), 60);
     assert.strictEqual(seconds("droid.compact_session"), 240);
   });
@@ -1194,7 +1194,7 @@ it.layer(NodeServices.layer)("DroidRpcRuntime", (it) => {
   );
 
   it.effect(
-    "[VAL-RPC-008] session loading and rewind time out at 60 s and compaction at 240 s, each not before",
+    "[VAL-RPC-008] rewind times out at 60 s, compaction at 240 s, and session loading at 300 s, each not before",
     () =>
       Effect.gen(function* () {
         const { fake, runtime } = yield* startFakeRuntime();
@@ -1224,24 +1224,30 @@ it.layer(NodeServices.layer)("DroidRpcRuntime", (it) => {
             assert.strictEqual(error.timeoutMs, timeoutMs);
           }
         });
+        const advance = Effect.fn("advance")(function* (duration: Duration.Input) {
+          yield* TestClock.adjust(duration);
+          yield* yieldSome;
+          return methods.filter(settled);
+        });
 
-        yield* TestClock.adjust("59999 millis");
-        yield* yieldSome;
-        assert.deepStrictEqual(methods.filter(settled), []);
+        assert.deepStrictEqual(yield* advance("59999 millis"), []);
+        assert.deepStrictEqual(yield* advance("1 millis"), ["droid.execute_rewind"]);
+        yield* assertTimedOut("droid.execute_rewind", 60_000);
 
-        yield* TestClock.adjust("1 millis");
-        yield* yieldSome;
-        assert.deepStrictEqual(methods.filter(settled), methods.slice(0, 3));
-        for (const method of methods.slice(0, 3)) {
-          yield* assertTimedOut(method, 60_000);
-        }
-
-        yield* TestClock.adjust("179999 millis");
-        yield* yieldSome;
-        assert.isFalse(settled("droid.compact_session"));
-
-        yield* TestClock.adjust("1 millis");
+        assert.deepStrictEqual(yield* advance("179999 millis"), ["droid.execute_rewind"]);
+        assert.deepStrictEqual(yield* advance("1 millis"), [
+          "droid.execute_rewind",
+          "droid.compact_session",
+        ]);
         yield* assertTimedOut("droid.compact_session", 240_000);
+
+        assert.deepStrictEqual(yield* advance("59999 millis"), [
+          "droid.execute_rewind",
+          "droid.compact_session",
+        ]);
+        assert.deepStrictEqual(yield* advance("1 millis"), methods);
+        yield* assertTimedOut("droid.initialize_session", 300_000);
+        yield* assertTimedOut("droid.load_session", 300_000);
       }),
   );
 
