@@ -72,7 +72,7 @@ export interface DroidEventContext {
     | "messageFromProviderItem"
     | "threadFromProviderThread"
   >;
-  /** Droid does not report a context window in usage notifications; the model list does. */
+  /** Droid reports no context window in usage notifications; the adapter reads it once per model. */
   readonly contextWindow?: number | undefined;
   /**
    * Minimum gap between streaming updates of one block. Deltas inside the gap only grow the

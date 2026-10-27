@@ -253,6 +253,9 @@ const INACTIVITY_LIMIT_MILLIS = 10 * 60 * 1000;
 /** How long the interrupt that precedes a watchdog kill may take. */
 const WATCHDOG_INTERRUPT_TIMEOUT = "2 seconds";
 
+/** Droid answers `get_context_stats` from memory; a slow answer is not worth holding a resume for. */
+const CONTEXT_STATS_TIMEOUT = "10 seconds";
+
 /** Each leaves Droid on another session whenever Droid gets to it, however late. */
 const SESSION_SWITCHING_METHODS: ReadonlySet<string> = new Set([
   "droid.initialize_session",
@@ -633,6 +636,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       let settingsOwed = false;
       /** The model list the latest `initialize_session` or `load_session` reported. */
       let models: ReadonlyArray<DroidModelInfo> | undefined;
+      /** Input windows by Droid model id, `undefined` once Droid reported none. */
+      const contextWindows = new Map<string, number | undefined>();
       /**
        * The policy and selection the thread last asked with. Only a turn names them and a rollback
        * names neither, so its frame is computed from these against the rewound session's models.
@@ -741,6 +746,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         providerThread: state.providerThread,
         providerTurn: turn.providerTurn,
         derive: idAllocator.derive,
+        contextWindow: known.modelId === undefined ? undefined : contextWindows.get(known.modelId),
       });
 
       /** The mapper builds `provider_thread.updated` from the thread it was given, so adopt each one. */
@@ -1752,8 +1758,28 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               known = {};
             }),
           ),
+          Effect.tap(() => measureContextWindow()),
         );
       };
+
+      /** The model list carries no window, so this asks `get_context_stats` once per model. */
+      const measureContextWindow = Effect.fnUntraced(function* () {
+        const modelId = known.modelId;
+        if (modelId === undefined || contextWindows.has(modelId) || ended) return;
+        const stats = yield* rpc
+          .request("droid.get_context_stats", {}, { timeout: CONTEXT_STATS_TIMEOUT })
+          .pipe(
+            Effect.tapError((error) =>
+              logDebug(`Droid did not report its context window: ${describeFailure(error)}`),
+            ),
+            Effect.option,
+          );
+        const limit = Option.isSome(stats) ? field(stats.value, "limit") : undefined;
+        contextWindows.set(
+          modelId,
+          Predicate.isNumber(limit) && Number.isInteger(limit) && limit > 0 ? limit : undefined,
+        );
+      });
 
       /** The settings a turn or thread asks for, against the models the session reported. Records the ask. */
       const desiredSettings = (
@@ -1833,6 +1859,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           subagents: new Map(),
         };
         noteStartedSession(settings, result);
+        yield* measureContextWindow();
         sessionUsage = DROID_ZERO_COUNTS;
         if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = state;
@@ -1870,6 +1897,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           subagents: new Map(),
         };
         noteLoadedSession(result);
+        yield* measureContextWindow();
         sessionUsage = undefined;
         if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = state;
@@ -2843,6 +2871,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         },
         events: Stream.fromQueue(events),
         backgroundTasksEndWithProcess: true,
+        getModelContextWindow: (selection) =>
+          selection.instanceId === options.instanceId
+            ? contextWindows.get(resolveDroidModelId(selection.model))
+            : undefined,
         // A wake counts: Droid has work of its own under way for the thread that no turn owns yet.
         hasPendingBackgroundWork: Effect.sync(
           () =>

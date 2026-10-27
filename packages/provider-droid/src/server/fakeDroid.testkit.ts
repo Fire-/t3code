@@ -81,7 +81,7 @@ export interface FakeDroidProcess {
   /** Everything the adapter wrote to stdin, in order. */
   readonly frames: () => ReadonlyArray<FakeDroidFrame>;
   readonly requests: () => ReadonlyArray<FakeDroidRequest>;
-  /** Methods of the requests the adapter sent, in order. */
+  /** Methods of the requests the adapter sent, in order, without `droid.get_context_stats`. */
   readonly methods: () => ReadonlyArray<string>;
   /** Answers the adapter wrote to inbound requests, by request id. */
   readonly answers: () => ReadonlyArray<{ readonly id: string; readonly result: unknown }>;
@@ -452,7 +452,12 @@ const makeFakeProcess = Effect.fnUntraced(function* (
             ]
           : [],
       ),
-    methods: () => process.requests().map((request) => request.method),
+    // The window read follows every session switch; sequences list what acts on the session.
+    methods: () =>
+      process
+        .requests()
+        .map((request) => request.method)
+        .filter((method) => method !== "droid.get_context_stats"),
     answers: () =>
       frames.flatMap((frame) =>
         frame["type"] === "response" && Predicate.isString(frame["id"])

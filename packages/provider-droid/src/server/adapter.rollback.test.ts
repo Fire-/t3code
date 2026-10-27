@@ -878,7 +878,12 @@ describe("DroidAdapterV2 rollback", () => {
 
           assert.deepStrictEqual(
             restarted.requests().map((request) => request.method),
-            ["droid.load_session", "droid.update_session_settings", "droid.add_user_message"],
+            [
+              "droid.load_session",
+              "droid.get_context_stats",
+              "droid.update_session_settings",
+              "droid.add_user_message",
+            ],
           );
           assert.deepStrictEqual(restarted.requests()[0]?.params, {
             sessionId: rewoundId,
@@ -892,7 +897,7 @@ describe("DroidAdapterV2 rollback", () => {
             originalId ?? "",
             "the restarted process never names the original session",
           );
-          assert.deepStrictEqual(restarted.requests()[1]?.params, AUTO_SETTINGS);
+          assert.deepStrictEqual(restarted.requests()[2]?.params, AUTO_SETTINGS);
           const terminal = terminals(second.all).at(-1);
           assert.strictEqual(terminal?.status, "completed");
         }).pipe(Effect.scoped, Effect.provide(layerTest)),

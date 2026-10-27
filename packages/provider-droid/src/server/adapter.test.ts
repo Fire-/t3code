@@ -55,7 +55,12 @@ import {
   THREAD_ID,
 } from "./adapterHarness.testkit.ts";
 import { DROID_PRESENTATION } from "./status.ts";
-import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid, type FakeDroid } from "./fakeDroid.testkit.ts";
+import {
+  FAKE_DROID_DEFAULT_SETTINGS,
+  makeFakeDroid,
+  type FakeDroid,
+  type FakeDroidSession,
+} from "./fakeDroid.testkit.ts";
 import { makeRpcMockAgent } from "./rpcMockAgent.testkit.ts";
 
 const isResumeError = Schema.is(ProviderAdapter.ProviderAdapterResumeThreadError);
@@ -734,6 +739,87 @@ describe("DroidAdapterV2", () => {
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
+
+    describe("context window", () => {
+      const LIMITS: Readonly<Record<string, number>> = { [MODEL]: 872_000, "gpt-6-sol": 922_000 };
+      /** Answers `get_context_stats` the way Droid does: the window of the model the session holds. */
+      const fakeWithContextStats = (sessions?: Record<string, FakeDroidSession>) =>
+        Effect.gen(function* () {
+          const fake: FakeDroid = yield* makeFakeDroid({
+            ...(sessions === undefined ? {} : { sessions }),
+            overrides: {
+              "droid.get_context_stats": () => {
+                const model = fake.current().settings()?.["modelId"];
+                const limit = typeof model === "string" ? LIMITS[model] : undefined;
+                return limit === undefined
+                  ? undefined
+                  : {
+                      result: {
+                        used: 1_000,
+                        remaining: limit - 1_000,
+                        limit,
+                        accuracy: "estimated",
+                        updatedAt: "2026-10-26T00:00:00.000Z",
+                      },
+                    };
+              },
+            },
+          });
+          return fake;
+        });
+      const usageWindow = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) => {
+        const latest = events.findLast(
+          (event) =>
+            event.type === "provider_thread.updated" && event.providerThread.contextUsage !== null,
+        );
+        return latest?.type === "provider_thread.updated"
+          ? latest.providerThread.contextUsage?.maxTokens
+          : undefined;
+      };
+
+      it.effect("a new session knows its model's window, and its usage carries it", () =>
+        Effect.gen(function* () {
+          const fake = yield* fakeWithContextStats();
+          const opened = yield* openRuntime(fake);
+          const thread = yield* ensure(opened);
+          assert.strictEqual(opened.runtime.getModelContextWindow?.(selection()), 872_000);
+          yield* runTurn(opened, fake, thread);
+          assert.strictEqual(usageWindow(opened.all), 872_000);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+
+      it.effect("a resumed session knows its model's window before its first turn", () =>
+        Effect.gen(function* () {
+          const fake = yield* fakeWithContextStats({
+            "stored-session": { settings: FAKE_DROID_DEFAULT_SETTINGS, messages: [] },
+          });
+          const opened = yield* openRuntime(fake);
+          yield* opened.runtime.resumeThread({
+            providerThread: yield* makeProviderThread("stored-session"),
+            threadId: THREAD_ID,
+            modelSelection: selection("high"),
+            runtimePolicy: policy(),
+          });
+          assert.strictEqual(opened.runtime.getModelContextWindow?.(selection("high")), 872_000);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+
+      it.effect("a turn on another model learns that model's window", () =>
+        Effect.gen(function* () {
+          const fake = yield* fakeWithContextStats();
+          const opened = yield* openRuntime(fake);
+          const thread = yield* ensure(opened);
+          assert.isUndefined(opened.runtime.getModelContextWindow?.(selection(null, "gpt-6-sol")));
+          yield* runTurn(opened, fake, thread, { model: "gpt-6-sol", effort: undefined });
+          assert.strictEqual(
+            opened.runtime.getModelContextWindow?.(selection(null, "gpt-6-sol")),
+            922_000,
+          );
+          assert.strictEqual(usageWindow(opened.all), 922_000);
+          assert.strictEqual(opened.runtime.getModelContextWindow?.(selection()), 872_000);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+    });
 
     it.effect("[VAL-TURN-006] a turn already running rejects another start", () =>
       Effect.gen(function* () {

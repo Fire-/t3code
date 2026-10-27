@@ -704,7 +704,12 @@ describe("DroidAdapterV2 restart after a fork", () => {
 
         assert.deepStrictEqual(
           process.requests().map((request) => request.method),
-          ["droid.load_session", "droid.update_session_settings", "droid.add_user_message"],
+          [
+            "droid.load_session",
+            "droid.get_context_stats",
+            "droid.update_session_settings",
+            "droid.add_user_message",
+          ],
         );
         assert.deepStrictEqual(process.requests()[0]?.params, {
           sessionId: finalId,
