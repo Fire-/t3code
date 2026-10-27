@@ -50,7 +50,7 @@ export function ThreadDetailsCard({
   // when the card returns to popover mode.
   useLayoutEffect(() => {
     if (mode === "inline" && popoverOpen)
-      useRightPanelStore.getState().setThreadPanelOpen(threadRef, "popover", false);
+      useRightPanelStore.getState().promoteThreadPanelPopover(threadRef);
   }, [mode, popoverOpen, threadRef]);
   const [contentElement, setContentElement] = useState<HTMLDivElement | null>(null);
   const { environmentId, threadId } = threadRef;
