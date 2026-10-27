@@ -133,8 +133,17 @@ done | awk -F'\t' '
 '''
 
 [tasks.build]
-description = "Build all workspace packages"
-run = "pnpm build"
+description = "Build all workspace packages; stamp the server bundle with its commit (build-info.json)"
+run = '''
+set -euo pipefail
+pnpm build
+# swap copies this into the runtime tier, so a live build traces back to its commit.
+dirty=false
+git diff --quiet HEAD || dirty=true
+printf '{"commit":"%s","branch":"%s","dirty":%s,"builtAt":"%s"}\n' \
+  "$(git rev-parse HEAD)" "$(git branch --show-current)" "$dirty" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  > "{{config_root}}/apps/server/dist/build-info.json"
+'''
 
 [tasks.smoke-test]
 description = "Verify the built server bundle boots (--version)"
@@ -323,7 +332,8 @@ else
 fi
 for tier in current bak stable; do
   if [[ -f "$RUNTIME/dist/$tier/bin.mjs" ]]; then
-    echo "tier $tier: $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$RUNTIME/dist/$tier/bin.mjs")"
+    commit=$(grep -o '"commit":"[0-9a-f]*"' "$RUNTIME/dist/$tier/build-info.json" 2>/dev/null | cut -c11-20 || true)
+    echo "tier $tier: $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$RUNTIME/dist/$tier/bin.mjs")${commit:+ ($commit)}"
   else
     echo "tier $tier: empty"
   fi
