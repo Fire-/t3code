@@ -34,6 +34,7 @@ const runtimeMock = {
       | ((signal?: AbortSignal) => Promise<{ data: { parts: ReadonlyArray<unknown> } }>)
       | undefined,
     onAbort: undefined as ((signal?: AbortSignal) => Promise<never>) | undefined,
+    sessionDeleteCalls: [] as string[],
     connectionError: undefined as Error | undefined,
     sessionCreateError: undefined as unknown,
     sessionResult: undefined as { data?: { id: string } } | undefined,
@@ -53,6 +54,7 @@ const runtimeMock = {
     this.state.onSessionCreate = undefined;
     this.state.onPrompt = undefined;
     this.state.onAbort = undefined;
+    this.state.sessionDeleteCalls.length = 0;
     this.state.connectionError = undefined;
     this.state.sessionCreateError = undefined;
     this.state.sessionResult = undefined;
@@ -153,6 +155,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntime.OpenCodeRuntime["Service"] = {
               },
             }
           );
+        },
+        delete: async (input: { readonly sessionID: string }) => {
+          runtimeMock.state.sessionDeleteCalls.push(input.sessionID);
+          return { data: true };
         },
       },
     }) as unknown as ReturnType<
@@ -308,6 +314,7 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCodeTextGeneration", (it) => {
         expect(signal?.aborted).toBe(true);
         expect(otherSignal?.aborted).toBe(false);
         expect(runtimeMock.state.abortCalls).toEqual(["cancelled-session"]);
+        expect(runtimeMock.state.sessionDeleteCalls).toEqual(["cancelled-session"]);
         expect(runtimeMock.state.closeCalls).toEqual([]);
 
         otherReply.resolve({
@@ -322,7 +329,52 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCodeTextGeneration", (it) => {
           "http://127.0.0.1:4301",
         ]);
         expect(runtimeMock.state.abortCalls).toEqual(["cancelled-session"]);
+        expect(runtimeMock.state.sessionDeleteCalls).toEqual([
+          "cancelled-session",
+          "other-session",
+        ]);
         expect(runtimeMock.state.closeCalls).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("deletes the helper session after a successful title generation", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.sessionResult = { data: { id: "ses_helper_1" } };
+        runtimeMock.state.promptResult = {
+          data: {
+            parts: [{ type: "text", text: '{"title":"Review uploaded report"}' }],
+          },
+        };
+
+        const title = yield* textGeneration.generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Review these attachments.",
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+        });
+
+        expect(title.title).toBe("Review uploaded report");
+        expect(runtimeMock.state.sessionDeleteCalls).toEqual(["ses_helper_1"]);
+      }),
+    ),
+  );
+
+  it.effect("deletes the helper session when the prompt fails", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.sessionResult = { data: { id: "ses_helper_2" } };
+        runtimeMock.state.promptRequestError = new Error("provider exploded");
+
+        yield* textGeneration
+          .generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Review these attachments.",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          })
+          .pipe(Effect.flip);
+
+        expect(runtimeMock.state.sessionDeleteCalls).toEqual(["ses_helper_2"]);
       }),
     ),
   );
