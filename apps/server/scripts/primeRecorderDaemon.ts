@@ -126,8 +126,8 @@ const sendDaemonShutdown = (socketPath: string, onHello: (supervisorPid: number)
  * path and, once the daemon said hello, its supervisor pid. NotStarted means
  * neither the socket nor its lock exists.
  */
-export const stopPrimeRecorderDaemon = (socketPath: string, options: StopOptions = {}) =>
-  Effect.gen(function* () {
+export const stopPrimeRecorderDaemon = Effect.fn("primeRecorderDaemon.stopPrimeRecorderDaemon")(
+  function* (socketPath: string, options: StopOptions = {}) {
     const fs = yield* FileSystem.FileSystem;
     const bound = options.bound ?? DEFAULT_STOP_BOUND;
     const isProcessAlive = options.isProcessAlive ?? processAlive;
@@ -210,7 +210,8 @@ export const stopPrimeRecorderDaemon = (socketPath: string, options: StopOptions
       );
     }
     return { _tag: "Stopped", supervisorPid: pid } as const;
-  });
+  },
+);
 
 /**
  * Runs a recording, then stops its private daemon on every exit path. The

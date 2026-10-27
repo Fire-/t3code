@@ -342,20 +342,22 @@ const readPrimeVersion = Effect.gen(function* () {
   return output.trim();
 });
 
-const runGit = (cwd: string, args: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const exitCode = yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }));
-    if (Number(exitCode) !== 0) {
-      return yield* new PrimeRecorderError({
-        detail: `git ${args.join(" ")} failed with exit ${exitCode}`,
-      });
-    }
-  });
+const runGit = Effect.fn("record-prime-rpc-replay-fixture.runGit")(function* (
+  cwd: string,
+  args: ReadonlyArray<string>,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const exitCode = yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }));
+  if (Number(exitCode) !== 0) {
+    return yield* new PrimeRecorderError({
+      detail: `git ${args.join(" ")} failed with exit ${exitCode}`,
+    });
+  }
+});
 
 /** Mirrors `makeCheckpointWorkspace`, but under `/tmp` instead of the per-user temp dir. */
-const makeRecordingWorkspace = (workspace: string, files: Readonly<Record<string, string>>) =>
-  Effect.gen(function* () {
+const makeRecordingWorkspace = Effect.fn("record-prime-rpc-replay-fixture.makeRecordingWorkspace")(
+  function* (workspace: string, files: Readonly<Record<string, string>>) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     yield* fs.makeDirectory(workspace, { recursive: true });
@@ -382,7 +384,8 @@ const makeRecordingWorkspace = (workspace: string, files: Readonly<Record<string
     yield* fs.writeFileString(path.join(workspace, ".git", "info", "exclude"), ".prime/\n", {
       flag: "a",
     });
-  });
+  },
+);
 
 function withoutExtensionArgs(args: ReadonlyArray<string>): ReadonlyArray<string> {
   return args.filter(
@@ -445,14 +448,14 @@ function makeIsolatingSpawner(
   });
 }
 
-const recordTranscript = (input: {
-  readonly paths: RecordingPaths;
-  readonly primeVersion: string;
-  readonly outputPath: string;
-  readonly fixtureInput: ReturnType<typeof fixture.buildInput>;
-  readonly invocations: Array<string>;
-}) =>
-  Effect.gen(function* () {
+const recordTranscript = Effect.fn("record-prime-rpc-replay-fixture.recordTranscript")(
+  function* (input: {
+    readonly paths: RecordingPaths;
+    readonly primeVersion: string;
+    readonly outputPath: string;
+    readonly fixtureInput: ReturnType<typeof fixture.buildInput>;
+    readonly invocations: Array<string>;
+  }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const { paths, primeVersion, outputPath, fixtureInput, invocations } = input;
@@ -583,7 +586,8 @@ const recordTranscript = (input: {
     yield* Console.log(
       `Wrote ${transcript.entries.length} Prime RPC replay entries to ${outputPath}`,
     );
-  });
+  },
+);
 
 const record = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
