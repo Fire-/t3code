@@ -511,7 +511,7 @@ it.layer(layerDriver)("Prime text generation from saved settings", (it) => {
     "[VAL-CROSS-001] the saved prime-agent block and text-generation selection produce a thread title",
     () =>
       Effect.gen(function* () {
-        const settings = yield* Schema.decodeUnknownEffect(ServerSettings)({
+        const settings = yield* Schema.decodeEffect(ServerSettings)({
           providerInstances: {
             "prime-agent": {
               driver: "prime-agent",

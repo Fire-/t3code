@@ -168,38 +168,37 @@ const makePrimeDiscoveryConnection = Effect.fnUntraced(function* (
   return connection;
 });
 
-const discoverPrimeViaRpc = (
+const discoverPrimeViaRpc = Effect.fn("PrimeProviderStatus.discoverPrimeViaRpc")(function* (
   primeSettings: PrimeSettings,
   environment: NodeJS.ProcessEnv,
   launchArgs: ReadonlyArray<string>,
   cwd?: string,
-) =>
-  Effect.gen(function* () {
-    // Every `--mode rpc` run attaches to Prime's daemon, even with
-    // --no-session (main.ts shouldUseDaemonClient). The probe only reads, so it
-    // also drops tools and extensions.
-    const connection = yield* makePrimeDiscoveryConnection(
-      primeSettings,
-      environment,
-      launchArgs,
-      cwd,
-      true,
-    );
-    // get_state only supplies the default thinking level; get_commands is additive.
-    const stateData = yield* connection
-      .request({ type: "get_state" })
-      .pipe(Effect.orElseSucceed(() => undefined));
-    const modelsData = yield* connection.request({ type: "get_available_models" });
-    const commandsData = yield* connection
-      .request({ type: "get_commands" })
-      .pipe(Effect.orElseSucceed(() => undefined));
-    const { slashCommands, skills } = parsePrimeDiscoveredCommands(commandsData);
-    return {
-      models: parseDiscoveredModels(modelsData, stateData),
-      slashCommands: withPrimeBuiltinSlashCommands(slashCommands),
-      skills,
-    } satisfies PrimeDiscovery;
-  }).pipe(Effect.scoped);
+) {
+  // Every `--mode rpc` run attaches to Prime's daemon, even with
+  // --no-session (main.ts shouldUseDaemonClient). The probe only reads, so it
+  // also drops tools and extensions.
+  const connection = yield* makePrimeDiscoveryConnection(
+    primeSettings,
+    environment,
+    launchArgs,
+    cwd,
+    true,
+  );
+  // get_state only supplies the default thinking level; get_commands is additive.
+  const stateData = yield* connection
+    .request({ type: "get_state" })
+    .pipe(Effect.orElseSucceed(() => undefined));
+  const modelsData = yield* connection.request({ type: "get_available_models" });
+  const commandsData = yield* connection
+    .request({ type: "get_commands" })
+    .pipe(Effect.orElseSucceed(() => undefined));
+  const { slashCommands, skills } = parsePrimeDiscoveredCommands(commandsData);
+  return {
+    models: parseDiscoveredModels(modelsData, stateData),
+    slashCommands: withPrimeBuiltinSlashCommands(slashCommands),
+    skills,
+  } satisfies PrimeDiscovery;
+}, Effect.scoped);
 
 export const discoverPrimeCommandsForCwd = Effect.fn("discoverPrimeCommandsForCwd")(
   function* (primeSettings: PrimeSettings, environment: NodeJS.ProcessEnv, cwd: string) {
@@ -231,20 +230,22 @@ export const discoverPrimeCommandsForCwd = Effect.fn("discoverPrimeCommandsForCw
   }),
 );
 
-const runPrimeVersionCommand = (primeSettings: PrimeSettings, environment: NodeJS.ProcessEnv) =>
-  Effect.gen(function* () {
-    const command = primeSettings.binaryPath || "prime-agent";
-    const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
-      env: environment,
-    });
-    return yield* spawnAndCollect(
-      command,
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: environment,
-        shell: spawnCommand.shell,
-      }),
-    );
+const runPrimeVersionCommand = Effect.fn("PrimeProviderStatus.runPrimeVersionCommand")(function* (
+  primeSettings: PrimeSettings,
+  environment: NodeJS.ProcessEnv,
+) {
+  const command = primeSettings.binaryPath || "prime-agent";
+  const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
+    env: environment,
   });
+  return yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      env: environment,
+      shell: spawnCommand.shell,
+    }),
+  );
+});
 
 export function buildInitialPrimeProviderSnapshot(
   primeSettings: PrimeSettings,

@@ -595,8 +595,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: PRIME_PROVIDER,
-    getCapabilities: () => Effect.succeed(PrimeProviderCapabilitiesV2),
-    planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
+    getCapabilities: Effect.fn("PrimeAdapter.getCapabilities")(function () {
+      return Effect.succeed(PrimeProviderCapabilitiesV2);
+    }),
+    planSelectionTransition: Effect.fn("PrimeAdapter.planSelectionTransition")(function () {
+      return Effect.succeed(turnScopedSelectionTransition());
+    }),
     openSession: Effect.fn("PrimeAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
@@ -752,11 +756,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
 
-      const updateProviderSession = (
-        status: OrchestrationV2ProviderSession["status"],
-        lastError: string | null = sessionEntity.lastError,
-      ) =>
-        Effect.gen(function* () {
+      const updateProviderSession =
+        /* Provider events include streaming deltas; avoid a span for each update. */
+        Effect.fnUntraced(function* (
+          status: OrchestrationV2ProviderSession["status"],
+          lastError: string | null = sessionEntity.lastError,
+        ) {
           const updatedAt = yield* DateTime.now;
           sessionEntity = { ...sessionEntity, status, lastError, updatedAt };
           yield* emit({
@@ -766,11 +771,12 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           });
         });
 
-      const updateProviderThread = (
-        state: PrimeThreadState,
-        patch: Partial<OrchestrationV2ProviderThread>,
-      ) =>
-        Effect.gen(function* () {
+      const updateProviderThread =
+        /* Provider events include streaming deltas; avoid a span for each update. */
+        Effect.fnUntraced(function* (
+          state: PrimeThreadState,
+          patch: Partial<OrchestrationV2ProviderThread>,
+        ) {
           const updatedAt = yield* DateTime.now;
           state.providerThread = { ...state.providerThread, ...patch, updatedAt };
           yield* emit({
@@ -890,8 +896,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       /**
        * Pi 0.84.2+ (and so Prime) attaches the current message's cumulative usage to every streaming update.
        */
-      const reportLiveUsage = (turn: ActivePrimeTurn, usage: unknown) =>
-        Effect.gen(function* () {
+      const reportLiveUsage =
+        /* Provider events include streaming deltas; avoid a span for each update. */
+        Effect.fnUntraced(function* (turn: ActivePrimeTurn, usage: unknown) {
           const usedTokens = nonNegativeInteger(usage, "totalTokens");
           if (
             usedTokens === undefined ||
@@ -1116,12 +1123,13 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         });
       });
 
-      const emitStreamItem = (
-        turn: ActivePrimeTurn,
-        item: PrimeStreamItemState,
-        streaming: boolean,
-      ) =>
-        Effect.gen(function* () {
+      const emitStreamItem =
+        /* Provider events include streaming deltas; avoid a span for each update. */
+        Effect.fnUntraced(function* (
+          turn: ActivePrimeTurn,
+          item: PrimeStreamItemState,
+          streaming: boolean,
+        ) {
           const emittedAt = yield* DateTime.now;
           const base = baseItemFields(turn, item.nativeItemId, item.startedAt, emittedAt);
           yield* emitItemNode(
@@ -1189,8 +1197,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
           });
         });
 
-      const scheduleStreamFlush = (turn: ActivePrimeTurn, item: PrimeStreamItemState) =>
-        Effect.gen(function* () {
+      const scheduleStreamFlush =
+        /* Provider events include streaming deltas; avoid a span for each update. */
+        Effect.fnUntraced(function* (turn: ActivePrimeTurn, item: PrimeStreamItemState) {
           if (item.flushScheduled || item.completed) return;
           item.flushScheduled = true;
           yield* Effect.sleep(Duration.millis(STREAM_FLUSH_MS)).pipe(
@@ -1452,52 +1461,55 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         }
       });
 
-      const cancelPrompt = (pending: PendingPrimePrompt, resolvedAt: DateTime.Utc) =>
-        Effect.gen(function* () {
-          if (pending.expirationFiber !== null) yield* Fiber.interrupt(pending.expirationFiber);
-          yield* connection
-            .send({
-              type: "extension_ui_response",
-              id: pending.nativeRequestId,
-              cancelled: true,
-            })
-            .pipe(Effect.ignore);
-          pending.runtimeRequest = {
-            ...pending.runtimeRequest,
+      const cancelPrompt = Effect.fn("PrimeAdapter.cancelPrompt")(function* (
+        pending: PendingPrimePrompt,
+        resolvedAt: DateTime.Utc,
+      ) {
+        if (pending.expirationFiber !== null) yield* Fiber.interrupt(pending.expirationFiber);
+        yield* connection
+          .send({
+            type: "extension_ui_response",
+            id: pending.nativeRequestId,
+            cancelled: true,
+          })
+          .pipe(Effect.ignore);
+        pending.runtimeRequest = {
+          ...pending.runtimeRequest,
+          status: "cancelled",
+          resolvedAt,
+        };
+        yield* emit({
+          type: "runtime_request.updated",
+          driver: PRIME_PROVIDER,
+          threadId: pending.node.threadId,
+          runtimeRequest: pending.runtimeRequest,
+        });
+        yield* emit({
+          type: "node.updated",
+          driver: PRIME_PROVIDER,
+          node: { ...pending.node, status: "cancelled", completedAt: resolvedAt },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PRIME_PROVIDER,
+          turnItem: {
+            ...pending.turnItem,
             status: "cancelled",
-            resolvedAt,
-          };
-          yield* emit({
-            type: "runtime_request.updated",
-            driver: PRIME_PROVIDER,
-            threadId: pending.node.threadId,
-            runtimeRequest: pending.runtimeRequest,
-          });
-          yield* emit({
-            type: "node.updated",
-            driver: PRIME_PROVIDER,
-            node: { ...pending.node, status: "cancelled", completedAt: resolvedAt },
-          });
-          yield* emit({
-            type: "turn_item.updated",
-            driver: PRIME_PROVIDER,
-            turnItem: {
-              ...pending.turnItem,
-              status: "cancelled",
-              completedAt: resolvedAt,
-              updatedAt: resolvedAt,
-            },
-          });
+            completedAt: resolvedAt,
+            updatedAt: resolvedAt,
+          },
         });
+      });
 
-      const cancelPendingPrompts = (resolvedAt: DateTime.Utc) =>
-        Effect.gen(function* () {
-          const pending = Array.from(pendingPrompts.values());
-          pendingPrompts.clear();
-          yield* Effect.forEach(pending, (prompt) => cancelPrompt(prompt, resolvedAt), {
-            discard: true,
-          });
+      const cancelPendingPrompts = Effect.fn("PrimeAdapter.cancelPendingPrompts")(function* (
+        resolvedAt: DateTime.Utc,
+      ) {
+        const pending = Array.from(pendingPrompts.values());
+        pendingPrompts.clear();
+        yield* Effect.forEach(pending, (prompt) => cancelPrompt(prompt, resolvedAt), {
+          discard: true,
         });
+      });
 
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PrimeRpcRecord) {
         const method = recordString(event, "method");
@@ -1910,14 +1922,15 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
        * waits while the pushed session actions are busy, then confirms with
        * one `get_state`. Only transitions call this, never a timer.
        */
-      const requestSettle = (turn: ActivePrimeTurn) =>
-        Effect.gen(function* () {
-          if (!turn.sawAgentEnd && !turn.sessionCommandDone) return;
-          if (sessionActionsBusy(latestSessionActions) || turn.activeCompaction !== null) return;
-          if (turn.autoRetryPending && !turn.nativeAborted && !turn.interrupted) return;
-          turn.settleProbeGeneration += 1;
-          yield* scheduleSettleProbe(turn, true);
-        });
+      const requestSettle = Effect.fn("PrimeAdapter.requestSettle")(function* (
+        turn: ActivePrimeTurn,
+      ) {
+        if (!turn.sawAgentEnd && !turn.sessionCommandDone) return;
+        if (sessionActionsBusy(latestSessionActions) || turn.activeCompaction !== null) return;
+        if (turn.autoRetryPending && !turn.nativeAborted && !turn.interrupted) return;
+        turn.settleProbeGeneration += 1;
+        yield* scheduleSettleProbe(turn, true);
+      });
 
       /** Compaction can start after a trigger or as a command-only turn. */
       const settleAfterCompaction = (turn: ActivePrimeTurn) =>
@@ -2097,10 +2110,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                       Effect.suspend(() =>
                         pendingWake === wake && threadState === state && !closed
                           ? dispatch.pipe(
-                              Effect.map(Option.some),
+                              Effect.asSome,
                               Effect.tapError(() => stopPendingWake(wake)),
                             )
-                          : Effect.succeed(Option.none()),
+                          : Effect.succeedNone,
                       ),
                     ),
                   clearIfCurrent: () => sessionEventPermit.withPermits(1)(stopPendingWake(wake)),
@@ -3616,24 +3629,26 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               });
             }
             // The source's projection still lists turns a rollback discarded.
-            const forkBoundary = (messages: ReadonlyArray<PrimeForkMessage>, ordinal: number) =>
-              Effect.gen(function* () {
-                const boundary = primeForkBoundary({
-                  messages,
-                  turns: sourceTurns,
-                  boundaryOrdinal: ordinal,
-                  skipUnmatched: true,
-                });
-                if (boundary.type === "error") return yield* protocolError(boundary.message);
-                if (boundary.type === "stranded") {
-                  return yield* new PrimeRollbackBoundaryError({
-                    operation: "fork",
-                    turnOrdinal: boundary.ordinal,
-                    lead: boundary.lead,
-                  });
-                }
-                return boundary;
+            const forkBoundary = Effect.fn("PrimeAdapter.forkBoundary")(function* (
+              messages: ReadonlyArray<PrimeForkMessage>,
+              ordinal: number,
+            ) {
+              const boundary = primeForkBoundary({
+                messages,
+                turns: sourceTurns,
+                boundaryOrdinal: ordinal,
+                skipUnmatched: true,
               });
+              if (boundary.type === "error") return yield* protocolError(boundary.message);
+              if (boundary.type === "stranded") {
+                return yield* new PrimeRollbackBoundaryError({
+                  operation: "fork",
+                  turnOrdinal: boundary.ordinal,
+                  lead: boundary.lead,
+                });
+              }
+              return boundary;
+            });
             // `--fork` writes the session copy before any RPC can be asked
             // (main.ts createSessionManager -> SessionManager.forkFrom), and core
             // forks on the target thread's runtime, so the source's Prime process

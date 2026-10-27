@@ -6308,6 +6308,7 @@ describe("Prime settle engine", () => {
         const hook = bridge.handlers.get("tool_call") as unknown as BridgeToolCallHook;
         const dialogs: Array<{ readonly id: string; readonly response: PrimeRpcRecord }> = [];
         const titles: Array<string> = [];
+        const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
         const result = yield* Effect.promise(() =>
           hook(
             { toolName, input },
@@ -6316,7 +6317,7 @@ describe("Prime settle engine", () => {
                 confirm: (title, message) => {
                   titles.push(title);
                   const id = `dlg-${titles.length}`;
-                  return Effect.runPromise(
+                  return runPromise(
                     Effect.gen(function* () {
                       yield* fake.emit({
                         type: "extension_ui_request",

@@ -373,18 +373,17 @@ function parsePrimeRecord(line: string): PrimeRpcRecord | undefined {
  * gone its pid/pgid can be recycled by the OS, so escalating blindly could
  * deliver SIGKILL to an unrelated process.
  */
-export const terminatePrimeProcess = (
+export const terminatePrimeProcess = Effect.fn("PrimeRpc.terminatePrimeProcess")(function* (
   kill: (signal: NodeJS.Signals) => boolean,
   hasExited: () => boolean,
   awaitExit: Effect.Effect<void>,
-) =>
-  Effect.gen(function* () {
-    if (hasExited()) return;
-    if (!kill("SIGTERM")) return;
-    const exited = yield* awaitExit.pipe(Effect.timeoutOption(PRIME_TERMINATION_GRACE));
-    if (Option.isSome(exited) || hasExited()) return;
-    kill("SIGKILL");
-  });
+) {
+  if (hasExited()) return;
+  if (!kill("SIGTERM")) return;
+  const exited = yield* awaitExit.pipe(Effect.timeoutOption(PRIME_TERMINATION_GRACE));
+  if (Option.isSome(exited) || hasExited()) return;
+  kill("SIGKILL");
+});
 
 export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: PrimeRpcSpawnOptions) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -490,20 +489,20 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
   const transportDown = yield* Deferred.make<never, PrimeRpcError>();
   let nextRequestId = 0;
 
-  const failTransport = (error: PrimeRpcError) =>
-    Effect.gen(function* () {
-      const claimed = yield* Deferred.fail(transportDown, error);
-      if (!claimed) return;
-      for (const [key, pending] of pendingRequests) {
-        pendingRequests.delete(key);
-        yield* Deferred.fail(pending.deferred, error);
-      }
-      yield* Queue.fail(outgoing, error);
-      yield* Queue.fail(events, error);
-    });
+  const failTransport = Effect.fn("PrimeRpc.failTransport")(function* (error: PrimeRpcError) {
+    const claimed = yield* Deferred.fail(transportDown, error);
+    if (!claimed) return;
+    for (const [key, pending] of pendingRequests) {
+      pendingRequests.delete(key);
+      yield* Deferred.fail(pending.deferred, error);
+    }
+    yield* Queue.fail(outgoing, error);
+    yield* Queue.fail(events, error);
+  });
 
-  const routeRecord = (record: PrimeRpcRecord) =>
-    Effect.gen(function* () {
+  const routeRecord =
+    /* Protocol records and writes include streaming deltas; avoid a span per record. */
+    Effect.fnUntraced(function* (record: PrimeRpcRecord) {
       if (record["type"] === "response" && typeof record["id"] === "string") {
         const pending = pendingRequests.get(record["id"]);
         if (pending !== undefined) {
@@ -574,34 +573,34 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
   }).pipe(
     Effect.matchCauseEffect({
       onFailure: (cause) => failTransport(new PrimeRpcError({ operation: "read", cause })),
-      onSuccess: () =>
-        Effect.gen(function* () {
-          // Claim the stdout-close path before waiting so a broken stdin
-          // writer cannot replace the exit diagnosis with a write error.
-          diagnosingStdoutClose = true;
-          const polled = yield* Deferred.poll(exitDeferred);
-          const maybeExitCode = Option.isSome(polled)
-            ? yield* polled.value.pipe(
-                Effect.map(Option.some),
-                Effect.orElseSucceed(() => Option.none<number>()),
-              )
-            : yield* Deferred.await(exitDeferred).pipe(
-                Effect.timeoutOption(Duration.millis(250)),
-                // Adapter tests run under TestClock. A planned stdout close
-                // without an exit, for example Stop-with-restart, must not wait
-                // on that clock or the transport never fails.
-                Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
-                Effect.orElseSucceed(() => Option.none<number>()),
-              );
-          return yield* failTransport(
-            new PrimeRpcError({
-              operation: "read",
-              detail: describePrimeStdoutClosure(
-                Option.isSome(maybeExitCode) ? maybeExitCode.value : undefined,
-              ),
-            }),
-          );
-        }),
+      // The enclosing operation owns the span for this inline handler.
+      onSuccess: Effect.fnUntraced(function* () {
+        // Claim the stdout-close path before waiting so a broken stdin
+        // writer cannot replace the exit diagnosis with a write error.
+        diagnosingStdoutClose = true;
+        const polled = yield* Deferred.poll(exitDeferred);
+        const maybeExitCode = Option.isSome(polled)
+          ? yield* polled.value.pipe(
+              Effect.asSome,
+              Effect.orElseSucceed(() => Option.none<number>()),
+            )
+          : yield* Deferred.await(exitDeferred).pipe(
+              Effect.timeoutOption(Duration.millis(250)),
+              // Adapter tests run under TestClock. A planned stdout close
+              // without an exit, for example Stop-with-restart, must not wait
+              // on that clock or the transport never fails.
+              Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+              Effect.orElseSucceed(() => Option.none<number>()),
+            );
+        return yield* failTransport(
+          new PrimeRpcError({
+            operation: "read",
+            detail: describePrimeStdoutClosure(
+              Option.isSome(maybeExitCode) ? maybeExitCode.value : undefined,
+            ),
+          }),
+        );
+      }),
     }),
     Effect.forkIn(scope),
   );
