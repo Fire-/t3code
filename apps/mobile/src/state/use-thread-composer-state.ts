@@ -6,7 +6,6 @@ import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
-import { threadSwitchesRuntimeModeLive } from "@t3tools/client-runtime/state/thread-workflows";
 import {
   deriveProviderSubagentStatus,
   deriveRunlessWorkStartedAt,
@@ -211,9 +210,6 @@ export function useThreadComposerState() {
   });
   const editQueuedRun = useAtomCommand(threadEnvironment.editQueuedRun, {
     label: "edit queued message",
-    reportFailure: false,
-  });
-  const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
     reportFailure: false,
   });
   const [isSavingQueuedEdit, setIsSavingQueuedEdit] = useState(false);
