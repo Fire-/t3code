@@ -8,7 +8,7 @@ Every step is a command of `scripts/upgrade.mjs`, run from the main checkout:
 cd ~/vendor/t3code && node scripts/upgrade.mjs <step> [args]
 ```
 
-Each step records its outcome in `~/.t3/code/upgrades/<run>/state.json` and rewrites `report.md` beside it. Logs, patch comparisons, and screenshots go in the same folder. Steps refuse to run before the steps they depend on have passed. The report is how fire checks your work, so every judgment call goes into it through a `--note`. Build and test steps write to log files and print only a summary and the tail of a failure; give them a 30-minute command timeout.
+Each step records its outcome in `~/.t3/code/upgrades/<run>/state.json` and rewrites `report.md` beside it. Logs, patch comparisons, and screenshots go in the same folder. Steps refuse to run before the steps they depend on have passed. The report is how fire checks your work, so every judgment call goes into it through a `--note`. Write any note with an apostrophe or a line break to a file in the run folder and pass `--note-file <path>` instead (`-` reads stdin): the shell your harness runs may be macOS's bash 3.2, which cannot parse a heredoc inside `"$(...)"`. Build and test steps write to log files and print only a summary and the tail of a failure; give them a 30-minute command timeout.
 
 ## The run
 

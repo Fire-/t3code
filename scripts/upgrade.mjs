@@ -46,6 +46,19 @@ const isAncestor = (a, b) => git(MAIN, "merge-base", "--is-ancestor", a, b).code
 const short = (sha) => (sha ? sha.slice(0, 10) : "-");
 const overlayName = (b) => b.replace(/^overlay\//, "");
 const sha256 = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+// `--note-file <path>` (`-` reads stdin) keeps apostrophes and newlines out of shell quoting.
+const noteText = ([flag, ...rest], { bareWords = false } = {}) => {
+  if (flag === "--note-file") {
+    if (rest.length !== 1) die("--note-file takes one path, or - for stdin.");
+    try {
+      return fs.readFileSync(rest[0] === "-" ? 0 : rest[0], "utf8").trim();
+    } catch (error) {
+      die(`Cannot read the note: ${error.message}`);
+    }
+  }
+  if (flag === "--note") return rest.join(" ").trim();
+  return bareWords ? [flag, ...rest].join(" ").trim() : "";
+};
 const listOverlays = () =>
   gitOk(MAIN, "for-each-ref", "--format=%(refname:short)", "refs/heads/overlay/")
     .split("\n")
@@ -571,12 +584,15 @@ function resolve([b]) {
   );
 }
 
-function resolved([b, flag, ...rest]) {
+function resolved([b, ...args]) {
   const state = requireRun("running");
   const o = state.overlays[b];
   if (!o) die(`Unknown overlay '${b}'.`);
-  const note = flag === "--note" ? rest.join(" ").trim() : "";
-  if (!note) die('A decision note is required: resolved <overlay> --note "<decision and why>"');
+  const note = noteText(args);
+  if (!note)
+    die(
+      'A decision note is required: resolved <overlay> --note "<decision and why>" (or --note-file <path>)',
+    );
   if (!isAncestor("origin/main", b)) die(`${b} does not contain origin/main yet.`);
   if (git(WORKTREE, "diff", "--name-only", "--diff-filter=U").out)
     die(`${WORKTREE} still has unmerged files.`);
@@ -614,12 +630,15 @@ function fix([b]) {
   );
 }
 
-function fixed([b, flag, ...rest]) {
+function fixed([b, ...args]) {
   const state = requireRun("running");
   const o = state.overlays[b];
   if (!o) die(`Unknown overlay '${b}'.`);
-  const note = flag === "--note" ? rest.join(" ").trim() : "";
-  if (!note) die('A note is required: fixed <overlay> --note "<what broke and how you fixed it>"');
+  const note = noteText(args);
+  if (!note)
+    die(
+      'A note is required: fixed <overlay> --note "<what broke and how you fixed it>" (or --note-file <path>)',
+    );
   if (dirty(WORKTREE)) die(`${WORKTREE} has uncommitted changes; commit or drop them first.`);
   const since = o.after ?? o.before;
   const commits = gitOk(MAIN, "log", "--format=%h %s", `${since}..${b}`)
@@ -793,10 +812,13 @@ function rebuild() {
   console.log("Next: check local");
 }
 
-function accept([name, flag, ...rest]) {
+function accept([name, ...args]) {
   const state = requireRun("running");
-  const note = flag === "--note" ? rest.join(" ").trim() : "";
-  if (!name || !note) die('Usage: accept <step|overlay> --note "<why the failure is acceptable>"');
+  const note = noteText(args);
+  if (!name || !note)
+    die(
+      'Usage: accept <step|overlay> --note "<why the failure is acceptable>" (or --note-file <path>)',
+    );
   const target = state.overlays[name] ? state.overlays[name].check : state.steps[name];
   if (target?.status !== "failed") die(`'${name}' has not failed.`);
   target.status = "accepted";
@@ -1229,16 +1251,16 @@ async function verifyDeploy() {
 
 function note([subject, ...rest]) {
   const state = requireRun();
-  const text = rest.join(" ").trim();
-  if (!subject || !text) die('Usage: note <subject> "<text>"');
+  const text = noteText(rest, { bareWords: true });
+  if (!subject || !text) die('Usage: note <subject> "<text>" (or --note-file <path>)');
   state.notes.push({ at: now(), subject, text });
   save(state);
 }
 
 function block(rest) {
   const state = requireRun("running");
-  const reason = rest.join(" ").trim();
-  if (!reason) die('Usage: block "<reason>"');
+  const reason = noteText(rest, { bareWords: true });
+  if (!reason) die('Usage: block "<reason>" (or --note-file <path>)');
   state.status = "blocked";
   state.blocked = reason;
   save(state);
@@ -1248,8 +1270,8 @@ function block(rest) {
 // Overlays already synced stay synced; the next preflight starts a fresh run.
 function abandon(rest) {
   const state = requireRun("running", "blocked");
-  const why = rest.join(" ").trim();
-  if (!why) die('Usage: abandon "<who decided and why>"');
+  const why = noteText(rest, { bareWords: true });
+  if (!why) die('Usage: abandon "<who decided and why>" (or --note-file <path>)');
   if (state.rehearsal?.pid && pidAlive(state.rehearsal.pid))
     die("Stop the rehearsal server first: rehearse-stop");
   state.notes.push({ at: now(), subject: "abandon", text: why });
@@ -1260,8 +1282,8 @@ function abandon(rest) {
 
 function unblock(rest) {
   const state = requireRun("blocked");
-  const why = rest.join(" ").trim();
-  if (!why) die('Usage: unblock "<who decided what>"');
+  const why = noteText(rest, { bareWords: true });
+  if (!why) die('Usage: unblock "<who decided what>" (or --note-file <path>)');
   state.notes.push({ at: now(), subject: "unblock", text: `${state.blocked} -> ${why}` });
   state.status = state.deploy ? "deployed" : "running";
   state.blocked = null;
