@@ -212,32 +212,34 @@ export const describeLeaks = (leaks: ReadonlyArray<TranscriptLeak>): string =>
   leaks.map((leak) => `${leak.category} (transcript line ${leak.line})`).join(", ");
 
 /** Reads the global instruction files that exist; a missing or unreadable one is skipped. */
-export const readGlobalInstructionTexts = (home: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const texts: Array<string> = [];
-    for (const relative of GLOBAL_INSTRUCTION_FILES) {
-      const text = yield* fs.readFileString(path.join(home, relative)).pipe(Effect.option);
-      if (text._tag === "Some" && !texts.includes(text.value)) texts.push(text.value);
-    }
-    return texts;
-  });
+export const readGlobalInstructionTexts = Effect.fn(
+  "droidReplayLeakCheck.readGlobalInstructionTexts",
+)(function* (home: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const texts: Array<string> = [];
+  for (const relative of GLOBAL_INSTRUCTION_FILES) {
+    const text = yield* fs.readFileString(path.join(home, relative)).pipe(Effect.option);
+    if (text._tag === "Some" && !texts.includes(text.value)) texts.push(text.value);
+  }
+  return texts;
+});
 
 /**
  * A rejected transcript still holds the leaked text, so it stays under the system temp directory,
  * never in the worktree, for inspection without another model turn.
  */
-export const writeRejectedTranscript = (input: {
-  readonly directory: string;
-  readonly fixture: string;
-  readonly encoded: string;
-}) =>
-  Effect.gen(function* () {
+export const writeRejectedTranscript = Effect.fn("droidReplayLeakCheck.writeRejectedTranscript")(
+  function* (input: {
+    readonly directory: string;
+    readonly fixture: string;
+    readonly encoded: string;
+  }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     yield* fs.makeDirectory(input.directory, { recursive: true });
     const file = path.join(input.directory, `${input.fixture}.rejected.ndjson`);
     yield* fs.writeFileString(file, input.encoded);
     return file;
-  });
+  },
+);

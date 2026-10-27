@@ -181,20 +181,22 @@ const describeHashes = (hashes: Readonly<Record<string, string>>): string =>
     .map(([name, hash]) => `${name}=${hash.slice(0, 12)}`)
     .join(" ") || "no settings files";
 
-const runGit = (cwd: string, args: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const exitCode = yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }));
-    if (Number(exitCode) !== 0) {
-      return yield* new DroidRecorderError({
-        detail: `git ${args.join(" ")} failed with exit ${exitCode}`,
-      });
-    }
-  });
+const runGit = Effect.fn("record-droid-rpc-replay-fixture.runGit")(function* (
+  cwd: string,
+  args: ReadonlyArray<string>,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const exitCode = yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }));
+  if (Number(exitCode) !== 0) {
+    return yield* new DroidRecorderError({
+      detail: `git ${args.join(" ")} failed with exit ${exitCode}`,
+    });
+  }
+});
 
 /** Mirrors `makeCheckpointWorkspace`, but under `/tmp` instead of the per-user temp dir. */
-const makeRecordingWorkspace = (workspace: string, files: Readonly<Record<string, string>>) =>
-  Effect.gen(function* () {
+const makeRecordingWorkspace = Effect.fn("record-droid-rpc-replay-fixture.makeRecordingWorkspace")(
+  function* (workspace: string, files: Readonly<Record<string, string>>) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     yield* fs.makeDirectory(workspace, { recursive: true });
@@ -209,7 +211,8 @@ const makeRecordingWorkspace = (workspace: string, files: Readonly<Record<string
     }
     yield* runGit(workspace, ["add", "README.md", ...Object.keys(files)]);
     yield* runGit(workspace, ["commit", "-m", "initial"]);
-  });
+  },
+);
 
 /**
  * Below the adapter, so what it does never lands in the transcript (which records the adapter's
@@ -258,13 +261,13 @@ interface RecordingPaths {
   readonly workspace: string;
 }
 
-const recordTranscript = (input: {
-  readonly paths: RecordingPaths;
-  readonly droidVersion: string;
-  readonly outputPath: string;
-  readonly fixtureInput: ReturnType<typeof fixture.buildInput>;
-}) =>
-  Effect.gen(function* () {
+const recordTranscript = Effect.fn("record-droid-rpc-replay-fixture.recordTranscript")(
+  function* (input: {
+    readonly paths: RecordingPaths;
+    readonly droidVersion: string;
+    readonly outputPath: string;
+    readonly fixtureInput: ReturnType<typeof fixture.buildInput>;
+  }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const { paths, droidVersion, outputPath, fixtureInput } = input;
@@ -429,7 +432,8 @@ const recordTranscript = (input: {
     yield* Console.log(
       `Wrote ${transcript.entries.length} Droid RPC replay entries to ${outputPath} (droid ${droidVersion}, factoryProtocolVersion ${protocolVersion ?? "unknown"})`,
     );
-  });
+  },
+);
 
 const record = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;

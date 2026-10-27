@@ -121,8 +121,9 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
     return TurnItemPositionStoreV2.of({
       allocate,
       normalize,
-      reposition: (item, runOrdinal) =>
-        sql`
+      // Per-event repositioning shares the enclosing orchestration span, like normalize.
+      reposition: Effect.fnUntraced(function* (item, runOrdinal) {
+        yield* sql`
           DELETE FROM orchestration_v2_turn_item_positions
           WHERE thread_id = ${item.threadId} AND turn_item_id = ${item.id}
         `.pipe(
@@ -134,8 +135,9 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
                 cause,
               }),
           ),
-          Effect.andThen(normalize(item, runOrdinal)),
-        ),
+        );
+        return yield* normalize(item, runOrdinal);
+      }),
     });
   }),
 );
