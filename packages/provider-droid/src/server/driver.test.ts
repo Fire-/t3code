@@ -1,0 +1,478 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, it } from "@effect/vitest";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  MessageId,
+  NodeId,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderSessionId,
+  RunAttemptId,
+  RunId,
+  ThreadId,
+  type OrchestrationV2AppThread,
+  type ServerProvider,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import * as HttpClient from "effect/http/HttpClient";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+
+import { fallbackTextGenerationModelSelection } from "@t3tools/shared/serverSettings";
+
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import type { DroidSettings } from "../settings.ts";
+import { DroidDriver } from "./driver.ts";
+import { DROID_HOOKS_OFF_SETTINGS } from "./hooksOffSettings.ts";
+import { makeRpcMockAgent } from "./rpcMockAgent.testkit.ts";
+import { DROID_PRESENTATION } from "./status.ts";
+
+const layerTest = Layer.mergeAll(
+  TestProviderHost.layer({
+    cwd: "/machine",
+    settings: { ...DEFAULT_SERVER_SETTINGS, enableProviderUpdateChecks: false },
+    runBackgroundWork: false,
+  }),
+  IdAllocator.layer,
+  McpProviderSessions.layer,
+  ProviderLatestVersions.layer,
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make(() => Effect.die("Unexpected HTTP")),
+  ),
+).pipe(Layer.provideMerge(NodeServices.layer));
+
+const encoder = new TextEncoder();
+
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+const makeSpawnedHandle = (stdout: Uint8Array) =>
+  ChildProcessSpawner.makeHandle({
+    // Outside the valid PID range, so cleanup cannot signal a real process.
+    pid: ChildProcessSpawner.ProcessId(999_999_999),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.succeed(stdout),
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+const makeDroidSpawner = (version = "0.244.0") => {
+  const launches: Array<ChildProcess.StandardCommand> = [];
+  const spawner = ChildProcessSpawner.make((command) => {
+    if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+    launches.push(command);
+    return Effect.succeed(makeSpawnedHandle(encoder.encode(`${version}\n`)));
+  });
+  return { spawner, launches };
+};
+
+/** Real subprocess tests run on the live clock; the timeout only fails a hung test. */
+const live = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.timeout("30 seconds"), TestClock.withLive);
+
+/**
+ * The carried mock agent serves the stream-jsonrpc spawn for real; `--version` is answered by a
+ * canned handle because the agent's launcher only accepts the `exec` arguments.
+ */
+const makeMockDroidSpawner = Effect.fn("makeMockDroidSpawner")(function* () {
+  const real = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const agent = yield* makeRpcMockAgent();
+  const launches: Array<ChildProcess.StandardCommand> = [];
+  const spawner = ChildProcessSpawner.make((command) => {
+    if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+    launches.push(command);
+    return command.args.includes("--version")
+      ? Effect.succeed(makeSpawnedHandle(encoder.encode("0.244.0\n")))
+      : real.spawn(command);
+  });
+  return { spawner, launches, readLog: agent.readLog, binaryPath: agent.binaryPath };
+});
+
+const receivedMethods = (log: ReadonlyArray<Record<string, unknown>>) =>
+  log
+    .filter((entry) => entry.type === "recv")
+    .map((entry) => (Predicate.isObject(entry.message) ? entry.message.method : undefined))
+    .filter(Predicate.isString);
+
+const assertPresentation = (snapshot: ServerProvider) => {
+  assert.deepEqual(snapshot.supportedRuntimeModes, DROID_PRESENTATION.supportedRuntimeModes);
+  assert.strictEqual(snapshot.requiresNewThreadForModelChange, false);
+  // The adapter fills `contextUsage` from Droid's token counts, so the UI can show a window.
+  assert.strictEqual(snapshot.reportsContextWindow, true);
+  assert.strictEqual(snapshot.supportsConversationRollback, true);
+  assert.strictEqual(snapshot.showInteractionModeToggle, true);
+};
+
+const create = (config: Partial<DroidSettings> = {}, enabled = true) =>
+  DroidDriver.create({
+    instanceId: ProviderInstanceId.make("droid-test"),
+    displayName: "My Droid",
+    accentColor: "#abcdef",
+    environment: [{ name: "T3_DROID_TEST", value: "instance-value", sensitive: false }],
+    enabled,
+    config: { ...DroidDriver.defaultConfig(), binaryPath: "custom-droid", ...config },
+  });
+
+it.layer(layerTest)("DroidDriver", (it) => {
+  it.effect("[VAL-REG-002] identifies as the droid driver named Droid", () =>
+    Effect.sync(() => {
+      assert.equal(DroidDriver.driverKind, ProviderDriverKind.make("droid"));
+      assert.equal(DroidDriver.metadata.displayName, "Droid");
+      assert.equal(DroidDriver.metadata.displayName, DROID_PRESENTATION.displayName);
+      assert.isTrue(DroidDriver.metadata.supportsMultipleInstances);
+    }),
+  );
+
+  it.effect("[VAL-REG-005] defaults to an empty, disabled config on the droid binary", () =>
+    Effect.sync(() => {
+      assert.deepEqual(DroidDriver.defaultConfig(), {
+        enabled: false,
+        binaryPath: "droid",
+        customModels: [],
+      });
+    }),
+  );
+
+  it.effect(
+    "[VAL-STATUS-004][VAL-STATUS-009] stamps the instance identity on a probed snapshot with discovered and custom models",
+    () =>
+      Effect.gen(function* () {
+        const { spawner, launches, readLog, binaryPath } = yield* makeMockDroidSpawner();
+        const instance = yield* create({ binaryPath, customModels: ["custom:my-model"] }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        const initial = yield* instance.snapshot.getSnapshot;
+        assertPresentation(initial);
+        yield* instance.snapshot.refresh;
+        const snapshot = yield* instance.snapshot.getSnapshot;
+        assert.equal(instance.driverKind, "droid");
+        assert.equal(snapshot.driver, "droid");
+        assert.equal(snapshot.instanceId, "droid-test");
+        assert.equal(snapshot.displayName, "My Droid");
+        assert.equal(snapshot.accentColor, "#abcdef");
+        assert.equal(snapshot.status, "ready");
+        assert.equal(snapshot.version, "0.244.0");
+        assertPresentation(snapshot);
+        assert.equal(
+          snapshot.continuation?.groupKey,
+          instance.continuationIdentity.continuationKey,
+        );
+        assert.deepEqual(
+          snapshot.models.map((model) => [model.slug, model.isCustom]),
+          [
+            ["auto", false],
+            ["claude-opus-5-5", false],
+            ["gpt-6-sol", false],
+            ["deepseek-v4.1-flash", false],
+            ["glm-5.3", false],
+            ["custom:my-model", true],
+          ],
+        );
+        const probe = launches.find((launch) => launch.args.includes("--version"));
+        assert.isDefined(probe);
+        assert.equal(probe!.command, binaryPath);
+        assert.equal(probe!.options.env?.T3_DROID_TEST, "instance-value");
+        const discovery = launches.find((launch) => launch.args[0] === "exec");
+        assert.equal(discovery?.options.env?.T3_DROID_TEST, "instance-value");
+        assert.deepEqual(receivedMethods(yield* readLog), ["droid.list_models"]);
+      }).pipe(Effect.scoped, live),
+  );
+
+  it.effect("[VAL-STATUS-001] repeated background refreshes never open a session", () =>
+    Effect.gen(function* () {
+      const { spawner, readLog, binaryPath } = yield* makeMockDroidSpawner();
+      const instance = yield* create({ binaryPath }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      yield* instance.snapshot.refresh;
+      yield* instance.snapshot.refresh;
+      const methods = receivedMethods(yield* readLog);
+      assert.deepEqual(methods, ["droid.list_models", "droid.list_models"]);
+    }).pipe(Effect.scoped, live),
+  );
+
+  it.effect("[VAL-REG-004] does not spawn Droid for a disabled instance", () =>
+    Effect.gen(function* () {
+      const instance = yield* create({}, false).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() => Effect.die("Disabled Droid must not spawn")),
+        ),
+      );
+      yield* instance.snapshot.refresh;
+      const snapshot = yield* instance.snapshot.getSnapshot;
+      assert.isFalse(instance.enabled);
+      assert.isFalse(snapshot.enabled);
+      assert.equal(snapshot.status, "disabled");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps Droid updates manual because the CLI updates itself", () =>
+    Effect.gen(function* () {
+      const { spawner } = makeDroidSpawner();
+      const instance = yield* create().pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      yield* instance.snapshot.refresh;
+      const maintenance = yield* instance.snapshot.resolveMaintenance();
+      assert.equal(maintenance.provider, "droid");
+      assert.isNull(maintenance.update);
+      assert.isNull(maintenance.packageName);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("[VAL-TURN-001] hands the orchestrator the Droid adapter for this instance", () =>
+    Effect.gen(function* () {
+      const { spawner, launches } = makeDroidSpawner();
+      const instance = yield* create().pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      const adapter = instance.orchestrationAdapter;
+      assert.equal(adapter.driver, "droid");
+      assert.equal(adapter.instanceId, "droid-test");
+      const capabilities = yield* adapter.getCapabilities();
+      assert.equal(capabilities.runtimePolicy.enforcement, "native");
+      assert.isTrue(capabilities.threads.canCreateEmptyThread);
+      assert.isFalse(capabilities.sessions.supportsMultipleProviderThreadsPerSession);
+      assert.isFalse(
+        launches.some((launch) => launch.args.includes("stream-jsonrpc")),
+        "building the adapter opens no session",
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "[VAL-STATUS-008] a turn that fails authentication marks the snapshot unauthenticated, and a completed turn clears it",
+    () =>
+      Effect.gen(function* () {
+        const { spawner, binaryPath } = yield* makeMockDroidSpawner();
+        const instance = yield* create({ binaryPath }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        const probed = yield* instance.snapshot.refresh;
+        assert.equal(probed.auth.status, "unknown");
+
+        const instanceId = ProviderInstanceId.make("droid-test");
+        const threadId = ThreadId.make("thread-droid-auth");
+        const modelSelection = { instanceId, model: "claude-opus-5-5" };
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const runtime = yield* instance.orchestrationAdapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("session-droid-auth"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const now = yield* DateTime.now;
+        const appThread = {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project-droid-auth"),
+          title: "Droid auth",
+          providerInstanceId: instanceId,
+          modelSelection,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        } satisfies OrchestrationV2AppThread;
+        const turn = (ordinal: number, text: string) =>
+          Effect.gen(function* () {
+            const runId = RunId.make(`run-droid-auth-${ordinal}`);
+            yield* runtime.startTurn({
+              appThread,
+              threadId,
+              runId,
+              runOrdinal: ordinal,
+              providerTurnOrdinal: ordinal,
+              attemptId: RunAttemptId.make(`attempt-droid-auth-${ordinal}`),
+              rootNodeId: NodeId.make(`node-droid-auth-${ordinal}`),
+              providerThread,
+              message: {
+                messageId: MessageId.make(`message-droid-auth-${ordinal}`),
+                text,
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+              },
+              modelSelection,
+              runtimePolicy,
+            });
+            return yield* runtime.events.pipe(
+              Stream.filter((event) => event.type === "turn.terminal"),
+              Stream.runHead,
+            );
+          });
+
+        const failed = yield* turn(1, "AUTH_FAIL please");
+        assert.isTrue(
+          Option.isSome(failed) &&
+            failed.value.type === "turn.terminal" &&
+            failed.value.status === "failed",
+        );
+        const unauthenticated = yield* instance.snapshot.refresh;
+        assert.equal(unauthenticated.auth.status, "unauthenticated");
+        assert.include(["ready", "warning"], unauthenticated.status);
+        assert.include(unauthenticated.message ?? "", "FACTORY_API_KEY");
+        assert.isTrue(unauthenticated.models.length > 0, "the picker still lists Droid's models");
+
+        const completed = yield* turn(2, "plain again");
+        assert.isTrue(
+          Option.isSome(completed) &&
+            completed.value.type === "turn.terminal" &&
+            completed.value.status === "completed",
+        );
+        const recovered = yield* instance.snapshot.refresh;
+        assert.equal(recovered.auth.status, "unknown");
+        assert.notInclude(recovered.message ?? "", "could not authenticate");
+      }).pipe(Effect.scoped, live),
+  );
+
+  it.effect(
+    "[VAL-CROSS-007] runs each text generation call as a separate read-only one-shot droid exec for the saved instance",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const saved = yield* Schema.decodeEffect(DroidDriver.configSchema)({
+          enabled: true,
+          binaryPath: "/opt/droid/bin/droid",
+        });
+        const launches: Array<{
+          readonly command: ChildProcess.StandardCommand;
+          readonly settings: string;
+        }> = [];
+        const spawner = ChildProcessSpawner.make((command) => {
+          if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+          const settingsPath = command.args[command.args.indexOf("--settings") + 1] ?? "";
+          return fileSystem.readFileString(settingsPath).pipe(
+            Effect.orElseSucceed(() => ""),
+            Effect.map((settings) => {
+              launches.push({ command, settings });
+              return makeSpawnedHandle(
+                encoder.encode(
+                  `${encodeJson({
+                    type: "result",
+                    is_error: false,
+                    result: encodeJson({ title: "Fix login", branch: "fix-login" }),
+                  })}\n`,
+                ),
+              );
+            }),
+          );
+        });
+        const instance = yield* DroidDriver.create({
+          instanceId: ProviderInstanceId.make("droid-test"),
+          displayName: "My Droid",
+          accentColor: undefined,
+          environment: [{ name: "T3_DROID_TEST", value: "instance-value", sensitive: false }],
+          enabled: true,
+          config: saved,
+        }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+        const modelSelection = fallbackTextGenerationModelSelection(
+          {},
+          (_instanceId, driver) => driver === "droid",
+        );
+        assert.isDefined(modelSelection);
+
+        assert.sameMembers(Object.keys(instance.textGeneration), [
+          "generateCommitMessage",
+          "generatePrContent",
+          "generateBranchName",
+          "generateThreadTitle",
+          "generateReviewGuide",
+        ]);
+        yield* instance.textGeneration.generateThreadTitle({
+          cwd: "/machine/project",
+          message: "Fix the login redirect",
+          modelSelection: modelSelection!,
+        });
+        yield* instance.textGeneration.generateBranchName({
+          cwd: "/machine/project",
+          message: "Fix the login redirect",
+          modelSelection: modelSelection!,
+        });
+        const review = yield* Effect.flip(
+          instance.textGeneration.generateReviewGuide({
+            cwd: "/machine/project",
+            number: 1,
+            title: "Fix login",
+            description: "",
+            baseBranch: "main",
+            baseCommit: "0123456789abcdef0123456789abcdef01234567",
+            settledReview: "",
+            modelSelection: modelSelection!,
+          }),
+        );
+        assert.equal(review._tag, "TextGenerationError");
+
+        const execs = launches.filter(({ command }) => command.args[0] === "exec");
+        assert.lengthOf(execs, 2, "one separate spawn per call; the review guide never spawns");
+        assert.notEqual(
+          execs[0]?.command.options.cwd,
+          execs[1]?.command.options.cwd,
+          "each call gets its own temporary directory",
+        );
+        for (const { command, settings } of execs) {
+          assert.equal(command.command, "/opt/droid/bin/droid");
+          assert.equal(command.args[command.args.indexOf("-m") + 1], "claude-haiku-5-5");
+          assert.include(command.args, "--only-tools");
+          const workingDirectory = command.args[command.args.indexOf("--cwd") + 1];
+          assert.equal(command.options.cwd, workingDirectory);
+          assert.isTrue(path.relative("/machine/project", workingDirectory ?? "").startsWith(".."));
+          assert.notInclude(command.args, "/machine/project");
+          assert.equal(settings, DROID_HOOKS_OFF_SETTINGS);
+          assert.equal(command.options.env?.T3_DROID_TEST, "instance-value");
+        }
+        // Nothing here talks to a thread's stream-jsonrpc process: no launch opens one, and
+        // every one-shot child gets a closed stdin.
+        for (const { command } of launches) {
+          assert.notInclude(command.args, "stream-jsonrpc");
+          assert.notInclude(command.args, "--input-format");
+        }
+        for (const { command } of execs) {
+          assert.equal(command.options.stdin, "ignore");
+        }
+      }).pipe(Effect.scoped),
+  );
+});
