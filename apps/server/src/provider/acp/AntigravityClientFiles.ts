@@ -25,20 +25,31 @@ const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFil
     const outside = EffectAcpErrors.AcpRequestError.invalidParams(
       `Path '${input.requestPath}' is outside the session workspace.`,
     );
+    const entryExists = (target: string) =>
+      input.fileSystem.readLink(target).pipe(
+        Effect.as(true),
+        Effect.catch(() => input.fileSystem.exists(target)),
+        Effect.orElseSucceed(() => true),
+      );
     const real = yield* input.fileSystem.realPath(resolved).pipe(
       Effect.catch(() =>
         Effect.gen(function* () {
-          // Fall back to the parent only for missing files, never dangling or unreadable links.
-          const entryExists = yield* input.fileSystem.readLink(resolved).pipe(
-            Effect.as(true),
-            Effect.catch(() => input.fileSystem.exists(resolved)),
-            Effect.orElseSucceed(() => true),
-          );
-          if (entryExists) return yield* outside;
-          const parent = yield* input.fileSystem
-            .realPath(path.dirname(resolved))
-            .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
-          return path.join(parent, path.basename(resolved));
+          // Missing entries (a new write, maybe into new folders) resolve through their
+          // nearest existing ancestor, so a linked workspace still contains them. A
+          // dangling or unreadable link is never followed on write.
+          const missing: Array<string> = [];
+          let current = resolved;
+          while (!(yield* entryExists(current))) {
+            missing.unshift(path.basename(current));
+            const parent = path.dirname(current);
+            if (parent === current) break;
+            const realParent = yield* input.fileSystem
+              .realPath(parent)
+              .pipe(Effect.orElseSucceed(() => undefined));
+            if (realParent !== undefined) return path.join(realParent, ...missing);
+            current = parent;
+          }
+          return yield* outside;
         }),
       ),
     );
