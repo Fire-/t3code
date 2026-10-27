@@ -92,7 +92,7 @@ function recordingSpawner(
 }
 
 type DiscoveryScript =
-  | { readonly kind: "result"; readonly result: unknown }
+  | { readonly kind: "result"; readonly result: unknown; readonly afterMs?: number }
   | { readonly kind: "error" }
   | { readonly kind: "silent" }
   | { readonly kind: "exits" };
@@ -128,9 +128,18 @@ const makeScriptedDroid = Effect.fn("makeScriptedDroid")(function* (
     if (line.method !== "droid.list_models") return;
     yield* Deferred.succeed(requested, undefined);
     switch (script.kind) {
-      case "result":
-        yield* Queue.offer(stdout, encoder.encode(replyLine(line.id, { result: script.result })));
+      case "result": {
+        const reply = Queue.offer(
+          stdout,
+          encoder.encode(replyLine(line.id, { result: script.result })),
+        );
+        if (script.afterMs === undefined) yield* reply;
+        else
+          yield* Effect.forkDetach(
+            Effect.sleep(Duration.millis(script.afterMs)).pipe(Effect.andThen(reply)),
+          );
         return;
+      }
       case "error":
         yield* Queue.offer(
           stdout,
@@ -1105,6 +1114,30 @@ describe("Droid model discovery", () => {
           ["droid.list_models"],
         );
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a discovery waits out a 40 s Droid startup and lists its models", () =>
+    Effect.gen(function* () {
+      const droid = yield* makeScriptedDroid({
+        kind: "result",
+        result: listed(listedModel({ id: "claude-opus-5-5" })),
+        afterMs: 40_000,
+      });
+      const probe = yield* provide(checkDroidProviderStatus(settings()), droid.spawner).pipe(
+        Effect.forkChild,
+      );
+      yield* Deferred.await(droid.requested);
+      yield* yieldSome;
+
+      yield* TestClock.adjust(Duration.seconds(40));
+      const snapshot = yield* Fiber.join(probe);
+
+      assert.equal(snapshot.status, "ready");
+      assert.deepEqual(
+        snapshot.models.map((model) => model.slug),
+        ["claude-opus-5-5"],
+      );
+    }),
   );
 });
 

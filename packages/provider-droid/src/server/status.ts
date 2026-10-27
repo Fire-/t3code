@@ -49,8 +49,8 @@ export const DROID_PRESENTATION = {
 } as const;
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
-// Booting Droid in RPC mode and reading its model registry; the same bound Pi uses for discovery.
-export const DROID_DISCOVERY_TIMEOUT_MS = 15_000;
+// Droid answers list_models only after its startup, which waits on Factory's backend and has taken 40 s.
+export const DROID_DISCOVERY_TIMEOUT_MS = 120_000;
 
 const DROID_DEFAULT_MODEL_SLUG = DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("droid")];
 /** The option id the adapter reads when it opens a session. */
@@ -191,7 +191,13 @@ const discoverDroidModels = (
       cwd: neutralCwd,
       env: definedDroidEnvironment(environment),
     });
-    return buildDroidModelsFromListModels(yield* runtime.request("droid.list_models", {}));
+    // The process's first request waits out its startup, past the default request timeout.
+    const listed = yield* runtime.request(
+      "droid.list_models",
+      {},
+      { timeout: DROID_DISCOVERY_TIMEOUT_MS },
+    );
+    return buildDroidModelsFromListModels(listed);
   }).pipe(
     Effect.scoped,
     Effect.timeoutOption(DROID_DISCOVERY_TIMEOUT_MS),
