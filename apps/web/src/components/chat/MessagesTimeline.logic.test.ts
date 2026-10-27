@@ -277,6 +277,38 @@ describe("deriveMessagesTimelineRows", () => {
     });
   });
 
+  it("labels an approval with a multi-line prompt by its title", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const source = fixture.visibleTurnItems[0]!;
+    const label = (title: string | null, prompt: string) => {
+      const item: OrchestrationV2ProjectedTurnItem["item"] = {
+        ...source.item,
+        id: TurnItemId.make("approval"),
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        status: "waiting",
+        title,
+        type: "approval_request",
+        requestId: RuntimeRequestId.make("approval-request"),
+        requestKind: "permission",
+        prompt,
+      };
+      const [entry] = deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: [{ ...source, item, sourceItemId: item.id }],
+        optimisticMessages: [],
+      });
+      if (entry?.kind !== "work") throw new Error("Expected an approval work entry");
+      return workEntryDisplayLabel(entry.entry, undefined);
+    };
+    const cell = 'import os\nprint(os.listdir("build"))';
+    expect(label("Allow ipython?", cell)).toBe("Allow ipython?");
+    expect(label("Allow bash?", "rm -rf build")).toBe("rm -rf build");
+    expect(label(null, cell)).toBe(cell);
+  });
+
   it.each(["waiting", "completed"] as const)(
     "groups approval and user-input requests with commands without expanding them when %s",
     (status) => {
