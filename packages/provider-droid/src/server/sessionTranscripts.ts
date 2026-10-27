@@ -170,6 +170,10 @@ export type DroidTranscriptEntry =
       readonly startedAt: string | undefined;
       readonly completedAt: string | undefined;
       readonly activity: DroidTranscriptActivity;
+      /** The call's `tool_use` id, on tools and subagents. */
+      readonly toolUseId?: string;
+      /** The Script call that made this call; live turns show only the Script. */
+      readonly scriptToolUseId?: string;
     };
 
 const blocksOf = (
@@ -211,7 +215,12 @@ export function isDroidTranscriptHistoryRecord(record: DroidTranscriptRecord): b
 // A background Task's result only acknowledges the launch; its report arrives later as a message.
 const BACKGROUND_TASK_ID = /^task_id: *(\S+)/mu;
 
-interface PendingTool {
+interface PendingCall {
+  readonly id: string;
+  readonly scriptToolUseId: string | undefined;
+}
+
+interface PendingTool extends PendingCall {
   readonly kind: "tool";
   readonly name: string;
   readonly input: unknown;
@@ -223,7 +232,7 @@ interface PendingTool {
   };
 }
 
-interface PendingTask {
+interface PendingTask extends PendingCall {
   readonly kind: "subagent";
   readonly title: string | null;
   readonly prompt: string;
@@ -280,9 +289,15 @@ export function droidTranscriptEntries(
         const name = trimmedString(block["name"]);
         if (id === undefined || name === undefined || calls.has(id)) continue;
         const input = block["input"];
+        const script = block["script_execution"];
+        const scriptToolUseId = Predicate.isObject(script)
+          ? trimmedString(script["outer_tool_use_id"])
+          : undefined;
         const call: PendingTool | PendingTask =
           droidToolKind(name) === "task"
             ? {
+                id,
+                scriptToolUseId,
                 kind: "subagent",
                 title: Predicate.isObject(input)
                   ? (trimmedString(input["description"]) ?? null)
@@ -290,7 +305,7 @@ export function droidTranscriptEntries(
                 prompt: Predicate.isObject(input) ? (trimmedString(input["prompt"]) ?? "") : "",
                 startedAt: at,
               }
-            : { kind: "tool", name, input: input ?? {}, startedAt: at };
+            : { id, scriptToolUseId, kind: "tool", name, input: input ?? {}, startedAt: at };
         calls.set(id, call);
         order.push(call);
         continue;
@@ -316,6 +331,10 @@ export function droidTranscriptEntries(
   }
   return order.map((entry): DroidTranscriptEntry => {
     if (!("kind" in entry)) return entry;
+    const call = {
+      toolUseId: entry.id,
+      ...(entry.scriptToolUseId === undefined ? {} : { scriptToolUseId: entry.scriptToolUseId }),
+    };
     if (entry.kind === "tool") {
       const settlement =
         entry.result === undefined
@@ -330,6 +349,7 @@ export function droidTranscriptEntries(
         startedAt: entry.startedAt,
         completedAt: entry.result?.at ?? entry.startedAt,
         activity: { kind: "tool", item: droidToolItemFields(entry, itemType, settlement) },
+        ...call,
       };
     }
     return {
@@ -343,6 +363,7 @@ export function droidTranscriptEntries(
         status: entry.outcome?.status ?? "interrupted",
         result: entry.outcome?.result ?? null,
       },
+      ...call,
     };
   });
 }

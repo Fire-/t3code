@@ -10,8 +10,10 @@ export {
   droidSessionParentId,
   droidTranscriptEntries,
   droidTranscriptMessage,
+  droidTranscriptRecords,
   foldDroidTranscriptFields,
   isDroidSubagentSessionStart,
   isDroidTranscriptHistoryRecord,
   type DroidTranscriptActivity,
+  type DroidTranscriptEntry,
 } from "./server/sessionTranscripts.ts";

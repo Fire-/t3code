@@ -171,6 +171,41 @@ describe("droidTranscriptEntries", () => {
       ["assistant", "Done."],
     ]);
   });
+
+  it("names each call by its tool_use id, and a Script's own calls by the Script", () => {
+    const record = recorder();
+    const entries = droidTranscriptEntries([
+      record("u1", "user", text("Look around")),
+      record("a1", "assistant", [toolUse("t-script", "Script", { script: "await tools.LS({})" })]),
+      record(
+        "repl-tool-call:1",
+        "assistant",
+        [
+          {
+            ...toolUse("t-inner", "LS", {}),
+            script_execution: { run_id: "t-script", outer_tool_use_id: "t-script" },
+          },
+        ],
+        "user_only",
+      ),
+      record("repl-tool-result:1", "user", [toolResult("t-inner", "a.ts")], "user_only"),
+      record("r1", "user", [toolResult("t-script", "a.ts")]),
+      record("a2", "assistant", [
+        toolUse("t-task", "Task", { description: "Check", prompt: "Check" }),
+      ]),
+    ]);
+
+    assert.deepStrictEqual(
+      entries.flatMap((entry) =>
+        entry.type === "activity" ? [[entry.toolUseId, entry.scriptToolUseId]] : [],
+      ),
+      [
+        ["t-script", undefined],
+        ["t-inner", "t-script"],
+        ["t-task", undefined],
+      ],
+    );
+  });
 });
 
 describe("Droid transcript files", () => {
