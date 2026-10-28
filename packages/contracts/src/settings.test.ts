@@ -211,6 +211,12 @@ describe("ClientSettings quit confirmation", () => {
 });
 
 describe("provider enabled defaults", () => {
+  it("[VAL-SET-002] keeps Prime disabled until a configured instance opts in", () => {
+    const prime = ProviderDriverKind.make("prime-agent");
+    expect(resolveProviderInstanceEnabled({ driver: prime, config: {} })).toBe(false);
+    expect(resolveProviderInstanceEnabled({ driver: prime, enabled: true, config: {} })).toBe(true);
+  });
+
   it("resolves instance enabled state with explicit false winning", () => {
     const grok = ProviderDriverKind.make("grok");
     const codex = ProviderDriverKind.make("codex");
