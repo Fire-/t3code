@@ -408,6 +408,47 @@ export function presentProviderGoal(
   };
 }
 
+export interface ThreadTodoListPresentation {
+  readonly title: string;
+  readonly current: string | null;
+}
+
+type ThreadTodoList = Extract<ThreadStructure["plans"][number], { readonly kind: "todo_list" }>;
+
+/** The latest todo list while its run works, or after it while the same session has steps left. */
+export function presentThreadTodoList(
+  projection: ThreadStructure,
+): ThreadTodoListPresentation | null {
+  const runs = new Map(projection.runs.map((run) => [run.id, run]));
+  let latest: {
+    readonly plan: ThreadTodoList;
+    readonly run: OrchestrationV2ThreadProjection["runs"][number];
+  } | null = null;
+  for (const plan of projection.plans) {
+    if (plan.kind !== "todo_list" || plan.status === "superseded" || plan.runId === null) continue;
+    const run = runs.get(plan.runId);
+    if (run !== undefined && (latest === null || run.ordinal >= latest.run.ordinal)) {
+      latest = { plan, run };
+    }
+  }
+  if (latest === null || latest.plan.steps.length === 0) return null;
+  const { plan, run } = latest;
+  const done = plan.steps.filter((step) => step.status === "completed").length;
+  if (
+    !ACTIVITY_RUN_STATUSES.has(run.status) &&
+    (done === plan.steps.length ||
+      plan.status === "completed" ||
+      run.providerThreadId === null ||
+      run.providerThreadId !== projection.thread.activeProviderThreadId)
+  ) {
+    return null;
+  }
+  const current =
+    plan.steps.find((step) => step.status === "running") ??
+    plan.steps.find((step) => step.status === "pending");
+  return { title: `Tasks ${done}/${plan.steps.length}`, current: current?.text ?? null };
+}
+
 export function notificationChildThreadId(
   source: OrchestrationV2NotificationSource,
 ): ThreadId | undefined {

@@ -7,9 +7,16 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import {
   presentPendingBackgroundWork,
   presentProviderGoal,
+  type ThreadTodoListPresentation,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { childThreadInputsTitle } from "@t3tools/client-runtime/state/threads";
-import { GitBranchIcon, MessageCircleIcon, ShieldQuestionIcon, TargetIcon } from "lucide-react";
+import {
+  GitBranchIcon,
+  ListTodoIcon,
+  MessageCircleIcon,
+  ShieldQuestionIcon,
+  TargetIcon,
+} from "lucide-react";
 import { Fragment } from "react";
 import { cn } from "~/lib/utils";
 import { Button, InlineButton } from "../ui/button";
@@ -92,6 +99,19 @@ export function goalNowItem(input: {
         </InlineButton>
       </>
     ),
+  };
+}
+
+/** The agent's todo list progress, for the end of the timeline. */
+export function tasksNowItem(input: {
+  readonly threadId: ThreadId;
+  readonly todoList: ThreadTodoListPresentation;
+}): ThreadNowItem {
+  return {
+    id: `tasks:${input.threadId}`,
+    icon: <ListTodoIcon />,
+    title: input.todoList.title,
+    description: input.todoList.current ?? undefined,
   };
 }
 
