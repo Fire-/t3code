@@ -719,4 +719,197 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
       assert.deepEqual([...projected.readyCheckpointOrdinals].toSorted(), [0, 1]);
     }),
   );
+
+  it.effect("keeps the previous run's checkpoint when the workspace has no snapshots", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const noGitThreadId = ThreadId.make("thread:checkpoint-capture-no-git");
+      const noGitRunId = RunId.make("run:checkpoint-capture-no-git-2");
+      const noGitScopeId = CheckpointScopeId.make("scope:checkpoint-capture-no-git");
+      const noGitRootNodeId = NodeId.make("node:checkpoint-capture-no-git-root");
+      const noGitProviderThreadId = ProviderThreadId.make("provider-thread:checkpoint-no-git");
+      const scope = {
+        id: noGitScopeId,
+        threadId: noGitThreadId,
+        runId: noGitRunId,
+        nodeId: noGitRootNodeId,
+        parentScopeId: null,
+        providerThreadId: noGitProviderThreadId,
+        kind: "root_run" as const,
+        ordinalWithinParent: 0,
+        advancesAppRunCount: true,
+        cwd: "/tmp",
+        createdAt: now,
+      };
+      const missingCheckpoint = (input: {
+        readonly ordinalWithinScope: number;
+        readonly runId: RunId | null;
+      }) => ({
+        id: CheckpointId.make(`checkpoint:no-git-${input.ordinalWithinScope}`),
+        threadId: noGitThreadId,
+        scopeId: noGitScopeId,
+        runId: input.runId,
+        nodeId: noGitRootNodeId,
+        parentCheckpointId: null,
+        ordinalWithinScope: input.ordinalWithinScope,
+        appRunOrdinal: input.runId === null ? null : input.ordinalWithinScope,
+        ref: CheckpointRef.make(`checkpoint-ref:no-git-${input.ordinalWithinScope}`),
+        status: "missing" as const,
+        files: [],
+        capturedAt: now,
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:checkpoint-capture-no-git:thread"),
+        type: "thread.created",
+        threadId: noGitThreadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: noGitThreadId,
+          projectId,
+          title: "Checkpoint capture without Git",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: noGitThreadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:checkpoint-capture-no-git:run"),
+        type: "run.updated",
+        threadId: noGitThreadId,
+        runId: noGitRunId,
+        nodeId: noGitRootNodeId,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: noGitRunId,
+          threadId: noGitThreadId,
+          ordinal: 2,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: noGitProviderThreadId,
+          userMessageId: MessageId.make("message:checkpoint-capture-no-git"),
+          rootNodeId: noGitRootNodeId,
+          activeAttemptId: null,
+          status: "waiting",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:checkpoint-capture-no-git:node"),
+        type: "node.updated",
+        threadId: noGitThreadId,
+        runId: noGitRunId,
+        nodeId: noGitRootNodeId,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: noGitRootNodeId,
+          threadId: noGitThreadId,
+          runId: noGitRunId,
+          parentNodeId: null,
+          rootNodeId: noGitRootNodeId,
+          kind: "root_turn",
+          status: "waiting",
+          countsForRun: true,
+          providerThreadId: noGitProviderThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: noGitScopeId,
+          startedAt: now,
+          completedAt: null,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:checkpoint-capture-no-git:provider-thread"),
+        type: "provider-thread.updated",
+        threadId: noGitThreadId,
+        nodeId: noGitRootNodeId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: noGitProviderThreadId,
+          driver,
+          providerInstanceId,
+          providerSessionId: null,
+          appThreadId: noGitThreadId,
+          ownerNodeId: noGitRootNodeId,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 2,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:checkpoint-capture-no-git:scope"),
+        type: "checkpoint-scope.created",
+        threadId: noGitThreadId,
+        runId: noGitRunId,
+        nodeId: noGitRootNodeId,
+        occurredAt: now,
+        payload: scope,
+      });
+
+      const committed = yield* Ref.make<ReadonlyArray<OrchestrationV2DomainEvent>>([]);
+      const layerCapture = CheckpointCaptureService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            Layer.mock(CheckpointService.CheckpointServiceV2)({
+              materializeBaselineCheckpoint: ({ ordinalWithinScope }) =>
+                Effect.succeed(missingCheckpoint({ ordinalWithinScope, runId: null })),
+              capture: () =>
+                Effect.succeed(missingCheckpoint({ ordinalWithinScope: 2, runId: noGitRunId })),
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) =>
+                Ref.set(committed, input.events).pipe(Effect.as({ committed: true } as never)),
+            }),
+          ),
+        ),
+      );
+
+      yield* CheckpointCaptureService.CheckpointCaptureServiceV2.pipe(
+        Effect.flatMap((service) =>
+          service.execute({ threadId: noGitThreadId, runId: noGitRunId, scopeId: noGitScopeId }),
+        ),
+        Effect.provide(layerCapture),
+      );
+
+      const capturedOrdinals = (yield* Ref.get(committed)).flatMap((event) =>
+        event.type === "checkpoint.captured" ? [event.payload.ordinalWithinScope] : [],
+      );
+      assert.deepEqual(capturedOrdinals, [0, 2]);
+    }),
+  );
 });
