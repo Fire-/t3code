@@ -54,7 +54,7 @@ export function ThreadDetailsCard({
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- closes the popover flag in the right panel store when the derived mode turns inline
   useLayoutEffect(() => {
     if (mode === "inline" && popoverOpen)
-      useRightPanelStore.getState().setThreadPanelOpen(threadRef, "popover", false);
+      useRightPanelStore.getState().promoteThreadPanelPopover(threadRef);
   }, [mode, popoverOpen, threadRef]);
   const [contentElement, setContentElement] = useState<HTMLDivElement | null>(null);
   const { environmentId, threadId } = threadRef;
