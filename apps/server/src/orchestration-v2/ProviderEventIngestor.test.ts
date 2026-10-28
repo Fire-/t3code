@@ -8,9 +8,11 @@ import {
   GitCommandError,
   type ModelSelection,
   NodeId,
+  PlanId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PlanArtifact,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
@@ -1447,6 +1449,51 @@ layer("ProviderEventIngestorV2", (it) => {
       assert.equal(DateTime.toEpochMillis(errorStartedAt), DateTime.toEpochMillis(retryStartedAt));
       assert.equal(errorItem.providerThreadId, providerThreadId);
       assert.equal(errorItem.providerTurnId, providerTurnId);
+    }),
+  );
+
+  it.effect("a new todo list supersedes the thread's lists from earlier runs", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const threadId = threadEvent.threadId;
+      yield* eventSink.write({ events: [threadEvent] });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const todoList = (id: string, run: string): OrchestrationV2PlanArtifact => ({
+        id: PlanId.make(id),
+        threadId,
+        runId: RunId.make(run),
+        nodeId: NodeId.make(`${threadId}:${id}`),
+        kind: "todo_list",
+        status: "active",
+        steps: [{ id: "todo-0", text: `Step of ${id}`, status: "pending" }],
+      });
+      const ingestPlan = (plan: OrchestrationV2PlanArtifact) =>
+        ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          event: { type: "plan.updated", driver: CODEX_DRIVER, plan },
+        });
+      const statusOf = (id: string) =>
+        projectionStore.getPlan(threadId, PlanId.make(id)).pipe(Effect.map((plan) => plan?.status));
+
+      yield* ingestPlan(todoList("plan:first", "run:1"));
+      yield* ingestPlan(todoList("plan:second", "run:2"));
+      const third = todoList("plan:third", "run:3");
+      yield* ingestPlan(third);
+      assert.lengthOf(yield* ingestPlan({ ...third, status: "completed" }), 1);
+
+      assert.equal(yield* statusOf("plan:first"), "superseded");
+      assert.equal(yield* statusOf("plan:second"), "superseded");
+      assert.equal(yield* statusOf("plan:third"), "completed");
     }),
   );
 
