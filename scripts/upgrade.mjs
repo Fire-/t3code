@@ -214,11 +214,16 @@ function renderReport(s) {
       "",
       `Build: ${short(s.build.commit)}, bin.mjs sha256 ${s.build.sha256.slice(0, 16)}.`,
     );
-  if (s.deploy) lines.push(`Deploy: ${s.deploy.at}; DB backup ${s.deploy.backup}.`);
-  if (s.verify)
+  if (s.deploy) {
+    lines.push(`Deploy: ${s.deploy.at}; DB backup ${s.deploy.backup}.`);
+    for (const t of s.deploy.busy ?? []) lines.push(`- busy at deploy: ${t}`);
+  }
+  if (s.verify) {
     lines.push(
       `Verify: ${s.verify.result} at ${s.verify.at}${s.verify.detail ? `: ${s.verify.detail}` : ""}.`,
     );
+    for (const t of s.verify.busy ?? []) lines.push(`- busy: ${t}`);
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -235,6 +240,36 @@ function daemonStatus() {
       .filter((l) => !l.startsWith("[daemon-status]"))
       .join("\n"),
   };
+}
+
+const localTime = (iso) => new Date(iso).toLocaleString("sv-SE").slice(0, 16);
+
+// The threads that keep the daemon from restarting T3, by the daemon's own `busy` rules.
+// A thread waiting on a question stays busy until someone answers it, however long that takes.
+function busyThreads() {
+  const sql = fs.readFileSync(path.join(import.meta.dirname, "t3-busy-v2.sql"), "utf8");
+  const start = sql.indexOf("WITH busy");
+  const end = sql.indexOf("\nSELECT group_concat");
+  if (start < 0 || end < start) return ["(cannot read the busy rules in t3-busy-v2.sql)"];
+  const perThread = `
+SELECT b.thread_id AS id, t.title AS title, group_concat(DISTINCT b.reason) AS reasons,
+  (SELECT min(r.created_at) FROM orchestration_v2_projection_runtime_requests r
+    WHERE r.thread_id = b.thread_id AND r.status = 'pending') AS questionSince
+FROM busy b
+JOIN orchestration_v2_projection_threads t ON t.thread_id = b.thread_id AND t.deleted_at IS NULL
+GROUP BY b.thread_id;`;
+  const r = exec("sqlite3", ["-json", "-readonly", "-cmd", ".timeout 2000", LIVE_DB], {
+    input: `${sql.slice(start, end)}\n${perThread}`,
+  });
+  if (r.code !== 0) return [`(busy probe failed: ${r.err.slice(0, 160)})`];
+  return (r.out ? JSON.parse(r.out) : []).map((t) => {
+    const title = t.title.replace(/\s+/g, " ");
+    const shown = title.length > 60 ? `${title.slice(0, 57)}...` : title;
+    const question = t.questionSince
+      ? `, waiting on a question since ${localTime(t.questionSince)}`
+      : "";
+    return `"${shown}" (${t.id}): ${t.reasons}${question}`;
+  });
 }
 
 // Runs from apps/server, where these imports resolve, with the database path as its argument.
@@ -344,8 +379,9 @@ async function preflight(args) {
   // Deploying again would push the unverified build into bak, the daemon's first fallback.
   if (prev?.status === "deployed") {
     const hours = Math.round((Date.now() - new Date(prev.deploy.at).getTime()) / 3_600_000);
+    const busy = prev.verify?.busy?.length ? `\nBusy:\n- ${prev.verify.busy.join("\n- ")}` : "";
     die(
-      `Run ${prev.id} deployed ${hours}h ago and is not live yet: ${prev.verify?.detail ?? "unverified"}`,
+      `Run ${prev.id} deployed ${hours}h ago and is not live yet: ${prev.verify?.detail ?? "unverified"}${busy}`,
       5,
     );
   }
@@ -1186,7 +1222,8 @@ function deploy() {
   }
   const current = sha256(path.join(RUNTIME, "dist/current/bin.mjs"));
   if (current !== state.build.sha256) die("The swapped bin.mjs differs from the rehearsed build.");
-  state.deploy = { at: now(), backup, sha256: current };
+  const busy = busyThreads();
+  state.deploy = { at: now(), backup, sha256: current, busy };
   state.status = "deployed";
   record(state, "deploy", "ok", {
     log: s.log,
@@ -1195,6 +1232,7 @@ function deploy() {
   console.log(
     "Deployed to dist/current. The daemon restarts T3 once it is idle; the next preflight (or verify-deploy) confirms it went live.",
   );
+  if (busy.length) console.log(`Busy now (this thread is one of them):\n- ${busy.join("\n- ")}`);
 }
 
 async function verifyDeploy() {
@@ -1222,6 +1260,7 @@ async function verifyDeploy() {
   const http = await httpOk(`http://127.0.0.1:${LIVE_PORT}/`);
   let result;
   let detail = "";
+  let busy = [];
   if (current !== state.deploy.sha256) {
     result = "replaced";
     detail = "dist/current changed since this deploy";
@@ -1237,8 +1276,9 @@ async function verifyDeploy() {
       : restarted
         ? "T3 not answering on its port"
         : "the daemon has not restarted T3 onto it; T3 has not been idle long enough";
+    if (pid && !restarted) busy = busyThreads();
   }
-  state.verify = { result, at: now(), detail };
+  state.verify = { result, at: now(), detail, busy };
   if (result === "live" || result === "replaced") state.status = "verified";
   if (result === "failed") {
     state.status = "blocked";
@@ -1246,6 +1286,7 @@ async function verifyDeploy() {
   }
   save(state);
   console.log(`Deploy ${state.id}: ${result}${detail ? ` (${detail})` : ""}`);
+  if (busy.length) console.log(`Busy:\n- ${busy.join("\n- ")}`);
   return result;
 }
 

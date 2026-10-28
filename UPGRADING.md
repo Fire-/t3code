@@ -16,7 +16,7 @@ Each step records its outcome in `~/.t3/code/upgrades/<run>/state.json` and rewr
    - `10`: up to date. Reply "t3code is up to date" and stop.
    - `3`: the run is blocked. If it was already escalated, say it is still waiting and stop. Otherwise escalate.
    - `4`: a run is in progress. It is this thread's own unfinished run: `preflight --resume`, then continue from the first step that has not passed.
-   - `5`: the previous deploy is not live yet, usually because T3 has not been idle. Stop. Escalate if it is more than 20 hours old.
+   - `5`: the previous deploy is not live yet, usually because T3 has not been idle. It lists the busy threads; one waiting on a question stays busy until someone answers it. Stop, and name any thread other than this one in your reply. Escalate if it is more than 20 hours old.
    - `1`: something is in the way, such as uncommitted changes in a worktree. Report it and stop. Never clean, stash, or commit other people's work.
 2. `plan`. Tags every overlay and `local` (`ember-backup/<run>/<name>-pre-upgrade`), predicts conflicts, and flags upstream risks: new migrations, toolchain changes, lockfile and external-package changes, and files both upstream and an overlay changed. A toolchain change: see [Toolchain](#toolchain).
 3. `sync`. Re-overlays every overlay that merges cleanly. Exit `2` lists the ones that conflict.
@@ -29,7 +29,7 @@ Each step records its outcome in `~/.t3/code/upgrades/<run>/state.json` and rewr
 10. `ui`. Opens the rehearsal server in a headless browser, checks that the sidebar and a thread with tool calls render without uncaught page errors, and saves screenshots. Open the screenshots and look at them: a page can pass the checks and still be broken.
 11. `rehearse-stop`.
 12. `publish`. Pushes the overlays (never forced) and `local` (with a lease) to `fork`, then confirms the remote matches.
-13. `deploy`. Backs up the live database to `~/.t3/code/backups`, swaps the build into `dist/current`, and checks it is the rehearsed build. The daemon restarts T3 onto it once T3 is idle. This thread's own turn keeps T3 busy, so the restart happens after you finish; the next `preflight` (or `verify-deploy`) confirms it.
+13. `deploy`. Backs up the live database to `~/.t3/code/backups`, swaps the build into `dist/current`, and checks it is the rehearsed build. The daemon restarts T3 onto it once T3 is idle. This thread's own turn keeps T3 busy, so the restart happens after you finish; the next `preflight` (or `verify-deploy`) confirms it. `deploy` lists the threads busy right now; a thread waiting on a question holds the restart until someone answers it, so name it in your reply.
 14. Reply with the summary below and stop.
 
 ## Failures: ours or upstream's
@@ -89,6 +89,6 @@ t3code upgrade <run>: deployed | up to date | blocked
 - upstream: <n> commits (<old>..<new>)
 - overlays: <n> clean; resolved: <names>; fixed: <names>; absorbed: <names>
 - accepted failures: <step: reason> | none
-- deploy: waiting for T3 to go idle; the next run confirms it
+- deploy: waiting for T3 to go idle; the next run confirms it[; held by "<thread>", waiting on a question since <time>]
 - report: ~/.t3/code/upgrades/<run>/report.md
 ```

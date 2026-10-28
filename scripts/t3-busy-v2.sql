@@ -1,6 +1,7 @@
 -- Busy probe for orchestration v2 (userdata/statev2.sqlite), shared by
 -- scripts/daemon.sh and `mise run daemon-status`. Prints nothing when idle,
--- otherwise "reason:threadCount,...".
+-- otherwise "reason:threadCount,...". scripts/upgrade.mjs reuses the `busy`
+-- CTE (everything before the final "SELECT group_concat") to name threads.
 --
 -- Mirrors ProjectionStore.getRecoveryThreadIds("runtime") minus two terms:
 -- provider sessions (`ready` is the normal idle state, so counting them pins
