@@ -117,7 +117,6 @@ const receivedMethods = (log: ReadonlyArray<Record<string, unknown>>) =>
 
 const assertPresentation = (snapshot: ServerProvider) => {
   assert.deepEqual(snapshot.supportedRuntimeModes, DROID_PRESENTATION.supportedRuntimeModes);
-  assert.strictEqual(snapshot.requiresNewThreadForModelChange, false);
   // The adapter fills `contextUsage` from Droid's token counts, so the UI can show a window.
   assert.strictEqual(snapshot.reportsContextWindow, true);
   assert.strictEqual(snapshot.supportsConversationRollback, true);

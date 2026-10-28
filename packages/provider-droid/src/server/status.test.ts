@@ -295,7 +295,6 @@ const assertPresentation = (
     ServerProvider,
     | "displayName"
     | "supportedRuntimeModes"
-    | "requiresNewThreadForModelChange"
     | "reportsContextWindow"
     | "supportsConversationRollback"
     | "showInteractionModeToggle"
@@ -306,7 +305,6 @@ const assertPresentation = (
     snapshot.supportedRuntimeModes,
     M2_RUNTIME_MODES,
   );
-  assert.strictEqual(snapshot.requiresNewThreadForModelChange, false);
   assert.strictEqual(snapshot.reportsContextWindow, true);
   assert.strictEqual(snapshot.supportsConversationRollback, true);
   assert.strictEqual(snapshot.showInteractionModeToggle, true);
@@ -319,7 +317,6 @@ describe("DROID_PRESENTATION", () => {
       DROID_PRESENTATION.supportedRuntimeModes,
       M2_RUNTIME_MODES,
     );
-    assert.isFalse(DROID_PRESENTATION.requiresNewThreadForModelChange);
     // The adapter reports contextUsage on every turn that carries token counts.
     assert.isTrue(DROID_PRESENTATION.reportsContextWindow);
     // VAL-PLAN-012 (M4) and VAL-HIST-004 (M5) turned these on together with their features.

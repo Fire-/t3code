@@ -44,7 +44,6 @@ export const DROID_PRESENTATION = {
   showInteractionModeToggle: true,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"],
   reportsContextWindow: true,
-  requiresNewThreadForModelChange: false,
   supportsConversationRollback: true,
 } as const;
 
