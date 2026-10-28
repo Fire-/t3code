@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 
 import { threadSyncLabel, type ThreadSyncPhase } from "../../threadSync";
 import { cn } from "~/lib/utils";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ComposerBanner } from "./ComposerBanner";
 import { NoticeText } from "./ComposerBannerStack";
 
 /** A line of thread state for the end of the timeline. */
@@ -11,6 +13,8 @@ export interface ThreadNowItem {
   readonly icon: ReactNode;
   readonly title: ReactNode;
   readonly description?: ReactNode;
+  /** Opens from the title and detail, for state that does not fit on one line. */
+  readonly details?: ReactNode;
   readonly actions?: ReactNode;
 }
 
@@ -33,6 +37,17 @@ function ThreadNowLine({
   /** Announces the line when it appears; only for something that needs the user. */
   readonly announce?: boolean;
 }) {
+  const text = (
+    <>
+      {item.title}
+      {item.description ? (
+        <>
+          {" "}
+          <span aria-hidden>·</span> {item.description}
+        </>
+      ) : null}
+    </>
+  );
   return (
     <div
       role={announce ? "alert" : undefined}
@@ -44,20 +59,40 @@ function ThreadNowLine({
       </span>
       {/* Title and detail read as one line that gives way before the actions, so Stop stays
           reachable; when it is cut, its details button shows all of it. */}
-      <NoticeText
-        detailsLabel={
-          typeof item.title === "string" ? `Show details: ${item.title}` : "Show details"
-        }
-        className="min-w-0 truncate"
-      >
-        {item.title}
-        {item.description ? (
-          <>
-            {" "}
-            <span aria-hidden>·</span> {item.description}
-          </>
-        ) : null}
-      </NoticeText>
+      {item.details ? (
+        <Popover>
+          <PopoverTrigger
+            openOnHover
+            render={
+              <button
+                type="button"
+                className="min-w-0 cursor-pointer truncate text-start hover:text-foreground"
+              />
+            }
+          >
+            {text}
+          </PopoverTrigger>
+          <PopoverPopup
+            aria-label={typeof item.title === "string" ? item.title : "Details"}
+            tooltipStyle
+            side="top"
+            className="max-w-[min(30rem,calc(100vw-2rem))] whitespace-normal wrap-anywhere"
+          >
+            <ComposerBanner.Scroll className="max-h-[min(var(--available-height),24rem,40dvh)]">
+              {item.details}
+            </ComposerBanner.Scroll>
+          </PopoverPopup>
+        </Popover>
+      ) : (
+        <NoticeText
+          detailsLabel={
+            typeof item.title === "string" ? `Show details: ${item.title}` : "Show details"
+          }
+          className="min-w-0 truncate"
+        >
+          {text}
+        </NoticeText>
+      )}
       {item.actions ? (
         <>
           <span aria-hidden>·</span>

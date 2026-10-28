@@ -422,19 +422,17 @@ describe("presentThreadTodoList", () => {
     plans,
   });
 
-  it("shows the latest list's progress and current step while its run works", () => {
+  it("shows the latest list's progress, current step and steps while its run works", () => {
     const earlier = sessionRun("earlier", 1, "completed");
+    const current = todoList("current", ["completed", "running", "pending"]);
     expect(
       presentThreadTodoList(
         projection(
           [earlier, sessionRun("current", 2, "running")],
-          [
-            todoList("current", ["completed", "running", "pending"]),
-            todoList("earlier", ["pending"]),
-          ],
+          [current, todoList("earlier", ["pending"])],
         ),
       ),
-    ).toEqual({ title: "Tasks 1/3", current: "Step 1" });
+    ).toEqual({ title: "Tasks 1/3", current: "Step 1", steps: current.steps });
     expect(
       presentThreadTodoList(
         projection(
@@ -442,13 +440,16 @@ describe("presentThreadTodoList", () => {
           [todoList("current", ["completed", "completed"])],
         ),
       ),
-    ).toEqual({ title: "Tasks 2/2", current: null });
+    ).toMatchObject({ title: "Tasks 2/2", current: null });
   });
 
   it("keeps unfinished tasks after the turn until they finish or another session takes over", () => {
     const ended = sessionRun("ended", 1, "completed");
     const unfinished = projection([ended], [todoList("ended", ["completed", "pending"])]);
-    expect(presentThreadTodoList(unfinished)).toEqual({ title: "Tasks 1/2", current: "Step 1" });
+    expect(presentThreadTodoList(unfinished)).toMatchObject({
+      title: "Tasks 1/2",
+      current: "Step 1",
+    });
     expect(
       presentThreadTodoList(projection([ended], [todoList("ended", ["completed", "completed"])])),
     ).toBeNull();

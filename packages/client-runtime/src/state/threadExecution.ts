@@ -408,12 +408,13 @@ export function presentProviderGoal(
   };
 }
 
+type ThreadTodoList = Extract<ThreadStructure["plans"][number], { readonly kind: "todo_list" }>;
+
 export interface ThreadTodoListPresentation {
   readonly title: string;
   readonly current: string | null;
+  readonly steps: ThreadTodoList["steps"];
 }
-
-type ThreadTodoList = Extract<ThreadStructure["plans"][number], { readonly kind: "todo_list" }>;
 
 /** The latest todo list while its run works, or after it while the same session has steps left. */
 export function presentThreadTodoList(
@@ -446,7 +447,11 @@ export function presentThreadTodoList(
   const current =
     plan.steps.find((step) => step.status === "running") ??
     plan.steps.find((step) => step.status === "pending");
-  return { title: `Tasks ${done}/${plan.steps.length}`, current: current?.text ?? null };
+  return {
+    title: `Tasks ${done}/${plan.steps.length}`,
+    current: current?.text ?? null,
+    steps: plan.steps,
+  };
 }
 
 export function notificationChildThreadId(
