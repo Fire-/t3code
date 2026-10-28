@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ProviderReplayEntry,
+  ProviderInstanceId,
   type ProviderReplayTranscript,
   type ProviderReplayEntry as ProviderReplayEntryType,
 } from "@t3tools/contracts";
@@ -487,16 +488,15 @@ export function layer<E, R>(input: {
   readonly spawner: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner, E, R>;
   readonly binaryPath: string;
 }) {
-  return ProviderAdapterRegistry.layerFromDrivers({
-    drivers: [DroidAdapterV2Driver],
-    configMap: {
-      [DROID_PROVIDER]: {
-        driver: DROID_PROVIDER,
-        enabled: true,
-        config: { binaryPath: input.binaryPath },
-      },
-    },
-  }).pipe(
+  return ProviderAdapterRegistry.layerFromAdaptersEffect(
+    DroidAdapterV2Driver.create({
+      instanceId: ProviderInstanceId.make(DROID_PROVIDER),
+      environment: [],
+      displayName: undefined,
+      enabled: true,
+      config: { ...DroidAdapterV2Driver.defaultConfig(), binaryPath: input.binaryPath },
+    }).pipe(Effect.map((adapter) => [adapter])),
+  ).pipe(
     Layer.provide(input.spawner),
     Layer.provide(
       Layer.mergeAll(
