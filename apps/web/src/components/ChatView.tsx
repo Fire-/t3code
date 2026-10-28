@@ -80,6 +80,7 @@ import {
   deriveThreadActivityRun,
   deriveLatestThreadRun,
   deriveThreadStructureRuntime,
+  presentThreadTodoList,
 } from "@t3tools/client-runtime/state/thread-execution";
 import {
   resolveWorkflowOpening,
@@ -350,7 +351,7 @@ import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
-import { branchMismatchBannerItem } from "./chat/ThreadActivityBanners";
+import { branchMismatchBannerItem, tasksNowItem } from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import { useDelayedStatus } from "../hooks/useDelayedStatus";
@@ -2903,9 +2904,13 @@ export default function ChatView(props: ChatViewProps) {
   };
   const onExpandTimelineImageStable = useStableCallback(onExpandTimelineImage);
   const shownThreadSyncPhase = activeEnvironmentUnavailable ? null : delayedThreadSyncPhase;
+  const todoList = serverProjection ? presentThreadTodoList(serverProjection) : null;
+  const tasksNow =
+    todoList && activeThread ? tasksNowItem({ threadId: activeThread.id, todoList }) : null;
   const hasThreadNow =
     childInputNow !== null ||
     backgroundWorkNow !== null ||
+    tasksNow !== null ||
     goalNow !== null ||
     shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
@@ -2949,6 +2954,7 @@ export default function ChatView(props: ChatViewProps) {
           attention={childInputNow}
           work={backgroundWorkNow}
           syncPhase={shownThreadSyncPhase}
+          tasks={tasksNow}
           goal={goalNow}
         />
         {threadStatusLine}

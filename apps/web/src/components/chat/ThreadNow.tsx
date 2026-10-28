@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 
 import { threadSyncLabel, type ThreadSyncPhase } from "../../threadSync";
 import { cn } from "~/lib/utils";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ComposerBanner } from "./ComposerBanner";
 import { NoticeText } from "./ComposerBannerStack";
 
 /** A line of thread state for the end of the timeline. */
@@ -11,6 +13,8 @@ export interface ThreadNowItem {
   readonly icon: ReactNode;
   readonly title: ReactNode;
   readonly description?: ReactNode;
+  /** Opens from the title and detail, for state that does not fit on one line. */
+  readonly details?: ReactNode;
   readonly actions?: ReactNode;
 }
 
@@ -33,6 +37,19 @@ function ThreadNowLine({
   /** Announces the line when it appears; only for something that needs the user. */
   readonly announce?: boolean;
 }) {
+  const text = (
+    <>
+      {item.title}
+      {item.description ? (
+        <>
+          {" "}
+          <span className="ms-0.5 text-muted-foreground/60 light:text-muted-foreground/80">
+            {item.description}
+          </span>
+        </>
+      ) : null}
+    </>
+  );
   return (
     <div
       role={announce ? "alert" : undefined}
@@ -44,22 +61,40 @@ function ThreadNowLine({
       </span>
       {/* Title and detail read as one line that gives way before the actions, so Stop stays
           reachable; when it is cut, its details button shows all of it. */}
-      <NoticeText
-        detailsLabel={
-          typeof item.title === "string" ? `Show details: ${item.title}` : "Show details"
-        }
-        className="min-w-0 truncate"
-      >
-        {item.title}
-        {item.description ? (
-          <>
-            {" "}
-            <span className="ms-0.5 text-muted-foreground/60 light:text-muted-foreground/80">
-              {item.description}
-            </span>
-          </>
-        ) : null}
-      </NoticeText>
+      {item.details ? (
+        <Popover>
+          <PopoverTrigger
+            openOnHover
+            render={
+              <button
+                type="button"
+                className="min-w-0 cursor-pointer truncate text-start hover:text-foreground"
+              />
+            }
+          >
+            {text}
+          </PopoverTrigger>
+          <PopoverPopup
+            aria-label={typeof item.title === "string" ? item.title : "Details"}
+            tooltipStyle
+            side="top"
+            className="max-w-[min(30rem,calc(100vw-2rem))] whitespace-normal wrap-anywhere"
+          >
+            <ComposerBanner.Scroll className="max-h-[min(var(--available-height),24rem,40dvh)]">
+              {item.details}
+            </ComposerBanner.Scroll>
+          </PopoverPopup>
+        </Popover>
+      ) : (
+        <NoticeText
+          detailsLabel={
+            typeof item.title === "string" ? `Show details: ${item.title}` : "Show details"
+          }
+          className="min-w-0 truncate"
+        >
+          {text}
+        </NoticeText>
+      )}
       {item.actions ? (
         <span className="ms-1.5 flex shrink-0 items-center gap-2.5">{item.actions}</span>
       ) : null}
@@ -78,18 +113,20 @@ function ThreadSyncLine({ phase }: { readonly phase: ThreadSyncPhase }) {
 
 /**
  * What the thread is doing now, at the end of the timeline: what needs you, background work,
- * the sync status while messages load, then the goal.
+ * the sync status while messages load, then the agent's tasks and goal.
  */
 export function ThreadNow({
   attention,
   work,
   syncPhase,
+  tasks,
   goal,
 }: {
   /** Something that needs you elsewhere, such as a subagent's question. */
   readonly attention: ThreadNowItem | null;
   readonly work: ThreadNowItem | null;
   readonly syncPhase: ThreadSyncPhase | null;
+  readonly tasks: ThreadNowItem | null;
   readonly goal: ThreadNowItem | null;
 }): ReactNode {
   return (
@@ -97,6 +134,7 @@ export function ThreadNow({
       {attention ? <ThreadNowLine item={attention} announce /> : null}
       {work ? <ThreadNowLine item={work} /> : null}
       {syncPhase ? <ThreadSyncLine phase={syncPhase} /> : null}
+      {tasks ? <ThreadNowLine item={tasks} /> : null}
       {goal ? <ThreadNowLine item={goal} /> : null}
     </>
   );
