@@ -104,6 +104,15 @@
         { "range": ">=0.0.13", "status": "supported" },
         { "range": "<0.0.13", "status": "unsupported" }
       ]
+    },
+    {
+      "driver": "droid",
+      "t3CodeRange": ">=0.0.46",
+      "recommendedRange": ">=0.244.0",
+      "ranges": [
+        { "range": ">=0.244.0", "status": "supported" },
+        { "range": "<0.244.0", "status": "unknown" }
+      ]
     }
   ],
   "currentModels": {

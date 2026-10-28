@@ -217,12 +217,14 @@ describe("V2 session presentation", () => {
         updatedAt: "2026-06-20T00:00:02.000Z",
       },
     ];
-    const timelineEntries: TimelineEntry[] = messages.map((message): TimelineEntry => ({
-      id: message.id,
-      kind: "message",
-      createdAt: message.createdAt,
-      message,
-    }));
+    const timelineEntries: TimelineEntry[] = messages.map(
+      (message): TimelineEntry => ({
+        id: message.id,
+        kind: "message",
+        createdAt: message.createdAt,
+        message,
+      }),
+    );
 
     const targets = deriveRevertTurnCountByUserMessageId({
       timelineEntries,
