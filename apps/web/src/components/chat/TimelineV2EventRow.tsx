@@ -35,7 +35,6 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
     return (
       <LinkRequestCard
         environmentId={ctx.activeThreadEnvironmentId}
-        rowId={row.id}
         item={item}
         visibility={visibility}
       />
@@ -44,6 +43,7 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
   return (
     <V2LifecycleRow
       environmentId={ctx.activeThreadEnvironmentId}
+      rowId={row.id}
       item={item}
       resourceSummary={row.resourceSummary}
       runs={ctx.runs}
