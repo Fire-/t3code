@@ -2,9 +2,13 @@ import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
-import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
+import { NodeId, ProviderSessionId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  orchestrationV2UserWaitMs,
+  orchestrationV2UserWaits,
+  orchestrationV2WorkClock,
+  type OrchestrationV2RuntimeRequest,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
@@ -628,5 +632,63 @@ describe("latestProviderTurnForAttempt", () => {
     ];
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
+  });
+});
+
+describe("work clock", () => {
+  const at = (minutes: number) => DateTime.add(now, { minutes });
+  const request = (
+    kind: OrchestrationV2RuntimeRequest["kind"],
+    createdAt: DateTime.Utc,
+    resolvedAt: DateTime.Utc | null,
+    responseCapability: OrchestrationV2RuntimeRequest["responseCapability"] = {
+      type: "live",
+      providerSessionId: ProviderSessionId.make("session-1"),
+    },
+  ) => ({
+    kind,
+    status: resolvedAt === null ? ("pending" as const) : ("resolved" as const),
+    responseCapability,
+    createdAt,
+    resolvedAt,
+  });
+  const minutes = (ms: number) => ms / 60_000;
+
+  it("counts only the requests that stop the agent until the user answers", () => {
+    const waits = orchestrationV2UserWaits([
+      request("command", at(10), at(20)),
+      request("user_input", at(30), at(40)),
+      request("user_input", at(50), at(60), { type: "message" }),
+      request("dynamic_tool_call", at(70), at(80)),
+      request("auth_refresh", at(90), at(100)),
+      { ...request("permission", at(110), null), status: "expired" as const },
+    ]);
+    expect(minutes(orchestrationV2UserWaitMs(waits, now, at(200)))).toBe(20);
+  });
+
+  it("clips waits to the window and counts overlapping waits once", () => {
+    const waits = orchestrationV2UserWaits([
+      request("command", at(-10), at(10)),
+      request("user_input", at(20), at(40)),
+      request("permission", at(30), at(50)),
+      request("user_input", at(90), null),
+    ]);
+    expect(minutes(orchestrationV2UserWaitMs(waits, now, at(100)))).toBe(10 + 30 + 10);
+  });
+
+  it("moves the start past answered waits and pauses on an open one", () => {
+    const answered = [request("user_input", at(5), at(905))];
+    expect(orchestrationV2WorkClock(now, orchestrationV2UserWaits(answered))).toEqual({
+      startedAt: at(900),
+      pausedAt: null,
+    });
+    const open = [...answered, request("command", at(920), null)];
+    expect(orchestrationV2WorkClock(now, orchestrationV2UserWaits(open))).toEqual({
+      startedAt: at(900),
+      pausedAt: at(920),
+    });
+    expect(orchestrationV2WorkClock(now, [])).toEqual({ startedAt: now, pausedAt: null });
+    const stale = orchestrationV2UserWaits([request("permission", at(-30), null)]);
+    expect(orchestrationV2WorkClock(now, stale)).toEqual({ startedAt: now, pausedAt: null });
   });
 });

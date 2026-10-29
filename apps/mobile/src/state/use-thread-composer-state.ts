@@ -19,6 +19,7 @@ import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
+  orchestrationV2UserWaits,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   type EnvironmentId,
   type ModelSelection,
@@ -368,6 +369,9 @@ export function useThreadComposerState() {
     );
   })();
   const runlessWorkActive = runlessWorkStartedAt !== null;
+  const userWaits = orchestrationV2UserWaits(
+    selectedThreadProjection?.projection.runtimeRequests ?? [],
+  );
 
   const providerSubagentStatus = selectedThreadProjection
     ? deriveProviderSubagentStatus(selectedThreadProjection.projection)
@@ -730,6 +734,7 @@ export function useThreadComposerState() {
     dispatchingQueuedMessageId,
     activeWorkStartedAt,
     runlessWorkActive,
+    userWaits,
     providerSubagentStatus,
     isCompacting,
     composerDraftKey,

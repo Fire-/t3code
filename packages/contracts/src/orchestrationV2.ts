@@ -1199,6 +1199,85 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
 });
 export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest.Type;
 
+export interface OrchestrationV2UserWait {
+  readonly startedAt: DateTime.Utc;
+  /** Null while the user still owes an answer. */
+  readonly endedAt: DateTime.Utc | null;
+}
+
+/** Requests that stop the agent until the user answers; async questions and server-run calls don't. */
+export function orchestrationV2UserWaits(
+  requests: ReadonlyArray<
+    Pick<
+      OrchestrationV2RuntimeRequest,
+      "kind" | "status" | "responseCapability" | "createdAt" | "resolvedAt"
+    >
+  >,
+): ReadonlyArray<OrchestrationV2UserWait> {
+  return requests.flatMap((request): ReadonlyArray<OrchestrationV2UserWait> => {
+    if (
+      request.kind === "dynamic_tool_call" ||
+      request.kind === "auth_refresh" ||
+      request.responseCapability.type === "message"
+    ) {
+      return [];
+    }
+    if (request.status === "pending") return [{ startedAt: request.createdAt, endedAt: null }];
+    return request.resolvedAt === null
+      ? []
+      : [{ startedAt: request.createdAt, endedAt: request.resolvedAt }];
+  });
+}
+
+/** Time inside `[from, to]` spent waiting on the user, counting overlapping waits once. */
+export function orchestrationV2UserWaitMs(
+  waits: ReadonlyArray<OrchestrationV2UserWait>,
+  from: DateTime.Utc,
+  to: DateTime.Utc,
+): number {
+  const fromMs = DateTime.toEpochMillis(from);
+  const toMs = DateTime.toEpochMillis(to);
+  const spans = waits
+    .map((wait) => ({
+      start: Math.max(fromMs, DateTime.toEpochMillis(wait.startedAt)),
+      end: Math.min(toMs, wait.endedAt === null ? toMs : DateTime.toEpochMillis(wait.endedAt)),
+    }))
+    .filter((span) => span.start < span.end)
+    .toSorted((left, right) => left.start - right.start);
+  let total = 0;
+  let coveredUntil = fromMs;
+  for (const span of spans) {
+    total += Math.max(0, span.end - Math.max(span.start, coveredUntil));
+    coveredUntil = Math.max(coveredUntil, span.end);
+  }
+  return total;
+}
+
+/**
+ * A work timer that skips time spent waiting on the user: `startedAt` moves past answered waits,
+ * and `pausedAt` holds the clock while a wait is still open.
+ */
+export function orchestrationV2WorkClock(
+  startedAt: DateTime.Utc,
+  waits: ReadonlyArray<OrchestrationV2UserWait>,
+): { readonly startedAt: DateTime.Utc; readonly pausedAt: DateTime.Utc | null } {
+  // An open wait from before this work started belongs to older work, not this clock.
+  const ownWaits = waits.filter(
+    (wait) => wait.endedAt !== null || !DateTime.isLessThan(wait.startedAt, startedAt),
+  );
+  let pausedAt: DateTime.Utc | null = null;
+  let lastEnd = startedAt;
+  for (const wait of ownWaits) {
+    if (wait.endedAt === null) {
+      pausedAt = pausedAt === null ? wait.startedAt : DateTime.min(pausedAt, wait.startedAt);
+    } else {
+      lastEnd = DateTime.max(lastEnd, wait.endedAt);
+    }
+  }
+  const waitedMs = orchestrationV2UserWaitMs(ownWaits, startedAt, pausedAt ?? lastEnd);
+  return { startedAt: DateTime.add(startedAt, { milliseconds: waitedMs }), pausedAt };
+}
+
 const SubagentNotificationSource = Schema.Struct({
   kind: Schema.Literal("subagent"),
   childThreadId: Schema.optional(ThreadId),
@@ -2044,7 +2123,10 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStopRequested: Schema.optional(Schema.Boolean),
   activeRunId: Schema.NullOr(RunId),
+  /** The work clock's start, moved past answered waits on the user (orchestrationV2WorkClock). */
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** When the work clock stopped for an open wait on the user. Absent from older servers. */
+  activityRunPausedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activityRunStatus: Schema.optional(
     Schema.NullOr(Schema.Literals(["preparing", "starting", "running", "waiting"])),
   ),
@@ -2650,6 +2732,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  activityRunPausedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummaryJson),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),

@@ -16,6 +16,8 @@ import {
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ThreadProjection,
   orchestrationV2RunWorkStartedAt,
+  orchestrationV2UserWaits,
+  orchestrationV2WorkClock,
   type ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -251,6 +253,13 @@ export function deriveThreadStructureRuntime(
   }
   const activeRunId =
     latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status))?.id ?? null;
+  const activityClock =
+    liveActivityRun === null
+      ? null
+      : orchestrationV2WorkClock(
+          orchestrationV2RunWorkStartedAt(liveActivityRun),
+          orchestrationV2UserWaits(projection.runtimeRequests),
+        );
   return {
     status: usageLimitedRun
       ? "failed"
@@ -258,10 +267,9 @@ export function deriveThreadStructureRuntime(
         ? "idle"
         : (activityRun?.status ?? "idle"),
     activeRunId,
-    activityStartedAt:
-      liveActivityRun === null
-        ? null
-        : DateTime.formatIso(orchestrationV2RunWorkStartedAt(liveActivityRun)),
+    activityStartedAt: activityClock === null ? null : DateTime.formatIso(activityClock.startedAt),
+    activityPausedAt:
+      activityClock?.pausedAt == null ? null : DateTime.formatIso(activityClock.pausedAt),
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
     ...threadErrorSummary(
