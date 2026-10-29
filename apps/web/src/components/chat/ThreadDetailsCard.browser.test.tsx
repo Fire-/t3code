@@ -155,6 +155,7 @@ it("reopens after a normal close", async () => {
 
 it("returns to full density when hidden items make the content fit", async () => {
   using fixture = setup();
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", true);
   await using screen = await render(<Card threadRef={threadB} inline fixture={fixture} rows={6} />);
   const card = page.getByRole("region", { name: "Thread details" });
   await expect.element(card).toHaveAttribute("data-density", "compact");
