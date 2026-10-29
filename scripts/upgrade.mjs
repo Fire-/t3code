@@ -1477,7 +1477,7 @@ function retire([name, ...args]) {
           git(MAIN, "diff", "--quiet", gitOk(MAIN, "merge-base", c, "origin/main"), c).code !== 0,
       ) ?? tip;
   const base = gitOk(MAIN, "merge-base", archive, "origin/main");
-  const tag = `retired/${overlayName(b)}`;
+  const tag = `retired/${b}`;
   if (git(MAIN, "rev-parse", "-q", "--verify", `refs/tags/${tag}`).code === 0)
     die(`Tag ${tag} already exists.`);
   gitOk(

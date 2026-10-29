@@ -76,7 +76,7 @@ fire, or an agent on fire's behalf, leaves work for the next run without waking 
 
 Handle each request after `plan`, by the same rules as the rest of the run: anything you are unsure about, block and escalate. Close each one with `done <id> --note "<what you did>"` or `decline <id> --note "<why not>"`; `publish` refuses while one is open. If upstream had no commits and no request changed an overlay, there is nothing to build: once every request is closed, `abandon "only requests; nothing to build"`.
 
-To retire an overlay a request names: `retire <overlay> --note "<request id and who approved it>"`. It tags the overlay as `retired/<name>` at its last commit that still changed something, so the tag shows the change on the upstream it last applied to, and deletes the local branch. Then `rebuild` and the rest of the run as usual; `publish` pushes the tag and a `retired/<name>` branch to `fork` and deletes `fork`'s `overlay/<name>`.
+To retire an overlay a request names: `retire <overlay> --note "<request id and who approved it>"`. It tags the overlay as `retired/overlay/<name>` at its last commit that still changed something, so the tag shows the change on the upstream it last applied to, and deletes the local branch. Then `rebuild` and the rest of the run as usual; `publish` pushes the tag and a `retired/overlay/<name>` branch to `fork` and deletes `fork`'s `overlay/<name>`.
 
 ## Blocking and escalating
 

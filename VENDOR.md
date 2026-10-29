@@ -96,7 +96,7 @@ Never force-push an `overlay/*` branch.
 
 An overlay upstream has absorbed is retired, never just deleted:
 `node scripts/upgrade.mjs retire` (see UPGRADING.md) keeps it as a
-`retired/<name>` tag and `fork` branch at its last commit that still changed
+`retired/overlay/<name>` tag and `fork` branch at its last commit that still changed
 something.
 
 ## Runtime (~/.t3/code)
