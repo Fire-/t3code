@@ -94,6 +94,11 @@ it never fast-forwards; the pushed copy is also the only remote record of the
 merge conflict resolutions, since rerere's cache stays local.
 Never force-push an `overlay/*` branch.
 
+An overlay upstream has absorbed is retired, never just deleted:
+`node scripts/upgrade.mjs retire` (see UPGRADING.md) keeps it as a
+`retired/<name>` tag and `fork` branch at its last commit that still changed
+something.
+
 ## Runtime (~/.t3/code)
 
 The installed runtime lives outside the vendor dir and survives

@@ -96,6 +96,15 @@ function save(state) {
   fs.writeFileSync(path.join(runDir(state.id), "report.md"), renderReport(state));
 }
 
+// Requests wait here for the next run, which takes them over and must close each one.
+const inboxFile = path.join(UPGRADES, "inbox.json");
+const readInbox = () => readJson(inboxFile) ?? { next: 1, requests: [] };
+function writeInbox(inbox) {
+  fs.mkdirSync(UPGRADES, { recursive: true });
+  fs.writeFileSync(inboxFile, `${JSON.stringify(inbox, null, 2)}\n`);
+}
+const requestId = (id) => Number(String(id ?? "").replace(/^#/, ""));
+
 function requireRun(...statuses) {
   const state = loadRun();
   if (!state) die("No upgrade run. Start one with: preflight");
@@ -157,11 +166,16 @@ function renderReport(s) {
     `Upstream: ${short(s.upstream.before)} -> ${short(s.upstream.after)} (${s.upstream.commits} commits).`,
     `local before: ${short(s.local.before)}; fork/local before: ${short(s.local.forkBefore)}.`,
     "",
-    "## Steps",
-    "",
-    "| step | status | at | detail |",
-    "|---|---|---|---|",
   ];
+  if (s.requests?.length) {
+    lines.push("## Requests", "");
+    for (const r of s.requests) {
+      lines.push(`- #${r.id} **${r.status}** (asked ${r.at}): ${r.text.replaceAll("\n", "\n  ")}`);
+      if (r.outcome) lines.push(`  - ${r.outcome.replaceAll("\n", "\n    ")}`);
+    }
+    lines.push("");
+  }
+  lines.push("## Steps", "", "| step | status | at | detail |", "|---|---|---|---|");
   for (const [name, st] of Object.entries(s.steps)) {
     const detail = [
       st.note,
@@ -187,6 +201,11 @@ function renderReport(s) {
       : "-";
     lines.push(
       `| ${b} | ${o.status} | ${o.conflicts?.join(", ") || "-"} | ${o.fixes?.length ?? "-"} | ${intent} | ${o.check?.status ?? "-"} |`,
+    );
+  }
+  for (const [b, r] of Object.entries(s.retired ?? {})) {
+    lines.push(
+      `| ${b} | retired: ${r.tag} at ${short(r.archive)}, its last change, on origin/main ${short(r.base)} | - | - | - | - |`,
     );
   }
   if (s.risks) {
@@ -419,7 +438,8 @@ async function preflight(args) {
   gitOk(MAIN, "fetch", "--quiet", FORK);
   const overlays = listOverlays();
   const behind = overlays.filter((b) => !isAncestor("origin/main", b));
-  if (!behind.length && isAncestor("origin/main", "local")) {
+  const inbox = readInbox();
+  if (!behind.length && isAncestor("origin/main", "local") && !inbox.requests.length) {
     console.log(
       `Up to date: every overlay and local contain origin/main (${short(rev("origin/main"))}).`,
     );
@@ -446,6 +466,7 @@ async function preflight(args) {
     deployedBefore: readJson(path.join(RUNTIME, "dist/current/build-info.json")),
     daemon: { running: daemon.running, listening: daemon.listening },
     overlays: Object.fromEntries(overlays.map((b) => [b, { status: "pending" }])),
+    requests: inbox.requests.map((r) => ({ ...r, status: "open" })),
     steps: {},
     notes: [],
   };
@@ -458,13 +479,18 @@ async function preflight(args) {
   }
   save(state);
   fs.writeFileSync(currentFile, `${id}\n`);
+  writeInbox({ ...inbox, requests: [] });
   record(state, "preflight", "ok", {
-    note: `${state.upstream.commits} upstream commits; ${behind.length}/${overlays.length} overlays behind; daemon ${daemon.running ? "running" : "NOT running"}`,
+    note: `${state.upstream.commits} upstream commits; ${behind.length}/${overlays.length} overlays behind; ${state.requests.length} requests; daemon ${daemon.running ? "running" : "NOT running"}`,
   });
   pruneOldRuns(id);
   console.log(
     `Run ${id}: ${state.upstream.commits} new upstream commits, ${behind.length} of ${overlays.length} overlays behind.`,
   );
+  if (state.requests.length)
+    console.log(
+      `Requests for this run (close each with done or decline):\n${state.requests.map((r) => `- #${r.id}: ${r.text}`).join("\n")}`,
+    );
   if (!daemon.running || !daemon.listening)
     console.log(`WARNING: daemon not healthy:\n${daemon.text}`);
   console.log(`Report: ${path.join(runDir(id), "report.md")}\nNext: plan`);
@@ -1147,6 +1173,9 @@ function publish() {
     if (isFlagged(o) && s !== "ok" && s !== "accepted")
       die(`${b} is flagged and needs a check: check ${b}`);
   }
+  const open = (state.requests ?? []).filter((r) => r.status === "open");
+  if (open.length)
+    die(`Close each request first with done or decline: ${open.map((r) => `#${r.id}`).join(", ")}`);
   const overlays = listOverlays();
   const behind = overlays.filter((b) => !isAncestor("origin/main", b));
   if (behind.length) die(`Overlays behind origin/main: ${behind.join(", ")}`);
@@ -1171,19 +1200,61 @@ function publish() {
     });
     die(`Pushing local failed; see ${pushLocal.log}\n${tail(pushLocal.log, 20)}`);
   }
+  const retired = Object.entries(state.retired ?? {});
+  if (retired.length) {
+    const onFork = gitOk(MAIN, "ls-remote", FORK, ...retired.map(([b]) => `refs/heads/${b}`));
+    const toDelete = retired.filter(([b]) => onFork.includes(`\trefs/heads/${b}`));
+    const unknown = toDelete.filter(([, r]) => !r.forkTip).map(([b]) => b);
+    if (unknown.length)
+      die(`${unknown.join(", ")} appeared on ${FORK} after preflight; leave it for fire.`);
+    // The lease deletes fork's overlay branch only if it is still the one retire archived.
+    const pushRetired = logged(state, "publish", MAIN, "git", [
+      "push",
+      "--atomic",
+      ...toDelete.map(([b, r]) => `--force-with-lease=refs/heads/${b}:${r.forkTip}`),
+      FORK,
+      ...retired.flatMap(([, r]) => [`refs/tags/${r.tag}`, `${r.archive}:refs/heads/${r.tag}`]),
+      ...toDelete.map(([b]) => `:refs/heads/${b}`),
+    ]);
+    if (pushRetired.code !== 0) {
+      record(state, "publish", "failed", {
+        log: pushRetired.log,
+        note: "pushing retired overlays failed",
+      });
+      die(`Pushing retired overlays failed; see ${pushRetired.log}\n${tail(pushRetired.log, 20)}`);
+    }
+  }
   const remote = new Map(
-    gitOk(MAIN, "ls-remote", FORK, "refs/heads/local", "refs/heads/overlay/*")
+    gitOk(
+      MAIN,
+      "ls-remote",
+      FORK,
+      "refs/heads/local",
+      "refs/heads/overlay/*",
+      "refs/heads/retired/*",
+      "refs/tags/retired/*",
+    )
       .split("\n")
+      .filter(Boolean)
       .map((l) => l.split("\t"))
-      .map(([sha, ref]) => [ref.replace("refs/heads/", ""), sha]),
+      .map(([sha, ref]) => [ref, sha]),
   );
-  const mismatched = [...overlays, "local"].filter((b) => remote.get(b) !== rev(b));
+  const mismatched = [...overlays, "local"].filter((b) => remote.get(`refs/heads/${b}`) !== rev(b));
+  for (const [b, r] of retired) {
+    if (remote.has(`refs/heads/${b}`)) mismatched.push(`${b} (still there)`);
+    if (remote.get(`refs/heads/${r.tag}`) !== r.archive) mismatched.push(`branch ${r.tag}`);
+    if (remote.get(`refs/tags/${r.tag}^{}`) !== r.archive) mismatched.push(`tag ${r.tag}`);
+  }
   if (mismatched.length) {
     record(state, "publish", "failed", { note: `fork does not match: ${mismatched.join(", ")}` });
     die(`Fork does not match after push: ${mismatched.join(", ")}`);
   }
-  record(state, "publish", "ok", { log: pushLocal.log, note: `fork/local ${short(rev("local"))}` });
-  console.log(`Pushed ${overlays.length} overlays and local. Next: deploy`);
+  const retiredNote = retired.length ? `; retired ${retired.map(([b]) => b).join(", ")}` : "";
+  record(state, "publish", "ok", {
+    log: pushLocal.log,
+    note: `fork/local ${short(rev("local"))}${retiredNote}`,
+  });
+  console.log(`Pushed ${overlays.length} overlays and local${retiredNote}. Next: deploy`);
 }
 
 function deploy() {
@@ -1316,9 +1387,117 @@ function abandon(rest) {
   if (state.rehearsal?.pid && pidAlive(state.rehearsal.pid))
     die("Stop the rehearsal server first: rehearse-stop");
   state.notes.push({ at: now(), subject: "abandon", text: why });
+  if (state.steps.publish?.status !== "ok") {
+    for (const [b, r] of Object.entries(state.retired ?? {})) {
+      const restored = git(MAIN, "branch", b, r.tip);
+      git(MAIN, "tag", "-d", r.tag);
+      state.notes.push({
+        at: now(),
+        subject: `retire ${b}`,
+        text:
+          restored.code === 0
+            ? "undone: the run ended before publishing it"
+            : `could not restore the branch: ${restored.err}`,
+      });
+    }
+  }
+  const open = (state.requests ?? []).filter((r) => r.status === "open");
+  if (open.length) {
+    const inbox = readInbox();
+    writeInbox({
+      ...inbox,
+      requests: [...open.map(({ status: _, ...r }) => r), ...inbox.requests],
+    });
+    for (const r of open) r.status = "returned to the inbox";
+  }
   state.status = "abandoned";
   save(state);
-  console.log(`Run ${state.id} abandoned.`);
+  console.log(
+    `Run ${state.id} abandoned.${open.length ? ` ${open.length} open request(s) went back to the inbox.` : ""}`,
+  );
+}
+
+// ---------------------------------------------------------------- requests
+
+function ask(args) {
+  const inbox = readInbox();
+  const text = noteText(args, { bareWords: true });
+  if (!text) {
+    if (!inbox.requests.length) return console.log("The inbox is empty.");
+    for (const r of inbox.requests) console.log(`#${r.id} (${r.at}): ${r.text}`);
+    return;
+  }
+  const request = { id: inbox.next, at: now(), text };
+  writeInbox({ next: inbox.next + 1, requests: [...inbox.requests, request] });
+  console.log(`Request #${request.id} waits for the next run.`);
+}
+
+function unask([id]) {
+  const inbox = readInbox();
+  const kept = inbox.requests.filter((r) => r.id !== requestId(id));
+  if (kept.length === inbox.requests.length)
+    die(`No request #${requestId(id)} in the inbox. A run that took it over closes it.`);
+  writeInbox({ ...inbox, requests: kept });
+  console.log(`Removed request #${requestId(id)}.`);
+}
+
+function closeRequest(status, [id, ...rest]) {
+  const state = requireRun("running");
+  const r = state.requests?.find((x) => x.id === requestId(id));
+  if (!r) die(`Run ${state.id} has no request #${requestId(id)}.`);
+  const outcome = noteText(rest);
+  if (!outcome)
+    die(`A note is required: ${status === "done" ? "done" : "decline"} <id> --note "<...>"`);
+  Object.assign(r, { status, outcome, closedAt: now() });
+  save(state);
+  console.log(`Request #${r.id} ${status}.`);
+}
+
+// Archives the overlay at its newest commit that still changed something, so the retired ref
+// shows the change on the upstream it last applied to, not the empty tip upstream absorbed.
+function retire([name, ...args]) {
+  const state = requireRun("running");
+  requireSteps(state, "plan");
+  const note = noteText(args);
+  if (!name || !note) die('Usage: retire <overlay> --note "<the request and who approved it>"');
+  const b = name.startsWith("overlay/") ? name : `overlay/${name}`;
+  if (!listOverlays().includes(b)) die(`No branch ${b}.`);
+  const holder = worktreesByBranch().get(b);
+  if (holder) die(`${b} is checked out in ${holder}; leave it for fire.`);
+  const tip = rev(b);
+  const forkTip = git(MAIN, "rev-parse", "-q", "--verify", `refs/remotes/${FORK}/${b}`).out || null;
+  if (forkTip && !isAncestor(forkTip, tip))
+    die(`${FORK}/${b} has commits ${b} does not; leave it for fire.`);
+  const archive =
+    gitOk(MAIN, "rev-list", "--topo-order", b, "^origin/main")
+      .split("\n")
+      .filter(Boolean)
+      .find(
+        (c) =>
+          git(MAIN, "diff", "--quiet", gitOk(MAIN, "merge-base", c, "origin/main"), c).code !== 0,
+      ) ?? tip;
+  const base = gitOk(MAIN, "merge-base", archive, "origin/main");
+  const tag = `retired/${overlayName(b)}`;
+  if (git(MAIN, "rev-parse", "-q", "--verify", `refs/tags/${tag}`).code === 0)
+    die(`Tag ${tag} already exists.`);
+  gitOk(
+    MAIN,
+    "tag",
+    "-a",
+    tag,
+    archive,
+    "-m",
+    `Retired ${b}: ${note}\n\nIts last change, on origin/main ${short(base)}. Branch tip at retirement: ${short(tip)} (upgrade run ${state.id}).`,
+  );
+  gitOk(MAIN, "branch", "-D", b);
+  state.retired = { ...state.retired, [b]: { tag, archive, base, tip, forkTip, at: now() } };
+  delete state.overlays[b];
+  state.notes.push({ at: now(), subject: `retire ${b}`, text: note });
+  invalidate(state, "rebuild", "check-local", "rehearse", "ui", "publish");
+  save(state);
+  console.log(
+    `Retired ${b} as tag ${tag} at ${short(archive)} (its last change, on origin/main ${short(base)}).\npublish pushes the tag and a ${tag} branch to ${FORK} and deletes ${FORK}'s ${b}.`,
+  );
 }
 
 function unblock(rest) {
@@ -1334,8 +1513,16 @@ function unblock(rest) {
 
 function status() {
   const state = loadRun();
-  if (!state) return console.log("No upgrade run yet.");
-  console.log(fs.readFileSync(path.join(runDir(state.id), "report.md"), "utf8"));
+  console.log(
+    state
+      ? fs.readFileSync(path.join(runDir(state.id), "report.md"), "utf8")
+      : "No upgrade run yet.",
+  );
+  const { requests } = readInbox();
+  if (requests.length)
+    console.log(
+      `Inbox for the next run:\n${requests.map((r) => `- #${r.id}: ${r.text}`).join("\n")}`,
+    );
 }
 
 const steps = {
@@ -1362,6 +1549,11 @@ const steps = {
   unblock,
   abandon,
   status,
+  ask,
+  unask,
+  done: (args) => closeRequest("done", args),
+  decline: (args) => closeRequest("declined", args),
+  retire,
 };
 
 const [name, ...args] = process.argv.slice(2);

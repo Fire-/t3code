@@ -12,13 +12,13 @@ Each step records its outcome in `~/.t3/code/upgrades/<run>/state.json` and rewr
 
 ## The run
 
-1. `preflight`. Confirms the previous deploy went live, checks that no worktree has uncommitted changes, and fetches. Exit codes:
-   - `10`: up to date. Reply "t3code is up to date" and stop.
+1. `preflight`. Confirms the previous deploy went live, checks that no worktree has uncommitted changes, fetches, and takes over the requests waiting in the inbox (see [Requests](#requests)). Exit codes:
+   - `10`: up to date and no requests. Reply "t3code is up to date" and stop.
    - `3`: the run is blocked. If it was already escalated, say it is still waiting and stop. Otherwise escalate.
    - `4`: a run is in progress. It is this thread's own unfinished run: `preflight --resume`, then continue from the first step that has not passed.
    - `5`: the previous deploy is not live yet, usually because T3 has not been idle. It lists the busy threads; one waiting on a question stays busy until someone answers it. Stop, and name any thread other than this one in your reply. Escalate if it is more than 20 hours old.
    - `1`: something is in the way, such as uncommitted changes in a worktree. Report it and stop. Never clean, stash, or commit other people's work.
-2. `plan`. Tags every overlay and `local` (`ember-backup/<run>/<name>-pre-upgrade`), predicts conflicts, and flags upstream risks: new migrations, toolchain changes, lockfile and external-package changes, and files both upstream and an overlay changed. A toolchain change: see [Toolchain](#toolchain).
+2. `plan`. Tags every overlay and `local` (`ember-backup/<run>/<name>-pre-upgrade`), predicts conflicts, and flags upstream risks: new migrations, toolchain changes, lockfile and external-package changes, and files both upstream and an overlay changed. A toolchain change: see [Toolchain](#toolchain). If the report lists requests, handle them now: see [Requests](#requests).
 3. `sync`. Re-overlays every overlay that merges cleanly. Exit `2` lists the ones that conflict.
 4. For each conflicting overlay: `resolve <overlay>`. Fix the conflicts in `~/vendor/t3code-worktrees/upgrade`, `git add` the files, and finish with `bash ~/code/git-overlay/git-overlay --continue` from that worktree. Then `resolved <overlay> --note "<what conflicted, what you kept from each side, and why>"`. Follow the [conflict rules](#conflict-rules).
 5. `intent`. Compares each overlay's change before and after the sync, ignoring line numbers. Read every intent diff it lists. A diff from upstream moving code around is fine. A diff that changes what the overlay does needs a reason. Record what you found: `note <overlay> "<text>"`.
@@ -50,7 +50,7 @@ In the upgrade worktree's merge, "ours" is upstream (`origin/main`) and "theirs"
 - Both sides changed different dependencies in a `package.json`. Keep both. If both changed the same dependency, take upstream's version unless pinning it is the overlay's purpose.
 - `pnpm-lock.yaml`: never merge it by hand. Resolve every `package.json` first, then `git checkout origin/main -- pnpm-lock.yaml`, run `pnpm install --lockfile-only` in the upgrade worktree, and `git add` the result. Its diff against `origin/main` should only add the overlay's own packages.
 - A generated file, such as a model manifest: merge both sides' entries, or rerun its generator if it has one.
-- Upstream now does what the overlay did. Take upstream's version and drop the overlay's copy. Say so in the note and in your reply, so fire can retire the overlay. Never delete a branch.
+- Upstream now does what the overlay did. Take upstream's version and drop the overlay's copy. Say so in the note and in your reply, so fire can ask for the overlay to be retired. Never delete a branch; `retire` is the only way an overlay goes, and only when a request asks for it.
 - The overlay needs a small compile fix for an upstream API change, such as a renamed import or a new required argument with an obvious value.
 
 Block and escalate when:
@@ -70,9 +70,17 @@ Overlays are merged into `local` one at a time (alphabetically), so two overlays
 
 When `plan` reports a changed `engines` or `packageManager` in `package.json`, update the pins in `.mise.toml` to match: `fix overlay/dev-infra`, edit, commit `chore(infra): track upstream's node <version>`, `fixed overlay/dev-infra --note "..."`, then `mise install` in the main checkout before `rebuild`. `deploy` regenerates the runtime shim when the node path moves. A version mise cannot install is a reason to block.
 
+## Requests
+
+fire, or an agent on fire's behalf, leaves work for the next run without waking this thread: `ask "<text>"` (or `--note-file <path>`) puts a request in `~/.t3/code/upgrades/inbox.json`. `ask` alone lists the inbox, and `unask <id>` takes one back out. The next `preflight` takes every waiting request into its run, even on a day upstream has nothing new; requests asked during a run wait for the next one.
+
+Handle each request after `plan`, by the same rules as the rest of the run: anything you are unsure about, block and escalate. Close each one with `done <id> --note "<what you did>"` or `decline <id> --note "<why not>"`; `publish` refuses while one is open. If upstream had no commits and no request changed an overlay, there is nothing to build: once every request is closed, `abandon "only requests; nothing to build"`.
+
+To retire an overlay a request names: `retire <overlay> --note "<request id and who approved it>"`. It tags the overlay as `retired/<name>` at its last commit that still changed something, so the tag shows the change on the upstream it last applied to, and deletes the local branch. Then `rebuild` and the rest of the run as usual; `publish` pushes the tag and a `retired/<name>` branch to `fork` and deletes `fork`'s `overlay/<name>`.
+
 ## Blocking and escalating
 
-`block "<reason>"` stops the run. Every later step and preflight refuses until someone runs `unblock "<who decided what>"`, or `abandon "<why>"` to drop the run. Overlays already synced stay synced either way.
+`block "<reason>"` stops the run. Every later step and preflight refuses until someone runs `unblock "<who decided what>"`, or `abandon "<why>"` to drop the run. Overlays already synced stay synced either way. `abandon` puts open requests back in the inbox and undoes any retirement not yet published.
 
 To escalate, block first, then send one message to the thread the scheduled prompt names. Include the run id, the report path, the question, the options you see, and the one you recommend. Then stop. The answer arrives as a new message in this thread: unblock with what was decided, and continue.
 
@@ -87,7 +95,8 @@ Keep it short. fire reads it on a phone.
 ```
 t3code upgrade <run>: deployed | up to date | blocked
 - upstream: <n> commits (<old>..<new>)
-- overlays: <n> clean; resolved: <names>; fixed: <names>; absorbed: <names>
+- overlays: <n> clean; resolved: <names>; fixed: <names>; absorbed: <names>; retired: <names>
+- requests: #<id> done | declined (<one line each>) | none
 - accepted failures: <step: reason> | none
 - deploy: waiting for T3 to go idle; the next run confirms it[; held by "<thread>", waiting on a question since <time>]
 - report: ~/.t3/code/upgrades/<run>/report.md
