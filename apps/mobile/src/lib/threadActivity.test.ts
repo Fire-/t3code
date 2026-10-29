@@ -16,6 +16,7 @@ import {
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2UserWait,
 } from "@t3tools/contracts";
 import { deriveThreadCheckpointSummaries } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { getReviewSectionIdForCheckpoint } from "../features/review/reviewModel";
@@ -795,6 +796,27 @@ describe("buildThreadFeed", () => {
       createdAt: "2026-06-20T00:00:01.500Z",
       label: "Worked for 2.0s",
     });
+    const cache = createThreadFeedCache();
+    const foldWithWaits = (userWaits: ReadonlyArray<OrchestrationV2UserWait>) =>
+      deriveThreadFeedPresentation(
+        feed,
+        latestRun,
+        new Set(),
+        new Set(),
+        null,
+        false,
+        cache,
+        userWaits,
+      )[1];
+    expect(foldWithWaits([])).toMatchObject({ label: "Worked for 2.0s" });
+    expect(
+      foldWithWaits([
+        {
+          startedAt: DateTime.makeUnsafe("2026-06-20T00:00:01.500Z"),
+          endedAt: DateTime.makeUnsafe("2026-06-20T00:00:02.000Z"),
+        },
+      ]),
+    ).toMatchObject({ label: "Worked for 1.5s" });
 
     const expanded = deriveThreadFeedPresentation(feed, latestRun, new Set([runId]));
     expect(expanded.map((entry) => entry.type)).toEqual([

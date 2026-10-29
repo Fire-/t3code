@@ -8,6 +8,7 @@ import {
   type GuestRedeemRequest,
   type GuestShareView,
   type GuestThreadModel,
+  orchestrationV2UserWaits,
   type OrchestrationV2ThreadProjection,
   type ThreadGuestMessage,
   type ThreadGuestMessageStatus,
@@ -453,6 +454,8 @@ function GuestThread({
             timelineEntries={entries}
             isWorking={isWorking}
             activeTurnStartedAt={workStartedAt}
+            activeTurnPausedAt={runtime?.activityPausedAt ?? null}
+            userWaits={orchestrationV2UserWaits(projection.runtimeRequests)}
             latestRun={activityRun}
             runningRunId={runningRunId}
             turnDiffSummaries={NO_TURN_DIFFS}

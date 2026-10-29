@@ -1,20 +1,22 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "../threadPullRequests.ts";
-import type {
-  ThreadLinkedPullRequest,
-  EnvironmentId,
-  MessageId,
-  OrchestrationProjectShell,
-  OrchestrationV2ProviderGoal,
-  OrchestrationV2RunStatus,
-  OrchestrationV2ProviderFailureClass,
-  OrchestrationV2ThreadProjection,
-  OrchestrationV2ThreadShell,
-  PlanId,
-  ProjectId,
-  ProviderInstanceId,
-  RunId,
-  ThreadId,
+import {
+  orchestrationV2UserWaitMs,
+  type ThreadLinkedPullRequest,
+  type EnvironmentId,
+  type MessageId,
+  type OrchestrationProjectShell,
+  type OrchestrationV2ProviderGoal,
+  type OrchestrationV2RunStatus,
+  type OrchestrationV2ProviderFailureClass,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShell,
+  type OrchestrationV2UserWait,
+  type PlanId,
+  type ProjectId,
+  type ProviderInstanceId,
+  type RunId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
@@ -99,6 +101,8 @@ export interface ThreadRuntimeSummary {
   readonly status: OrchestrationV2RunStatus | "idle";
   readonly activeRunId: RunId | null;
   readonly activityStartedAt?: string | null | undefined;
+  /** Set while the work clock waits on the user; `activityStartedAt` already skips earlier waits. */
+  readonly activityPausedAt?: string | null | undefined;
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerName: string | null;
   readonly lastError: string | null;
@@ -235,6 +239,7 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
       thread.activityRunStartedAt === undefined
         ? undefined
         : nullableIso(thread.activityRunStartedAt),
+    activityPausedAt: nullableIso(thread.activityRunPausedAt ?? null),
     providerInstanceId: thread.providerInstanceId,
     providerName: null,
     lastError: thread.lastError ?? null,
@@ -391,6 +396,24 @@ export function resolveThreadWorkingStartedAt(input: {
     return valid(run.startedAt) ?? valid(run.requestedAt);
   }
   return null;
+}
+
+/** Time between two instants the agent spent working rather than waiting on the user. */
+export function workedMsBetween(
+  startIso: string,
+  endIso: string,
+  userWaits: ReadonlyArray<OrchestrationV2UserWait>,
+): number | null {
+  const start = Date.parse(startIso);
+  const end = Date.parse(endIso);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (end <= start) return 0;
+  const waited = orchestrationV2UserWaitMs(
+    userWaits,
+    DateTime.makeUnsafe(start),
+    DateTime.makeUnsafe(end),
+  );
+  return end - start - waited;
 }
 
 export function formatWorkingDurationLabel(elapsedMs: number): string {
