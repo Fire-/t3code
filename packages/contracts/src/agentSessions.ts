@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
-export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex"]);
+export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex", "droid"]);
 export type AgentSessionSource = typeof AgentSessionSource.Type;
 
 export const AgentSessionImportSource = Schema.Struct({
@@ -17,6 +17,8 @@ export const AgentSessionImportSource = Schema.Struct({
   // records stored a number.
   inode: Schema.NullOr(Schema.Union([Schema.String, Schema.Number])),
   birthtimeMs: Schema.NullOr(Schema.Number),
+  // Which history format imported the transcript; absent means the first.
+  historyVersion: Schema.optional(NonNegativeInt),
 });
 export type AgentSessionImportSource = typeof AgentSessionImportSource.Type;
 
@@ -72,9 +74,24 @@ export class AgentSessionImportProjectChangedError extends Schema.TaggedError<Ag
   }
 }
 
+export const AgentSessionImportSkipReason = Schema.Literals([
+  "import-limit",
+  "too-large",
+  "changed",
+  "unreadable",
+  "other-folder",
+  "failed",
+]);
+export type AgentSessionImportSkipReason = typeof AgentSessionImportSkipReason.Type;
+
 export const AgentSessionImportResult = Schema.Struct({
   importedCount: NonNegativeInt,
+  // Sessions with nothing to import are not failures; they count in `emptyCount` instead.
   skippedCount: NonNegativeInt,
+  emptyCount: Schema.optional(NonNegativeInt),
+  skippedReasons: Schema.optional(
+    Schema.Array(Schema.Struct({ reason: AgentSessionImportSkipReason, count: NonNegativeInt })),
+  ),
 });
 export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
 

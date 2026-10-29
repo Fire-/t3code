@@ -119,6 +119,17 @@ export const ProviderAdapterV2Event = Schema.Union([
     driver: ProviderDriverKind,
     turnItem: OrchestrationV2TurnItem,
   }),
+  /**
+   * A steer the provider accepted but threw away before the agent read it,
+   * usually because the turn stopped first. The user's message stays in the
+   * thread, marked as not delivered.
+   */
+  Schema.Struct({
+    type: Schema.Literal("steer.discarded"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    messageId: MessageId,
+  }),
   /** Unpersisted deltas go only to clients showing the row; final output arrives in turn_item.updated. */
   Schema.Struct({
     type: Schema.Literal("command_output.delta"),
@@ -137,6 +148,18 @@ export const ProviderAdapterV2Event = Schema.Union([
     type: Schema.Literal("plan.updated"),
     driver: ProviderDriverKind,
     plan: OrchestrationV2PlanArtifact,
+  }),
+  /**
+   * The user widened the provider's own permissions from inside the session,
+   * for example by approving a request "for the rest of the session". Raises
+   * the thread's runtime mode so the next turn keeps that level; a mode at or
+   * below the thread's current one is ignored.
+   */
+  Schema.Struct({
+    type: Schema.Literal("runtime_mode.raised"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    runtimeMode: RuntimeMode,
   }),
   Schema.Struct({
     type: Schema.Literal("turn.terminal"),
@@ -597,6 +620,15 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly taskIds: ReadonlyArray<string>;
     readonly awaited: boolean;
   }) => Effect.Effect<{ readonly matched: ReadonlyArray<string> }, ProviderAdapterV2Error>;
+  /**
+   * Applies a runtime mode change to work already in flight. Without it, a
+   * session that supports in-session mode switches picks up the new mode on
+   * its next turn.
+   */
+  readonly setRuntimeMode?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly runtimeMode: RuntimeMode;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly interruptTurn: (
     input: ProviderAdapterV2InterruptInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
