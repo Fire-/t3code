@@ -50,6 +50,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2UserWait,
   type RunId,
   type ScheduledTaskId,
   type ScopedThreadRef,
@@ -346,6 +347,7 @@ export interface ThreadFeedProps {
   readonly latestRun: ThreadFeedLatestRun | null;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive?: boolean;
+  readonly userWaits?: ReadonlyArray<OrchestrationV2UserWait> | undefined;
   readonly listRef: RefObject<LegendListRef | null>;
   readonly freeze: SharedValue<boolean>;
   readonly anchorMessageId: MessageId | null;
@@ -2170,6 +2172,7 @@ function useThreadFeedPresentation(
       props.activeWorkStartedAt,
       props.runlessWorkActive ?? false,
       feedCache,
+      props.userWaits,
     ),
     props.feed,
     props.queuedMessages,
