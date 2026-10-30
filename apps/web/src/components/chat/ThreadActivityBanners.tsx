@@ -8,14 +8,19 @@ import {
   presentPendingBackgroundWork,
   presentProviderGoal,
   type RunStopPresentation,
+  type ThreadTodoListPresentation,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { childThreadInputsTitle } from "@t3tools/client-runtime/state/threads";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import * as DateTime from "effect/DateTime";
 import {
+  CheckIcon,
   CircleDashedIcon,
+  CircleDotIcon,
+  CircleIcon,
   CircleStopIcon,
   GitBranchIcon,
+  ListTodoIcon,
   MessageCircleIcon,
   ShieldQuestionIcon,
   TargetIcon,
@@ -147,6 +152,52 @@ export function runStopNowItem(input: {
     ),
   };
 }
+
+/** The agent's todo list progress, for the end of the timeline. */
+export function tasksNowItem(input: {
+  readonly threadId: ThreadId;
+  readonly todoList: ThreadTodoListPresentation;
+}): ThreadNowItem {
+  return {
+    id: `tasks:${input.threadId}`,
+    icon: <ListTodoIcon />,
+    title: input.todoList.title,
+    description: input.todoList.current ?? undefined,
+    details: (
+      <ol className="flex flex-col gap-1">
+        {input.todoList.steps.map((step) => (
+          <li key={step.id} className="flex items-start gap-1.5">
+            <span
+              aria-hidden
+              className={cn(
+                "flex h-4 shrink-0 items-center [&_svg]:size-3",
+                step.status === "completed" && "text-success",
+              )}
+            >
+              {step.status === "completed" ? (
+                <CheckIcon />
+              ) : step.status === "running" ? (
+                <CircleDotIcon />
+              ) : (
+                <CircleIcon />
+              )}
+            </span>
+            <span className={cn(step.status === "completed" && "text-muted-foreground")}>
+              <span className="sr-only">{TASK_STEP_STATUS_LABELS[step.status]}: </span>
+              {step.text}
+            </span>
+          </li>
+        ))}
+      </ol>
+    ),
+  };
+}
+
+const TASK_STEP_STATUS_LABELS = {
+  completed: "Done",
+  running: "In progress",
+  pending: "Not started",
+} as const;
 
 /** Background commands and subagents, for the end of the timeline. */
 export function backgroundWorkNowItem(input: {
