@@ -20,6 +20,7 @@ import {
 } from "../sourceControl/threadPullRequests.ts";
 import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+  canRollbackToCheckpoint,
   type ChatAttachment,
   CommandId,
   type GuestMessageId,
@@ -1156,14 +1157,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       )
       .pipe(
-        Effect.map((records): OrchestrationV2ThreadProjection => ({
-          ...records,
-          checkpoints: [],
-          plans: [],
-          contextHandoffs: [],
-          visibleTurnItems: [],
-          updatedAt: records.thread.updatedAt,
-        })),
+        Effect.map(
+          (records): OrchestrationV2ThreadProjection => ({
+            ...records,
+            checkpoints: [],
+            plans: [],
+            contextHandoffs: [],
+            visibleTurnItems: [],
+            updatedAt: records.thread.updatedAt,
+          }),
+        ),
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
       );
 
@@ -11606,7 +11609,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Checkpoint ${command.checkpointId} was not found.`,
         });
       }
-      if (targetCheckpoint.status !== "ready") {
+      if (!canRollbackToCheckpoint(targetCheckpoint.status, command.restoreFiles !== false)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
