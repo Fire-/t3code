@@ -14,6 +14,7 @@ import {
   useManagedTunnelUsage,
 } from "../../cloud/managedRelayState";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
 import { T3CHAT_SUBSCRIPTION_URL, TunnelUsageMeter, tunnelUpgradeCopy } from "../cloud/TunnelUsage";
 import { Button, InlineButton } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -223,7 +224,9 @@ export function T3ConnectUserProfilePage() {
         ? {
             secondaryActionProps: {
               children: "Copy trace ID",
-              onClick: () => void navigator.clipboard?.writeText(traceId),
+              onClick: () => {
+                void writeTextToClipboard(traceId, "trace ID").catch(() => undefined);
+              },
             },
           }
         : undefined,
