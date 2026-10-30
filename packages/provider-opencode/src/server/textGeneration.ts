@@ -207,69 +207,83 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
             cwd: input.cwd,
           });
         }
+        const sessionId = session.data.id;
         const selectedAgent = getModelSelectionStringOptionValue(input.modelSelection, "agent");
         const selectedVariant = getModelSelectionStringOptionValue(input.modelSelection, "variant");
         const promptContext = {
           operation: input.operation,
           cwd: input.cwd,
-          sessionId: session.data.id,
+          sessionId,
           providerId: parsedModel.providerID,
           modelId: parsedModel.modelID,
         };
 
-        const result = yield* Effect.tryPromise({
-          try: (signal) =>
-            client.session.prompt(
-              {
-                sessionID: session.data.id,
-                model: parsedModel,
-                ...(selectedAgent ? { agent: selectedAgent } : {}),
-                ...(selectedVariant ? { variant: selectedVariant } : {}),
-                parts: [{ type: "text", text: input.prompt }, ...fileParts],
-              },
-              { signal },
-            ),
-          catch: (cause) =>
-            new OpenCodeTextGenerationPromptRequestError({
-              ...promptContext,
-              cause,
-            }),
-        }).pipe(
-          // Disconnecting the HTTP request does not stop work in a shared or external server.
-          Effect.onInterrupt(() =>
-            OpenCodeRuntime.runOpenCodeSdk("session.abort", (signal) =>
-              client.session.abort({ sessionID: session.data.id }, { signal }),
-            ).pipe(
-              Effect.interruptible,
-              Effect.timeout("10 seconds"),
-              Effect.catch(() =>
-                Effect.logWarning(
-                  "Failed to stop cancelled OpenCode text generation.",
-                  promptContext,
-                ),
+        // The helper session exists only to satisfy session.prompt; opencode
+        // persists it in the user's session store, so delete it on every exit
+        // path (prime's --no-session is the parity point).
+        return yield* Effect.gen(function* () {
+          const result = yield* Effect.tryPromise({
+            try: (signal) =>
+              client.session.prompt(
+                {
+                  sessionID: sessionId,
+                  model: parsedModel,
+                  ...(selectedAgent ? { agent: selectedAgent } : {}),
+                  ...(selectedVariant ? { variant: selectedVariant } : {}),
+                  parts: [{ type: "text", text: input.prompt }, ...fileParts],
+                },
+                { signal },
               ),
-              Effect.asVoid,
+            catch: (cause) =>
+              new OpenCodeTextGenerationPromptRequestError({
+                ...promptContext,
+                cause,
+              }),
+          }).pipe(
+            // Disconnecting the HTTP request does not stop work in a shared or external server.
+            Effect.onInterrupt(() =>
+              OpenCodeRuntime.runOpenCodeSdk("session.abort", (signal) =>
+                client.session.abort({ sessionID: sessionId }, { signal }),
+              ).pipe(
+                Effect.interruptible,
+                Effect.timeout("10 seconds"),
+                Effect.catch(() =>
+                  Effect.logWarning(
+                    "Failed to stop cancelled OpenCode text generation.",
+                    promptContext,
+                  ),
+                ),
+                Effect.asVoid,
+              ),
             ),
+          );
+          const promptFailure = getOpenCodePromptFailure(result.data?.info?.error);
+          if (promptFailure) {
+            return yield* new OpenCodeTextGenerationPromptResponseError({
+              ...promptContext,
+              ...(promptFailure.name ? { providerErrorName: promptFailure.name } : {}),
+              providerMessage: promptFailure.message,
+            });
+          }
+          const responseParts = result.data?.parts ?? [];
+          const rawText = getOpenCodeTextResponse(responseParts);
+          if (rawText.length === 0) {
+            return yield* new OpenCodeTextGenerationEmptyOutputError({
+              ...promptContext,
+              responsePartCount: responseParts.length,
+              textPartCount: responseParts.filter(isOpenCodeTextPart).length,
+            });
+          }
+          return rawText;
+        }).pipe(
+          // Runs after the abort above, so an interrupted prompt is stopped before
+          // its session is removed. Finalizers are uninterruptible, so bound it.
+          Effect.ensuring(
+            OpenCodeRuntime.runOpenCodeSdk("session.delete", (signal) =>
+              client.session.delete({ sessionID: sessionId }, { signal }),
+            ).pipe(Effect.interruptible, Effect.timeout("10 seconds"), Effect.ignore),
           ),
         );
-        const promptFailure = getOpenCodePromptFailure(result.data?.info?.error);
-        if (promptFailure) {
-          return yield* new OpenCodeTextGenerationPromptResponseError({
-            ...promptContext,
-            ...(promptFailure.name ? { providerErrorName: promptFailure.name } : {}),
-            providerMessage: promptFailure.message,
-          });
-        }
-        const responseParts = result.data?.parts ?? [];
-        const rawText = getOpenCodeTextResponse(responseParts);
-        if (rawText.length === 0) {
-          return yield* new OpenCodeTextGenerationEmptyOutputError({
-            ...promptContext,
-            responsePartCount: responseParts.length,
-            textPartCount: responseParts.filter(isOpenCodeTextPart).length,
-          });
-        }
-        return rawText;
       },
       Effect.catchTags({
         OpenCodeTextGenerationSessionRequestError: (cause) =>
