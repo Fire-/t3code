@@ -536,7 +536,7 @@ it.layer(layerDriver)("Prime text generation from saved settings", (it) => {
           instanceId: PRIME_ID,
           displayName: entry!.displayName,
           accentColor: entry!.accentColor,
-          environment: entry!.environment ?? [],
+          environment: [],
           enabled: resolveProviderInstanceEnabled(entry!),
           config,
         }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, prime.spawner));
