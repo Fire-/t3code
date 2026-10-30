@@ -861,7 +861,7 @@ describe("buildThreadFeed", () => {
         cache,
         userWaits,
       )[1];
-    expect(foldWithWaits([])).toMatchObject({ label: "Worked for 2.0s" });
+    expect(foldWithWaits([])).toMatchObject({ label: "Worked for 2s" });
     expect(
       foldWithWaits([
         {
