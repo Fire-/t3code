@@ -150,8 +150,7 @@ export default defineConfig({
   },
   staged: {
     // In order, so lint reads the formatted file. CI lint failures cost a full round trip.
-    // vite-plus 1.4.0 rejects --no-error-on-unmatched-pattern for lint, though fmt accepts it.
-    "*": ["vp fmt --no-error-on-unmatched-pattern", "vp lint"],
+    "*": ["vp fmt --no-error-on-unmatched-pattern", "vp lint --no-error-on-unmatched-pattern"],
     // knip checks the whole repo, so it takes no file list. Any code or manifest change can leave
     // a file, export, or dependency unused.
     "{*.{js,jsx,ts,tsx,mjs,cjs,mts,cts},package.json,knip.jsonc}": () => "vp run knip:check",
