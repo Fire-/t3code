@@ -6,11 +6,12 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FiberSet from "effect/FiberSet";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import * as Console from "effect/Console";
-import * as Net from "node:net";
+import * as NodeNet from "node:net";
 
 import {
   PrimeRecorderDaemonStopError,
@@ -48,10 +49,10 @@ const shortTempDirectory = Effect.acquireRelease(
 const fakeDaemon = (socketPath: string, behavior: FakeDaemonBehavior) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+    const runPromise = yield* FiberSet.makeRuntimePromise();
     const shutdownReceived = yield* Deferred.make<string>();
-    const connections = new Set<Net.Socket>();
-    const server = Net.createServer((connection) => {
+    const connections = new Set<NodeNet.Socket>();
+    const server = NodeNet.createServer((connection) => {
       connections.add(connection);
       connection.on("close", () => connections.delete(connection));
       connection.setEncoding("utf8");

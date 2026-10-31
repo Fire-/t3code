@@ -5,7 +5,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import * as Net from "node:net";
+import * as NodeNet from "node:net";
 
 const PRIME_DAEMON_PROTOCOL_NAME = "prime-agent.daemon";
 const DEFAULT_STOP_BOUND = Duration.seconds(10);
@@ -54,7 +54,7 @@ const processAlive = (pid: number) =>
  */
 const sendDaemonShutdown = (socketPath: string, onHello: (supervisorPid: number) => void) =>
   Effect.callback<{ readonly accepted: boolean }, string>((resume) => {
-    const socket = Net.createConnection(socketPath);
+    const socket = NodeNet.createConnection(socketPath);
     let buffer = "";
     let helloSeen = false;
     let accepted = false;

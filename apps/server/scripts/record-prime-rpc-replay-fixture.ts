@@ -17,7 +17,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import * as OS from "node:os";
+import * as NodeOS from "node:os";
 
 import {
   makePrimeRecordingSpawner,
@@ -36,32 +36,25 @@ import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import { withPrimeRecorderDaemonCleanup } from "./primeRecorderDaemon.ts";
 
 /**
- * How each recordable Prime scenario launches. The fixture registration in
- * `fixtures/index.ts` owns the prompts, the model and the thread's runtime
- * mode; this table owns what the recorder adds around the binary.
- *
- * - `bridge`: keep T3's MCP bridge extension (`-e`). Only bridge and approval
- *   scenarios need it; everywhere else the recorder removes it so the user's
- *   environment cannot reach the transcript through it.
- * - `runtimeMode`: the runtime mode the fixture input must declare (the bridge
- *   gates `ipython` from it), checked before any model turn is spent.
- * - `launchArgs`: extra Prime flags such as `--autonomous-gate <command>`.
- *   They become part of the transcript's launch args, so replay passes them too.
- * - `awaitPreviousExit`: start a Prime process only after the previous one
- *   exited. Prime's daemon keeps the session lease until the old client's
- *   SIGTERM shutdown finishes, which in production ends long before the
- *   user's next message after an idle release; a fixture sends that message
- *   immediately, so without this the resume races the shutdown and records
- *   `SessionAlreadyActiveError` retries that a frozen replay clock never
- *   advances past.
- *
- * Steering and interrupt scenarios need no entry beyond `{ bridge: false }`:
- * their behaviour comes from the fixture input steps.
+ * How each recordable Prime scenario launches. `fixtures/index.ts` owns the prompts, the model and
+ * the thread's runtime mode; this table owns what the recorder adds around the binary. Steering
+ * and interrupt scenarios need only `{ bridge: false }`: the fixture input steps drive them.
  */
 interface PrimeRecordingScenario {
+  /**
+   * Keep T3's MCP bridge extension (`-e`). Only bridge and approval scenarios need it; elsewhere
+   * the recorder removes it so the user's environment cannot reach the transcript through it.
+   */
   readonly bridge: boolean;
+  /** Must match the fixture input (the bridge gates `ipython` on it), checked before any turn. */
   readonly runtimeMode?: RuntimeMode;
+  /** Extra Prime flags such as `--autonomous-gate <command>`; recorded, so replay passes them. */
   readonly launchArgs?: ReadonlyArray<string>;
+  /**
+   * Prime's daemon keeps the session lease until the old client's SIGTERM shutdown finishes. Users
+   * come back long after an idle release, but a fixture resumes at once and would record
+   * `SessionAlreadyActiveError` retries a frozen replay clock never advances past.
+   */
   readonly awaitPreviousExit?: boolean;
 }
 
@@ -129,10 +122,10 @@ if (scenario.runtimeMode !== undefined && scenario.runtimeMode !== fixtureRuntim
 
 const primeBinary = process.env.T3_PRIME_BIN ?? "prime-agent";
 const launchArgs = [...HERMETIC_LAUNCH_ARGS, ...(scenario.launchArgs ?? [])].join(" ");
-const home = OS.homedir();
-const userName = OS.userInfo().username;
-const hostName = OS.hostname();
-const systemTmpDir = OS.tmpdir().replace(/\/+$/u, "");
+const home = NodeOS.homedir();
+const userName = NodeOS.userInfo().username;
+const hostName = NodeOS.hostname();
+const systemTmpDir = NodeOS.tmpdir().replace(/\/+$/u, "");
 
 /**
  * Prime injects the user's global continual-harness memories into every new
