@@ -695,19 +695,34 @@ export const layer: Layer.Layer<
             case "plan.updated": {
               const occurredAt = yield* DateTime.now;
               const plan = input.event.plan;
-              const previous =
+              const todoLists =
                 plan.kind === "todo_list"
-                  ? yield* projections.getPlan(plan.threadId, plan.id)
-                  : undefined;
+                  ? (yield* projections.getThreadRecords(plan.threadId, ["plans"])).plans.filter(
+                      (other) => other.kind === "todo_list",
+                    )
+                  : [];
+              const previous = todoLists.find((other) => other.id === plan.id);
               const payload =
                 plan.kind === "todo_list"
-                  ? withPlanStepDurations(
-                      plan,
-                      previous?.kind === "todo_list" ? previous : undefined,
-                      occurredAt,
-                    )
+                  ? withPlanStepDurations(plan, previous, occurredAt)
                   : plan;
+              // Sessions outlive runs, so an adapter's supersede of an earlier run's list is
+              // dropped by run routing; retire those lists here instead.
+              const superseded =
+                plan.status === "superseded"
+                  ? []
+                  : todoLists.filter((other) => other.id !== plan.id && other.status === "active");
               return [
+                ...(yield* Effect.forEach(superseded, (other) =>
+                  makeDomainEvent(input, {
+                    type: "plan.updated",
+                    threadId: other.threadId,
+                    payload: { ...other, status: "superseded" },
+                    runId: other.runId,
+                    nodeId: other.nodeId,
+                    occurredAt,
+                  }),
+                )),
                 yield* makeDomainEvent(input, {
                   type: "plan.updated",
                   threadId: plan.threadId,
