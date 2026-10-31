@@ -1,6 +1,7 @@
 import { useAuth } from "@clerk/react";
 import { useAtomValue } from "@effect/atom-react";
 import type {
+  AgentSessionImportResult,
   AgentSessionProjectCandidate,
   EnvironmentId,
   ProjectId,
@@ -99,6 +100,7 @@ import { WizardPanel, WizardSteps, WizardPopup, WizardHeader } from "../ui/wizar
 import { Dialog } from "../ui/dialog";
 import { toastManager } from "../ui/toast";
 import { cn } from "../../lib/utils";
+import { summarizeImport, type ImportSummary } from "./importSummary";
 import { formatRelativeTime } from "../../timestampFormat";
 
 type WizardStep = "connection" | "agents" | "import";
@@ -162,11 +164,7 @@ export function WelcomeWizard({
     setStep("agents");
   };
   const stageIndex = step === "agents" ? 1 : step === "import" ? 2 : 0;
-  const finish = (
-    projectRef?: ScopedProjectRef,
-    importWarning?: string,
-    importedThreadCount = 0,
-  ) => {
+  const finish = (projectRef?: ScopedProjectRef, importSummary?: ImportSummary) => {
     if (finishingPromiseRef.current !== null) return finishingPromiseRef.current;
     if (completionErrorToastIdRef.current !== null) {
       toastManager.close(completionErrorToastIdRef.current);
@@ -180,17 +178,23 @@ export function WelcomeWizard({
           completionErrorToastIdRef.current = null;
         }
         await onDone(projectRef);
-        if (importWarning) {
+        const importedThreadCount = importSummary?.importedThreadCount ?? 0;
+        const importNote = importSummary?.note ?? "";
+        if (importSummary?.warning) {
           toastManager.add({
             type: "warning",
             title: "Some history was not imported",
-            description: importWarning,
+            description: importSummary.warning,
             timeout: 0,
           });
-        } else if (importedThreadCount > 0) {
+        } else if (importedThreadCount > 0 || importNote !== "") {
           toastManager.add({
-            type: "success",
-            title: `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}`,
+            type: importedThreadCount > 0 ? "success" : "info",
+            title:
+              importedThreadCount > 0
+                ? `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}`
+                : "No threads to import",
+            ...(importNote === "" ? {} : { description: importNote }),
           });
         }
         return true;
@@ -1184,8 +1188,7 @@ function ImportStep({
   readonly setIsImporting: (value: boolean) => void;
   readonly onDone: (
     projectRef?: ScopedProjectRef,
-    importWarning?: string,
-    importedThreadCount?: number,
+    importSummary?: ImportSummary,
   ) => Promise<boolean>;
 }) {
   const { environments } = useEnvironments();
@@ -1193,8 +1196,7 @@ function ImportStep({
   const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
   const importThreads = useAtomCommand(agentSessionImport, { reportFailure: false });
   const [selectedPaths, setSelectedPaths] = useState<ReadonlySet<string> | null>(null);
-  const importWarningRef = useRef("");
-  const importedThreadCountRef = useRef(0);
+  const importSummaryRef = useRef<ImportSummary | undefined>(undefined);
   const importedProjectsRef = useRef(new Map<string, ScopedProjectRef>());
   const projectsWithImportedHistoryRef = useRef(new Map<string, ScopedProjectRef>());
   const lastImportSelectionRef = useRef<ReadonlyArray<string>>([]);
@@ -1240,7 +1242,7 @@ function ImportStep({
       importedProjectsRef.current,
     );
     if (projectRef === undefined) {
-      void onDone(undefined, importWarningRef.current, importedThreadCountRef.current);
+      void onDone(undefined, importSummaryRef.current);
       return;
     }
     setIsImporting(true);
@@ -1254,11 +1256,7 @@ function ImportStep({
       )
       .then(async (landing) => {
         if (importGeneration !== importGenerationRef.current) return;
-        const completed = await onDone(
-          landing,
-          importWarningRef.current,
-          importedThreadCountRef.current,
-        );
+        const completed = await onDone(landing, importSummaryRef.current);
         if (!completed) setIsImporting(false);
       });
   };
@@ -1282,8 +1280,7 @@ function ImportStep({
       return;
     }
     setIsImporting(true);
-    importWarningRef.current = "";
-    importedThreadCountRef.current = 0;
+    importSummaryRef.current = undefined;
     lastImportSelectionRef.current = selection.map((candidate) => candidate.key);
     const importGeneration = importGenerationRef.current;
     const importedProjects = importedProjectsRef.current;
@@ -1292,8 +1289,7 @@ function ImportStep({
       importedProjects.size > 0
         ? selection.filter((candidate) => importedProjects.has(candidate.key)).length
         : 0;
-    let importedThreadCount = 0;
-    let skippedThreadCount = 0;
+    const threadImportResults: Array<AgentSessionImportResult> = [];
     const refreshEnvironments = new Set<EnvironmentId>();
     for (const candidate of selection) {
       const { environmentId } = candidate;
@@ -1361,8 +1357,7 @@ function ImportStep({
         return;
       }
       if (threadImportResult._tag === "Success") {
-        importedThreadCount += threadImportResult.value.importedCount;
-        skippedThreadCount += threadImportResult.value.skippedCount;
+        threadImportResults.push(threadImportResult.value);
         if (threadImportResult.value.importedCount > 0) {
           projectsWithImportedHistoryRef.current.set(
             candidate.key,
@@ -1382,18 +1377,10 @@ function ImportStep({
       if (refreshEnvironments.has(scan.environmentId)) scan.refresh();
     }
     setIsImporting(false);
-    importedThreadCountRef.current = importedThreadCount;
-    if (importedProjectsCount < selection.length) {
-      if (importedThreadCount > 0 && skippedThreadCount > 0) {
-        importWarningRef.current = `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}. ${skippedThreadCount} ${skippedThreadCount === 1 ? "thread" : "threads"} could not be imported.`;
-      } else if (skippedThreadCount > 0) {
-        importWarningRef.current = `${skippedThreadCount} ${skippedThreadCount === 1 ? "thread could" : "threads could"} not be imported.`;
-      } else if (importedThreadCount > 0) {
-        importWarningRef.current = `Imported ${importedThreadCount} ${importedThreadCount === 1 ? "thread" : "threads"}. Some thread history could not be imported.`;
-      } else {
-        importWarningRef.current = "Could not import thread history.";
-      }
-    }
+    importSummaryRef.current = summarizeImport(
+      threadImportResults,
+      importedProjectsCount >= selection.length,
+    );
     finishAfterImport();
   };
 
@@ -1404,7 +1391,7 @@ function ImportStep({
         <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6">
           <Spinner size="lg" tone="muted" />
           <p className="text-center text-sm text-muted-foreground">
-            Looking for projects from Claude Code and Codex…
+            Looking for projects from Claude Code, Codex, and Droid…
           </p>
         </div>
         <div className="flex justify-end">
@@ -1419,7 +1406,7 @@ function ImportStep({
   return (
     <StepShell
       title="Import your projects"
-      description="Import projects and conversations from Claude Code and Codex on your selected computers."
+      description="Import projects and conversations from Claude Code, Codex, and Droid on your selected computers."
     >
       {candidates.length > 0 ? (
         <div className="mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
@@ -1481,7 +1468,7 @@ function ImportStep({
                   </div>
                 ) : scanCandidates.length === 0 ? (
                   <p className="py-2 text-sm text-muted-foreground">
-                    No existing Claude Code or Codex projects found.
+                    No existing Claude Code, Codex, or Droid projects found.
                   </p>
                 ) : null}
                 {scan.data?.truncated ? (
@@ -1720,6 +1707,7 @@ const IMPORT_SOURCE_NAMES: Record<AgentSessionSource, string> = {
   claudeAgent: "Claude Code",
   codex: "Codex",
   pi: "Pi",
+  droid: "Droid",
 };
 
 function ImportRowMeta({
@@ -1734,7 +1722,7 @@ function ImportRowMeta({
   const relative = lastActiveAt === null ? null : formatRelativeTime(lastActiveAt);
   const age = relative === null ? "" : relative.suffix === null ? "now" : relative.value;
   return (
-    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
+    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
       {AgentSessionSource.literals.map((source) => (
         <span key={source} className="flex size-4 items-center justify-center">
           {sources?.includes(source) ? (
