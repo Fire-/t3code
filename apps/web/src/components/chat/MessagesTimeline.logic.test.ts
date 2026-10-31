@@ -10,6 +10,7 @@ import {
   RuntimeRequestId,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2UserWait,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import {
@@ -1241,34 +1242,44 @@ describe("deriveMessagesTimelineRows", () => {
   });
 
   it("uses latest-turn timings and the stopped label for an interrupted latest turn", () => {
-    const rows = deriveMessagesTimelineRows({
-      timelineEntries: [
-        {
-          id: "work-entry-1",
-          kind: "work",
-          createdAt: "2026-01-01T00:00:05Z",
-          entry: {
-            id: "work-1",
+    const rowsWaitingOnUser = (userWaits: ReadonlyArray<OrchestrationV2UserWait>) =>
+      deriveMessagesTimelineRows({
+        timelineEntries: [
+          {
+            id: "work-entry-1",
+            kind: "work",
             createdAt: "2026-01-01T00:00:05Z",
-            runId: "turn-1" as never,
-            label: "Ran command",
-            tone: "tool" as const,
+            entry: {
+              id: "work-1",
+              createdAt: "2026-01-01T00:00:05Z",
+              runId: "turn-1" as never,
+              label: "Ran command",
+              tone: "tool" as const,
+            },
           },
+        ],
+        latestRun: {
+          runId: "turn-1" as never,
+          status: "interrupted",
+          startedAt: "2026-01-01T00:00:00Z",
+          completedAt: "2026-01-01T00:00:47Z",
         },
-      ],
-      latestRun: {
-        runId: "turn-1" as never,
-        status: "interrupted",
-        startedAt: "2026-01-01T00:00:00Z",
-        completedAt: "2026-01-01T00:00:47Z",
-      },
-      isWorking: false,
-      activeTurnStartedAt: null,
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-    });
+        isWorking: false,
+        activeTurnStartedAt: null,
+        userWaits,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+    expect(
+      rowsWaitingOnUser([
+        {
+          startedAt: DateTime.makeUnsafe("2026-01-01T00:00:10Z"),
+          endedAt: DateTime.makeUnsafe("2026-01-01T00:00:20Z"),
+        },
+      ]),
+    ).toEqual([expect.objectContaining({ label: "You stopped after 37s" })]);
 
-    expect(rows).toEqual([
+    expect(rowsWaitingOnUser([])).toEqual([
       expect.objectContaining({
         kind: "turn-fold",
         runId: "turn-1",

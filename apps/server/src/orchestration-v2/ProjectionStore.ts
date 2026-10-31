@@ -64,6 +64,8 @@ import {
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
   orchestrationV2RunWorkStartedAt,
+  orchestrationV2UserWaits,
+  orchestrationV2WorkClock,
   RunId,
   MessageId,
   RuntimeRequestId,
@@ -966,6 +968,7 @@ type ShellThreadRow = {
   readonly active_run_status: string | null;
   readonly activity_run_status: string | null;
   readonly activity_run_started_at: string | null;
+  readonly activity_run_requests_json: string;
   readonly last_error: string | null;
   readonly terminal_failure_payload_json: string | null;
   readonly blocking_run_id: string | null;
@@ -1103,6 +1106,9 @@ const decodeProviderTurnPayload = Schema.decodeUnknownEffect(
 );
 const decodeRuntimeRequestPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2RuntimeRequestJsonSchema),
+);
+const decodeRuntimeRequestPayloads = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(OrchestrationV2RuntimeRequestJsonSchema)),
 );
 const decodeMessagePayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ConversationMessageJsonSchema),
@@ -1451,6 +1457,13 @@ export function threadShellFromProjection(
   const activityRun =
     runs.filter(isActivityRunForShell).toSorted((left, right) => right.ordinal - left.ordinal)[0] ??
     null;
+  const activityClock =
+    activityRun === null
+      ? null
+      : orchestrationV2WorkClock(
+          orchestrationV2RunWorkStartedAt(activityRun),
+          orchestrationV2UserWaits(projection.runtimeRequests),
+        );
   const liveRunIds = new Set(runs.filter(isActivityRunForShell).map((run) => run.id));
   let pendingRuntimeRequest = pendingRuntimeRequestSummary(
     projection.runtimeRequests
@@ -1532,8 +1545,8 @@ export function threadShellFromProjection(
     activeRunId: activeRun?.id ?? null,
     blockedOnThreadWait: deriveBlockedOnThreadWait({ activeRun, turnItems: projection.turnItems }),
     activityRunStatus: activityRun?.status ?? null,
-    activityRunStartedAt:
-      activityRun === null ? null : orchestrationV2RunWorkStartedAt(activityRun),
+    activityRunStartedAt: activityClock?.startedAt ?? null,
+    activityRunPausedAt: activityClock?.pausedAt ?? null,
     status: latestRun?.status ?? "idle",
     ...threadErrorSummary(
       latestRootProviderFailure(latestRun, projection.turnItems),
@@ -1650,6 +1663,7 @@ type ShellThreadState = {
   readonly blockedOnThreadWait: boolean;
   readonly activityRunStatus: ShellActivityRunStatus | null;
   readonly activityRunStartedAt: DateTime.Utc | null;
+  readonly activityRunPausedAt: DateTime.Utc | null;
   readonly lastError: string | null;
   readonly lastErrorClass: OrchestrationV2ThreadShell["lastErrorClass"];
   readonly lastErrorCode: OrchestrationV2ThreadShell["lastErrorCode"];
@@ -1810,6 +1824,7 @@ function shellFromState(input: {
     blockedOnThreadWait: input.state.blockedOnThreadWait,
     activityRunStatus: input.state.activityRunStatus,
     activityRunStartedAt: input.state.activityRunStartedAt,
+    activityRunPausedAt: input.state.activityRunPausedAt,
     status: input.state.latestRunStatus,
     lastError: input.state.lastError,
     lastErrorClass: input.state.lastErrorClass,
@@ -5923,6 +5938,30 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS activity_run_started_at,
               (
+                -- Requests that can pause the activity run's work clock: open, or answered after it began.
+                SELECT json_group_array(json(request.payload_json))
+                FROM orchestration_v2_projection_runs activity
+                CROSS JOIN orchestration_v2_projection_runtime_requests request
+                WHERE activity.run_id = (
+                  SELECT r.run_id
+                  FROM orchestration_v2_projection_runs r
+                  WHERE r.thread_id = t.thread_id
+                    AND r.status IN ('preparing', 'starting', 'running', 'waiting')
+                    AND NOT ${isSilentShellRun("r")}
+                  ORDER BY r.ordinal DESC, r.run_id DESC
+                  LIMIT 1
+                )
+                  AND request.thread_id = t.thread_id
+                  AND (
+                    request.status = 'pending'
+                    OR request.resolved_at > COALESCE(
+                      json_extract(activity.payload_json, '$.workStartedAt'),
+                      json_extract(activity.payload_json, '$.startedAt'),
+                      activity.requested_at
+                    )
+                  )
+              ) AS activity_run_requests_json,
+              (
                 SELECT json_extract(session.payload_json, '$.lastError')
                 -- Keep bindings outermost: one provider instance can hold every session.
                 FROM orchestration_v2_projection_provider_session_bindings binding
@@ -6548,6 +6587,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             pullRequests: thread.pullRequests,
           }),
         ];
+        const activityClock =
+          row.activity_run_started_at === null
+            ? null
+            : orchestrationV2WorkClock(
+                DateTime.makeUnsafe(row.activity_run_started_at),
+                orchestrationV2UserWaits(
+                  yield* decodeRuntimeRequestPayloads(row.activity_run_requests_json),
+                ),
+              );
         return {
           thread,
           latestRunId,
@@ -6564,10 +6612,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 : { id: RunId.make(row.active_run_id), status: "running" },
             turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
           }),
-          activityRunStartedAt:
-            row.activity_run_started_at === null
-              ? null
-              : DateTime.makeUnsafe(row.activity_run_started_at),
+          activityRunStartedAt: activityClock?.startedAt ?? null,
+          activityRunPausedAt: activityClock?.pausedAt ?? null,
           activityRunStatus:
             row.activity_run_status === "preparing" ||
             row.activity_run_status === "starting" ||
