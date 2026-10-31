@@ -2,25 +2,29 @@
 // Steps of the fork upgrade to upstream tip. UPGRADING.md is the runbook that says
 // when to run each one. Every step records its outcome in the run's state.json and
 // rewrites report.md beside it, so a run can be checked without trusting the agent.
-import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import fs from "node:fs";
-import { createRequire } from "node:module";
-import net from "node:net";
-import os from "node:os";
-import path from "node:path";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
+import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
-const HOME = os.homedir();
-const RUNTIME = process.env.T3_RUNTIME_DIR ?? path.join(HOME, ".t3/code");
-const UPGRADES = process.env.T3_UPGRADE_DIR ?? path.join(RUNTIME, "upgrades");
-const LIVE_DB = path.join(RUNTIME, "userdata/statev2.sqlite");
+const HOME = NodeOS.homedir();
+const RUNTIME = process.env.T3_RUNTIME_DIR ?? NodePath.join(HOME, ".t3/code");
+const UPGRADES = process.env.T3_UPGRADE_DIR ?? NodePath.join(RUNTIME, "upgrades");
+const LIVE_DB = NodePath.join(RUNTIME, "userdata/statev2.sqlite");
 const LIVE_PORT = Number(process.env.T3_PORT ?? 3773);
-const GIT_OVERLAY = path.join(HOME, "code/git-overlay/git-overlay");
+const GIT_OVERLAY = NodePath.join(HOME, "code/git-overlay/git-overlay");
 const FORK = "fork";
 const BACKUPS_KEPT = 3;
 
 const exec = (cmd, args, opts = {}) => {
-  const r = spawnSync(cmd, args, { encoding: "utf8", maxBuffer: 1 << 30, ...opts });
+  const r = NodeChildProcess.spawnSync(cmd, args, {
+    encoding: "utf8",
+    maxBuffer: 1 << 30,
+    ...opts,
+  });
   return { code: r.status ?? 1, out: (r.stdout ?? "").trimEnd(), err: (r.stderr ?? "").trimEnd() };
 };
 const git = (cwd, ...args) => exec("git", ["-C", cwd, ...args]);
@@ -35,23 +39,24 @@ const gitOk = (cwd, ...args) => {
 };
 
 // The main checkout, wherever this copy of the script lives.
-const MAIN = path.dirname(
+const MAIN = NodePath.dirname(
   gitOk(import.meta.dirname, "rev-parse", "--path-format=absolute", "--git-common-dir"),
 );
-const WORKTREE = path.join(path.dirname(MAIN), "t3code-worktrees", "upgrade");
+const WORKTREE = NodePath.join(NodePath.dirname(MAIN), "t3code-worktrees", "upgrade");
 
 const now = () => new Date().toISOString();
 const rev = (ref, cwd = MAIN) => gitOk(cwd, "rev-parse", ref);
 const isAncestor = (a, b) => git(MAIN, "merge-base", "--is-ancestor", a, b).code === 0;
 const short = (sha) => (sha ? sha.slice(0, 10) : "-");
 const overlayName = (b) => b.replace(/^overlay\//, "");
-const sha256 = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+const sha256 = (file) =>
+  NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(file)).digest("hex");
 // `--note-file <path>` (`-` reads stdin) keeps apostrophes and newlines out of shell quoting.
 const noteText = ([flag, ...rest], { bareWords = false } = {}) => {
   if (flag === "--note-file") {
     if (rest.length !== 1) die("--note-file takes one path, or - for stdin.");
     try {
-      return fs.readFileSync(rest[0] === "-" ? 0 : rest[0], "utf8").trim();
+      return NodeFS.readFileSync(rest[0] === "-" ? 0 : rest[0], "utf8").trim();
     } catch (error) {
       die(`Cannot read the note: ${error.message}`);
     }
@@ -75,33 +80,31 @@ function worktreesByBranch() {
 }
 const dirty = (cwd) => git(cwd, "status", "--porcelain", "--untracked-files=no").out;
 
-// ---------------------------------------------------------------- run state
-
-const currentFile = path.join(UPGRADES, "current");
-const runDir = (id) => path.join(UPGRADES, id);
+const currentFile = NodePath.join(UPGRADES, "current");
+const runDir = (id) => NodePath.join(UPGRADES, id);
 
 function loadRun() {
-  if (!fs.existsSync(currentFile)) return null;
-  const file = path.join(runDir(fs.readFileSync(currentFile, "utf8").trim()), "state.json");
-  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+  if (!NodeFS.existsSync(currentFile)) return null;
+  const file = NodePath.join(runDir(NodeFS.readFileSync(currentFile, "utf8").trim()), "state.json");
+  return NodeFS.existsSync(file) ? JSON.parse(NodeFS.readFileSync(file, "utf8")) : null;
 }
 
 function save(state) {
   state.updatedAt = now();
-  fs.mkdirSync(runDir(state.id), { recursive: true });
-  fs.writeFileSync(
-    path.join(runDir(state.id), "state.json"),
+  NodeFS.mkdirSync(runDir(state.id), { recursive: true });
+  NodeFS.writeFileSync(
+    NodePath.join(runDir(state.id), "state.json"),
     `${JSON.stringify(state, null, 2)}\n`,
   );
-  fs.writeFileSync(path.join(runDir(state.id), "report.md"), renderReport(state));
+  NodeFS.writeFileSync(NodePath.join(runDir(state.id), "report.md"), renderReport(state));
 }
 
 // Requests wait here for the next run, which takes them over and must close each one.
-const inboxFile = path.join(UPGRADES, "inbox.json");
+const inboxFile = NodePath.join(UPGRADES, "inbox.json");
 const readInbox = () => readJson(inboxFile) ?? { next: 1, requests: [] };
 function writeInbox(inbox) {
-  fs.mkdirSync(UPGRADES, { recursive: true });
-  fs.writeFileSync(inboxFile, `${JSON.stringify(inbox, null, 2)}\n`);
+  NodeFS.mkdirSync(UPGRADES, { recursive: true });
+  NodeFS.writeFileSync(inboxFile, `${JSON.stringify(inbox, null, 2)}\n`);
 }
 const requestId = (id) => Number(String(id ?? "").replace(/^#/, ""));
 
@@ -138,13 +141,13 @@ const isFlagged = (o) =>
 
 // Long commands write to the run's log instead of the agent's context.
 function logged(state, name, cwd, cmd, args, env = process.env) {
-  const log = path.join(runDir(state.id), "logs", `${name}.log`);
-  fs.mkdirSync(path.dirname(log), { recursive: true });
-  const fd = fs.openSync(log, "a");
-  fs.writeSync(fd, `\n[${now()}] $ (${cwd}) ${cmd} ${args.join(" ")}\n`);
+  const log = NodePath.join(runDir(state.id), "logs", `${name}.log`);
+  NodeFS.mkdirSync(NodePath.dirname(log), { recursive: true });
+  const fd = NodeFS.openSync(log, "a");
+  NodeFS.writeSync(fd, `\n[${now()}] $ (${cwd}) ${cmd} ${args.join(" ")}\n`);
   const started = Date.now();
-  const r = spawnSync(cmd, args, { cwd, stdio: ["ignore", fd, fd], env });
-  fs.closeSync(fd);
+  const r = NodeChildProcess.spawnSync(cmd, args, { cwd, stdio: ["ignore", fd, fd], env });
+  NodeFS.closeSync(fd);
   return {
     code: r.status ?? 1,
     log,
@@ -153,9 +156,7 @@ function logged(state, name, cwd, cmd, args, env = process.env) {
 }
 
 const tail = (file, lines = 60) =>
-  fs.readFileSync(file, "utf8").split("\n").slice(-lines).join("\n");
-
-// ---------------------------------------------------------------- report
+  NodeFS.readFileSync(file, "utf8").split("\n").slice(-lines).join("\n");
 
 function renderReport(s) {
   const lines = [
@@ -246,8 +247,6 @@ function renderReport(s) {
   return `${lines.join("\n")}\n`;
 }
 
-// ---------------------------------------------------------------- helpers
-
 function daemonStatus() {
   const r = exec("mise", ["run", "daemon-status"], { cwd: MAIN });
   const text = `${r.out}\n${r.err}`;
@@ -266,7 +265,7 @@ const localTime = (iso) => new Date(iso).toLocaleString("sv-SE").slice(0, 16);
 // The threads that keep the daemon from restarting T3, by the daemon's own `busy` rules.
 // A thread waiting on a question stays busy until someone answers it, however long that takes.
 function busyThreads() {
-  const sql = fs.readFileSync(path.join(import.meta.dirname, "t3-busy-v2.sql"), "utf8");
+  const sql = NodeFS.readFileSync(NodePath.join(import.meta.dirname, "t3-busy-v2.sql"), "utf8");
   const start = sql.indexOf("WITH busy");
   const end = sql.indexOf("\nSELECT group_concat");
   if (start < 0 || end < start) return ["(cannot read the busy rules in t3-busy-v2.sql)"];
@@ -309,19 +308,21 @@ NodeRuntime.runMain(program.pipe(Effect.provide(NodeSqliteClient.layer({ filenam
 // The node the main checkout pins, which may have moved since this process started.
 const mainNode = () => exec("mise", ["which", "node"], { cwd: MAIN }).out || "node";
 
-const readJson = (file) => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null);
+const readJson = (file) =>
+  NodeFS.existsSync(file) ? JSON.parse(NodeFS.readFileSync(file, "utf8")) : null;
 
 // mise puts the main checkout's node_modules/.bin on PATH; checks in the worktree must use its own tools.
 const worktreeEnv = () => ({
   ...process.env,
   PATH: [
-    path.join(WORKTREE, "node_modules/.bin"),
+    NodePath.join(WORKTREE, "node_modules/.bin"),
     ...(process.env.PATH ?? "").split(":").filter((p) => !p.endsWith("node_modules/.bin")),
   ].join(":"),
 });
 
 function ensureWorktree() {
-  if (!fs.existsSync(WORKTREE)) gitOk(MAIN, "worktree", "add", "--detach", WORKTREE, "origin/main");
+  if (!NodeFS.existsSync(WORKTREE))
+    gitOk(MAIN, "worktree", "add", "--detach", WORKTREE, "origin/main");
   if (dirty(WORKTREE)) die(`${WORKTREE} has uncommitted changes:\n${dirty(WORKTREE)}`);
 }
 
@@ -329,9 +330,9 @@ function ensureWorktree() {
 function checkoutForCheck(state, ref) {
   ensureWorktree();
   gitOk(WORKTREE, "checkout", "-q", "--detach", ref);
-  const marker = path.join(WORKTREE, "node_modules/.upgrade-lock-sha");
-  const lockSha = sha256(path.join(WORKTREE, "pnpm-lock.yaml"));
-  if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").trim() === lockSha) return;
+  const marker = NodePath.join(WORKTREE, "node_modules/.upgrade-lock-sha");
+  const lockSha = sha256(NodePath.join(WORKTREE, "pnpm-lock.yaml"));
+  if (NodeFS.existsSync(marker) && NodeFS.readFileSync(marker, "utf8").trim() === lockSha) return;
   const r = logged(
     state,
     "install-worktree",
@@ -341,7 +342,7 @@ function checkoutForCheck(state, ref) {
     worktreeEnv(),
   );
   if (r.code !== 0) die(`pnpm install failed in ${WORKTREE}; see ${r.log}\n${tail(r.log, 30)}`);
-  fs.writeFileSync(marker, `${lockSha}\n`);
+  NodeFS.writeFileSync(marker, `${lockSha}\n`);
 }
 
 // Zero-context hunks without line numbers: what the overlay changes, not where.
@@ -363,7 +364,7 @@ const pidAlive = (pid) => {
 
 const portFree = (port) =>
   new Promise((resolve) => {
-    const srv = net.createServer();
+    const srv = NodeNet.createServer();
     srv.once("error", () => resolve(false));
     srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(true)));
   });
@@ -385,10 +386,8 @@ function sqliteRo(db, query) {
   return r.out ? JSON.parse(r.out) : [];
 }
 
-// ---------------------------------------------------------------- steps
-
 async function preflight(args) {
-  fs.mkdirSync(UPGRADES, { recursive: true });
+  NodeFS.mkdirSync(UPGRADES, { recursive: true });
   let prev = loadRun();
   if (prev?.status === "deployed") {
     await verifyDeploy();
@@ -414,7 +413,7 @@ async function preflight(args) {
 
   const problems = [];
   if (dirty(MAIN)) problems.push(`main checkout has uncommitted changes:\n${dirty(MAIN)}`);
-  if (fs.existsSync(path.join(MAIN, ".git/MERGE_HEAD")))
+  if (NodeFS.existsSync(NodePath.join(MAIN, ".git/MERGE_HEAD")))
     problems.push("main checkout is mid-merge");
   const branch = git(MAIN, "branch", "--show-current").out;
   if (branch !== "local")
@@ -449,7 +448,7 @@ async function preflight(args) {
   const daemon = daemonStatus();
   const today = new Date().toLocaleDateString("sv-SE");
   let id = today;
-  for (let n = 2; fs.existsSync(runDir(id)); n++) id = `${today}-${n}`;
+  for (let n = 2; NodeFS.existsSync(runDir(id)); n++) id = `${today}-${n}`;
   const localBase = gitOk(MAIN, "merge-base", "local", "origin/main");
   const forkLocal = gitOk(MAIN, "ls-remote", FORK, "refs/heads/local").split(/\s/)[0] || null;
   const state = {
@@ -463,7 +462,7 @@ async function preflight(args) {
       commits: Number(gitOk(MAIN, "rev-list", "--count", `${localBase}..origin/main`)),
     },
     local: { before: rev("local"), forkBefore: forkLocal },
-    deployedBefore: readJson(path.join(RUNTIME, "dist/current/build-info.json")),
+    deployedBefore: readJson(NodePath.join(RUNTIME, "dist/current/build-info.json")),
     daemon: { running: daemon.running, listening: daemon.listening },
     overlays: Object.fromEntries(overlays.map((b) => [b, { status: "pending" }])),
     requests: inbox.requests.map((r) => ({ ...r, status: "open" })),
@@ -478,7 +477,7 @@ async function preflight(args) {
     });
   }
   save(state);
-  fs.writeFileSync(currentFile, `${id}\n`);
+  NodeFS.writeFileSync(currentFile, `${id}\n`);
   writeInbox({ ...inbox, requests: [] });
   record(state, "preflight", "ok", {
     note: `${state.upstream.commits} upstream commits; ${behind.length}/${overlays.length} overlays behind; ${state.requests.length} requests; daemon ${daemon.running ? "running" : "NOT running"}`,
@@ -493,7 +492,7 @@ async function preflight(args) {
     );
   if (!daemon.running || !daemon.listening)
     console.log(`WARNING: daemon not healthy:\n${daemon.text}`);
-  console.log(`Report: ${path.join(runDir(id), "report.md")}\nNext: plan`);
+  console.log(`Report: ${NodePath.join(runDir(id), "report.md")}\nNext: plan`);
 }
 
 // Rehearsal copies of the database are the bulky part of a run; keep the newest few.
@@ -504,8 +503,8 @@ function pruneOldRuns(keep) {
     .sort()
     .reverse();
   for (const id of runs.slice(4)) {
-    const dir = path.join(runDir(id), "rehearsal");
-    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+    const dir = NodePath.join(runDir(id), "rehearsal");
+    if (NodeFS.existsSync(dir)) NodeFS.rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -521,8 +520,8 @@ function plan() {
     }
   }
 
-  const patches = path.join(runDir(state.id), "patches");
-  fs.mkdirSync(patches, { recursive: true });
+  const patches = NodePath.join(runDir(state.id), "patches");
+  NodeFS.mkdirSync(patches, { recursive: true });
   const upstreamFiles = new Set(
     gitOk(MAIN, "diff", "--name-only", state.upstream.before, state.upstream.after)
       .split("\n")
@@ -534,7 +533,10 @@ function plan() {
     const base = gitOk(MAIN, "merge-base", b, "origin/main");
     o.before = rev(b);
     o.oldBase = base;
-    fs.writeFileSync(path.join(patches, `${overlayName(b)}.before.diff`), normalizedPatch(base, b));
+    NodeFS.writeFileSync(
+      NodePath.join(patches, `${overlayName(b)}.before.diff`),
+      normalizedPatch(base, b),
+    );
     const files = gitOk(MAIN, "diff", "--name-only", base, b).split("\n").filter(Boolean);
     o.files = files.length;
     overlap[b] = files.filter((f) => upstreamFiles.has(f));
@@ -721,22 +723,22 @@ function fixed([b, ...args]) {
 
 function intent() {
   const state = requireRun("running");
-  const patches = path.join(runDir(state.id), "patches");
+  const patches = NodePath.join(runDir(state.id), "patches");
   const flagged = [];
   for (const b of listOverlays()) {
     const o = state.overlays[b];
     if (!isAncestor("origin/main", b)) die(`${b} does not contain origin/main yet.`);
     const name = overlayName(b);
-    const beforeFile = path.join(patches, `${name}.before.diff`);
-    const afterFile = path.join(patches, `${name}.after.diff`);
-    fs.writeFileSync(afterFile, normalizedPatch("origin/main", b));
+    const beforeFile = NodePath.join(patches, `${name}.before.diff`);
+    const afterFile = NodePath.join(patches, `${name}.after.diff`);
+    NodeFS.writeFileSync(afterFile, normalizedPatch("origin/main", b));
     const d = exec("git", ["diff", "--no-index", "--no-color", "-U1", beforeFile, afterFile]);
-    const intentFile = path.join(patches, `${name}.intent.diff`);
+    const intentFile = NodePath.join(patches, `${name}.intent.diff`);
     const changedLines = d.out.split("\n").filter((l) => /^[+-](?![+-]{2} )/.test(l)).length;
     let result = d.code === 0 ? "same" : "changed";
-    if (!fs.readFileSync(afterFile, "utf8").trim()) result = "absorbed";
+    if (!NodeFS.readFileSync(afterFile, "utf8").trim()) result = "absorbed";
     if (result !== "same") {
-      fs.writeFileSync(intentFile, `${d.out}\n`);
+      NodeFS.writeFileSync(intentFile, `${d.out}\n`);
       flagged.push(b);
     }
     o.intent = { result, changedLines, file: result === "same" ? null : intentFile };
@@ -772,7 +774,7 @@ function check([target]) {
     else if (!state.overlays[t]) die(`Unknown overlay '${t}'.`);
     const cwd = t === "local" ? MAIN : WORKTREE;
     if (t !== "local") checkoutForCheck(state, t);
-    const vp = path.join(cwd, "node_modules/.bin/vp");
+    const vp = NodePath.join(cwd, "node_modules/.bin/vp");
     const env = t === "local" ? process.env : worktreeEnv();
     const r = logged(
       state,
@@ -808,7 +810,7 @@ function baseline(files) {
   const state = requireRun("running");
   if (!files.length) die("Usage: baseline <test files...>  (runs them on plain origin/main)");
   checkoutForCheck(state, "origin/main");
-  const vp = path.join(WORKTREE, "node_modules/.bin/vp");
+  const vp = NodePath.join(WORKTREE, "node_modules/.bin/vp");
   const r = logged(state, "baseline", WORKTREE, vp, ["test", "run", ...files], worktreeEnv());
   const verdict =
     r.code === 0
@@ -839,7 +841,7 @@ function rebuild() {
   for (const [name, cmd, args] of steps) {
     const r = logged(state, name, MAIN, cmd, args);
     if (r.code !== 0) {
-      const midMerge = fs.existsSync(path.join(MAIN, ".git/MERGE_HEAD"));
+      const midMerge = NodeFS.existsSync(NodePath.join(MAIN, ".git/MERGE_HEAD"));
       record(state, "rebuild", "failed", {
         log: r.log,
         note: midMerge ? `${name} stopped on a conflict between overlays` : `${name} failed`,
@@ -863,8 +865,8 @@ function rebuild() {
     }
     console.log(`ok ${name} (${r.seconds}s)`);
   }
-  const bin = path.join(MAIN, "apps/server/dist/bin.mjs");
-  const info = readJson(path.join(MAIN, "apps/server/dist/build-info.json"));
+  const bin = NodePath.join(MAIN, "apps/server/dist/bin.mjs");
+  const info = readJson(NodePath.join(MAIN, "apps/server/dist/build-info.json"));
   state.build = { commit: rev("local"), sha256: sha256(bin), info };
   if (!info || info.commit !== state.build.commit || info.dirty) {
     record(state, "rebuild", "failed", { note: "build-info.json does not match a clean local" });
@@ -897,19 +899,19 @@ async function rehearse() {
   // migrate-dev-db prunes even with huge limits, so new migrations also run on an exact copy.
   // Only migrations run there: a server on it would start fire's scheduled tasks.
   if (state.risks?.migrations.length) {
-    const full = path.join(runDir(state.id), "rehearsal-full");
-    fs.rmSync(full, { recursive: true, force: true });
-    fs.mkdirSync(full, { recursive: true });
-    const copy = path.join(full, "statev2.sqlite");
+    const full = NodePath.join(runDir(state.id), "rehearsal-full");
+    NodeFS.rmSync(full, { recursive: true, force: true });
+    NodeFS.mkdirSync(full, { recursive: true });
+    const copy = NodePath.join(full, "statev2.sqlite");
     const b = exec("sqlite3", [`file:${LIVE_DB}?mode=ro`, `.backup '${copy}'`]);
     if (b.code !== 0) die(`Copying the live database failed: ${b.err}`);
-    const m = logged(state, "migrate-full", path.join(MAIN, "apps/server"), mainNode(), [
+    const m = logged(state, "migrate-full", NodePath.join(MAIN, "apps/server"), mainNode(), [
       "--input-type=module",
       "-e",
       MIGRATE_ONLY,
       copy,
     ]);
-    fs.rmSync(full, { recursive: true, force: true });
+    NodeFS.rmSync(full, { recursive: true, force: true });
     // The daemon gives a starting build T3_HEALTH_TIMEOUT (300s) before falling back.
     const slow = m.seconds > 120;
     record(state, "migrate-full", m.code === 0 && !slow ? "ok" : "failed", {
@@ -927,11 +929,18 @@ async function rehearse() {
 
   // migrate-dev-db drops scheduled tasks, pending work, and auth sessions, so a
   // rehearsal server never runs fire's agents.
-  const base = path.join(runDir(state.id), "rehearsal");
-  fs.rmSync(base, { recursive: true, force: true });
+  const base = NodePath.join(runDir(state.id), "rehearsal");
+  NodeFS.rmSync(base, { recursive: true, force: true });
   const db = logged(state, "rehearse-db", MAIN, mainNode(), [
     "apps/server/scripts/migrate-dev-db.ts",
-    ...["--base-dir", base, "--source", LIVE_DB, "--projects", "12", "--threads-per-project", "12"],
+    "--base-dir",
+    base,
+    "--source",
+    LIVE_DB,
+    "--projects",
+    "12",
+    "--threads-per-project",
+    "12",
   ]);
   if (db.code !== 0) {
     record(state, "rehearse", "failed", {
@@ -944,15 +953,15 @@ async function rehearse() {
   let port = 3790;
   while (port < 3800 && !(await portFree(port))) port++;
   if (port === 3800) die("No free port in 3790-3799.");
-  const serverLog = path.join(runDir(state.id), "logs", "rehearsal-server.log");
+  const serverLog = NodePath.join(runDir(state.id), "logs", "rehearsal-server.log");
   // A fresh log: an earlier rehearsal's pairing token in it would already be spent.
-  const out = fs.openSync(serverLog, "w");
+  const out = NodeFS.openSync(serverLog, "w");
   const env = { ...process.env };
   delete env.T3CODE_HOME;
-  const child = spawn(
+  const child = NodeChildProcess.spawn(
     mainNode(),
     [
-      path.join(MAIN, "apps/server/dist/bin.mjs"),
+      NodePath.join(MAIN, "apps/server/dist/bin.mjs"),
       "serve",
       "--base-dir",
       base,
@@ -972,7 +981,7 @@ async function rehearse() {
   let pairing = null;
   while (Date.now() - started < 180_000) {
     if (!pidAlive(child.pid)) break;
-    pairing ??= fs.readFileSync(serverLog, "utf8").match(/Pairing URL: (\S+)/)?.[1] ?? null;
+    pairing ??= NodeFS.readFileSync(serverLog, "utf8").match(/Pairing URL: (\S+)/)?.[1] ?? null;
     if (pairing && (await httpOk(url))) break;
     await sleep(1000);
   }
@@ -987,7 +996,7 @@ async function rehearse() {
       `Rehearsal server did not come up in ${seconds}s; see ${serverLog}\n${tail(serverLog, 40)}`,
     );
   }
-  fs.writeFileSync(path.join(base, "pairing-url"), `${pairing}\n`, { mode: 0o600 });
+  NodeFS.writeFileSync(NodePath.join(base, "pairing-url"), `${pairing}\n`, { mode: 0o600 });
   const errors = fs
     .readFileSync(serverLog, "utf8")
     .split("\n")
@@ -1007,7 +1016,7 @@ async function rehearse() {
 // Headless, because a browser pane the user is not looking at pauses animation frames,
 // which leaves virtualized lists and entrance animations unrendered.
 async function launchBrowser() {
-  const require = createRequire(path.join(MAIN, "apps/server/package.json"));
+  const require = NodeModule.createRequire(NodePath.join(MAIN, "apps/server/package.json"));
   const { chromium } = require("playwright-core");
   try {
     return await chromium.launch({ headless: true });
@@ -1022,8 +1031,11 @@ async function ui() {
   const reh = state.rehearsal;
   if (!reh?.pid || !pidAlive(reh.pid)) die("The rehearsal server is not running; run rehearse.");
   const url = `http://127.0.0.1:${reh.port}`;
-  const db = path.join(reh.base, "userdata/statev2.sqlite");
-  const envId = fs.readFileSync(path.join(reh.base, "userdata/environment-id"), "utf8").trim();
+  const db = NodePath.join(reh.base, "userdata/statev2.sqlite");
+  const envId = NodeFS.readFileSync(
+    NodePath.join(reh.base, "userdata/environment-id"),
+    "utf8",
+  ).trim();
   const live = "t.deleted_at IS NULL AND t.archived_at IS NULL";
   // The sidebar collapses settled threads, so only unsettled ones are visible on load.
   const unsettled = sqliteRo(
@@ -1048,9 +1060,9 @@ async function ui() {
       snippet: (t.lastUser ?? "").match(/[A-Za-z][A-Za-z ,']{14,40}[A-Za-z]/)?.[0],
     }))
     .find((t) => t.snippet);
-  const shots = path.join(runDir(state.id), "screenshots");
-  fs.mkdirSync(shots, { recursive: true });
-  const pairing = fs.readFileSync(path.join(reh.base, "pairing-url"), "utf8").trim();
+  const shots = NodePath.join(runDir(state.id), "screenshots");
+  NodeFS.mkdirSync(shots, { recursive: true });
+  const pairing = NodeFS.readFileSync(NodePath.join(reh.base, "pairing-url"), "utf8").trim();
 
   const checks = [];
   const pageErrors = [];
@@ -1092,7 +1104,7 @@ async function ui() {
         : page.getByText("Settled").first().waitFor({ state: "visible", timeout: 45_000 }),
     );
     await sleep(2000);
-    await page.screenshot({ path: path.join(shots, "home.png") });
+    await page.screenshot({ path: NodePath.join(shots, "home.png") });
     if (thread) {
       await step("thread opens", () =>
         page.goto(`${url}/${envId}/${thread.id}`, { timeout: 30_000 }),
@@ -1101,7 +1113,7 @@ async function ui() {
         page.getByText(thread.snippet).first().waitFor({ state: "visible", timeout: 45_000 }),
       );
       await sleep(2000);
-      await page.screenshot({ path: path.join(shots, "thread.png") });
+      await page.screenshot({ path: NodePath.join(shots, "thread.png") });
     } else {
       checks.push({
         name: "a thread with tool calls exists",
@@ -1264,9 +1276,9 @@ function deploy() {
   if (!daemon.running)
     die(`The daemon is not running; deploying would not restart T3:\n${daemon.text}`);
 
-  const backups = path.join(RUNTIME, "backups");
-  fs.mkdirSync(backups, { recursive: true });
-  const backup = path.join(backups, `statev2-pre-upgrade-${state.id}.sqlite`);
+  const backups = NodePath.join(RUNTIME, "backups");
+  NodeFS.mkdirSync(backups, { recursive: true });
+  const backup = NodePath.join(backups, `statev2-pre-upgrade-${state.id}.sqlite`);
   const b = exec("sqlite3", [`file:${LIVE_DB}?mode=ro`, `.backup '${backup}'`]);
   if (b.code !== 0) die(`Database backup failed: ${b.err}`);
   const old = fs
@@ -1275,11 +1287,11 @@ function deploy() {
     .sort()
     .reverse()
     .slice(BACKUPS_KEPT);
-  for (const f of old) fs.rmSync(path.join(backups, f));
+  for (const f of old) NodeFS.rmSync(NodePath.join(backups, f));
 
   // The runtime shim pins its own node; natives built for a newer node would not load in it.
   const vendorNode = exec("mise", ["where", "node"], { cwd: MAIN }).out;
-  const runtimeNode = exec("readlink", [path.join(RUNTIME, "node.bin")]).out;
+  const runtimeNode = exec("readlink", [NodePath.join(RUNTIME, "node.bin")]).out;
   if (vendorNode && !runtimeNode.startsWith(vendorNode)) {
     const g = logged(state, "deploy", MAIN, "mise", ["run", "generate-runtime"]);
     if (g.code !== 0) die(`generate-runtime failed; see ${g.log}`);
@@ -1291,7 +1303,7 @@ function deploy() {
     record(state, "deploy", "failed", { log: s.log, note: "swap failed; live build untouched" });
     die(`swap failed; see ${s.log}\n${tail(s.log, 30)}`);
   }
-  const current = sha256(path.join(RUNTIME, "dist/current/bin.mjs"));
+  const current = sha256(NodePath.join(RUNTIME, "dist/current/bin.mjs"));
   if (current !== state.build.sha256) die("The swapped bin.mjs differs from the rehearsed build.");
   const busy = busyThreads();
   state.deploy = { at: now(), backup, sha256: current, busy };
@@ -1309,14 +1321,14 @@ function deploy() {
 async function verifyDeploy() {
   const state = loadRun();
   if (!state?.deploy) die("No deploy to verify.");
-  const current = sha256(path.join(RUNTIME, "dist/current/bin.mjs"));
+  const current = sha256(NodePath.join(RUNTIME, "dist/current/bin.mjs"));
   const since = new Date(state.deploy.at);
   const pad = (n) => String(n).padStart(2, "0");
   const stamp = (d) =>
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const log = fs.existsSync(path.join(RUNTIME, "daemon.log"))
+  const log = NodeFS.existsSync(NodePath.join(RUNTIME, "daemon.log"))
     ? fs
-        .readFileSync(path.join(RUNTIME, "daemon.log"), "utf8")
+        .readFileSync(NodePath.join(RUNTIME, "daemon.log"), "utf8")
         .split("\n")
         .filter((l) => l.slice(0, 19) >= stamp(since))
     : [];
@@ -1417,8 +1429,6 @@ function abandon(rest) {
   );
 }
 
-// ---------------------------------------------------------------- requests
-
 function ask(args) {
   const inbox = readInbox();
   const text = noteText(args, { bareWords: true });
@@ -1515,7 +1525,7 @@ function status() {
   const state = loadRun();
   console.log(
     state
-      ? fs.readFileSync(path.join(runDir(state.id), "report.md"), "utf8")
+      ? NodeFS.readFileSync(NodePath.join(runDir(state.id), "report.md"), "utf8")
       : "No upgrade run yet.",
   );
   const { requests } = readInbox();

@@ -128,8 +128,8 @@ what actually serves.
 - Daily flow: an agent follows [UPGRADING.md](UPGRADING.md) (checked,
   rehearsed, and recorded; `mise run upgrade` is the unchecked manual
   version), phone pairs against the running server. Fallback to the stable tier: `rm -rf
-~/.t3/code/dist/current && cp -R ~/.t3/code/dist/stable
-~/.t3/code/dist/current` (or `mise run swap-back` if bak is healthy).
+  ~/.t3/code/dist/current && cp -R ~/.t3/code/dist/stable
+  ~/.t3/code/dist/current` (or `mise run swap-back` if bak is healthy).
 - On PATH via the labeled `~/.zshrc` block:
 
   ```bash
@@ -244,7 +244,7 @@ all staged files.
 
 - **Never bypass hooks.** `--no-verify` is forbidden.
 - Known failure mode: `Failed to load configuration file. Failed to parse
-config: expected value at line 1 column 1`. This means `node_modules/oxfmt`
+  config: expected value at line 1 column 1`. This means `node_modules/oxfmt`
   is a **stale broken symlink** (vp's core resolves `oxfmt` by walking up to
   the root `node_modules/`, and a version bump that prunes the old store
   entry orphans the link). Fix by repointing it:
