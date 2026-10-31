@@ -20,19 +20,22 @@
       // Knip loads its preprocessor through a CLI option; native verification and
       // worktree setup (from t3.json) run directly. release-desktop.yml bundles the
       // Windows verify script with esbuild through a path knip does not trace,
-      // electron-builder loads the macOS signer by path, and mobile-e2e.ts runs
-      // agent-device's CLI by path, and mobile-behavior.ts spawns its runner by path.
-      // release-desktop.yml runs the desktop launch check through xvfb-run, which knip
-      // does not trace.
+      // electron-builder loads the macOS signer by path, mobile-e2e.ts runs
+      // agent-device's CLI by path, mobile-behavior.ts spawns its runner by path,
+      // the mise build tasks and generate-runtime.sh run runtime-natives.mjs directly,
+      // and UPGRADING.md runs upgrade.mjs. release-desktop.yml runs the desktop launch
+      // check through xvfb-run, which knip does not trace.
       "entry": [
         // These fixture scripts are injected into a browser page by path.
         "fixtures/*/*.js",
         "knip-schemas.ts",
         "mobile-behavior/run.ts",
         "mobile-native-client.ts",
+        "runtime-natives.mjs",
         "setup-worktree.ts",
         "sign-macos.ts",
         "smoke-desktop-app.ts",
+        "upgrade.mjs",
         "verify-windows-desktop-artifact.ts",
       ],
       "ignoreDependencies": ["agent-device", "esbuild"],
