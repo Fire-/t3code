@@ -85,44 +85,41 @@ const shownPages = (events: Events) =>
   });
 
 describe("DroidAdapterV2 html_render pages", () => {
-  for (const failed of [false, true]) {
-    it.effect(
-      `a page published from inside a Script shows on that call's own item under the Script, even when the Script ${failed ? "failed" : "succeeded"}`,
-      () =>
-        Effect.gen(function* () {
-          const fake = yield* makeFakeDroid();
-          const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
+  it.effect.each(["succeeded", "failed"] as const)(
+    "a page published from inside a Script shows on that call's own item under the Script, even when the Script %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const failed = outcome === "failed";
+        const fake = yield* makeFakeDroid();
+        const { opened, process } = yield* beginTurn(fake, { runtimeMode: "auto" });
 
-          yield* process.emit(toolCall("script-1", "Script", { script: SCRIPT }));
-          yield* process.emit(
-            scriptCall("script-1", "inner-1", "t3-code___html_render", PAGE_INPUT),
-          );
-          yield* publish(pageReference("page-1"));
-          yield* process.emit(
-            toolResult(
-              "inner-1",
-              JSON.stringify({ htmlRender: pageReference("page-1"), message: "Shown." }),
-            ),
-          );
-          yield* process.emit(
-            toolResult("script-1", failed ? "Error: later step threw" : "posted", failed),
-          );
-          yield* process.emit(completed(1));
-          yield* opened.takeEvent(isTerminal);
+        yield* process.emit(toolCall("script-1", "Script", { script: SCRIPT }));
+        yield* process.emit(scriptCall("script-1", "inner-1", "t3-code___html_render", PAGE_INPUT));
+        yield* publish(pageReference("page-1"));
+        yield* process.emit(
+          toolResult(
+            "inner-1",
+            JSON.stringify({ htmlRender: pageReference("page-1"), message: "Shown." }),
+          ),
+        );
+        yield* process.emit(
+          toolResult("script-1", failed ? "Error: later step threw" : "posted", failed),
+        );
+        yield* process.emit(completed(1));
+        yield* opened.takeEvent(isTerminal);
 
-          const script = finalItems(opened.all).find(
-            (item) => item.type === "dynamic_tool" && item.toolName === "js",
-          );
-          const shown = shownPages(opened.all);
-          assert.deepStrictEqual(
-            shown.map(({ item, page }) => [item.toolName, page]),
-            [["mcp__t3-code__html_render", pageReference("page-1")]],
-          );
-          assert.strictEqual(shown[0]?.item.parentItemId, script?.id);
-          assert.isAbove(shown[0]?.item.ordinal ?? -1, script?.ordinal ?? Infinity);
-        }).pipe(Effect.scoped, Effect.provide(layerTest)),
-    );
-  }
+        const script = finalItems(opened.all).find(
+          (item) => item.type === "dynamic_tool" && item.toolName === "js",
+        );
+        const shown = shownPages(opened.all);
+        assert.deepStrictEqual(
+          shown.map(({ item, page }) => [item.toolName, page]),
+          [["mcp__t3-code__html_render", pageReference("page-1")]],
+        );
+        assert.strictEqual(shown[0]?.item.parentItemId, script?.id);
+        assert.isAbove(shown[0]?.item.ordinal ?? -1, script?.ordinal ?? Infinity);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 
   it.effect("a direct html_render call shows its page on its own item", () =>
     Effect.gen(function* () {

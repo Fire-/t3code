@@ -57,6 +57,8 @@ const layerTest = Layer.mergeAll(
   ),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
+const decodeDroidConfig = Schema.decodeEffect(DroidDriver.configSchema);
+
 const encoder = new TextEncoder();
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -373,7 +375,7 @@ it.layer(layerTest)("DroidDriver", (it) => {
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const saved = yield* Schema.decodeEffect(DroidDriver.configSchema)({
+        const saved = yield* decodeDroidConfig({
           enabled: true,
           binaryPath: "/opt/droid/bin/droid",
         });

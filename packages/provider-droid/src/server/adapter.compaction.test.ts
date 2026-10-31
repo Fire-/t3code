@@ -420,45 +420,41 @@ describe("DroidAdapterV2 compaction", () => {
     );
 
     describe("outside a compaction", () => {
-      for (const options of [{}, { requestRuntimeRestart: true }]) {
-        it.effect(
-          `[VAL-HIST-017] a stop of an ordinary turn sends interrupt_session and does not kill the process (${JSON.stringify(options)})`,
-          () =>
-            Effect.gen(function* () {
-              const fake = yield* makeFakeDroid();
-              yield* fake.deliverGroupSignals;
-              const opened = yield* openRuntime(fake);
-              const thread = yield* ensure(opened);
-              yield* startTurn(opened.runtime, thread);
-              const turn = yield* opened.takeEvent(
-                (event) => event.type === "provider_turn.updated",
-              );
-              if (turn.type !== "provider_turn.updated") return assert.fail("no provider turn");
-              const process = fake.current();
+      it.effect.each([{}, { requestRuntimeRestart: true }])(
+        "[VAL-HIST-017] a stop of an ordinary turn sends interrupt_session and does not kill the process (%j)",
+        (options) =>
+          Effect.gen(function* () {
+            const fake = yield* makeFakeDroid();
+            yield* fake.deliverGroupSignals;
+            const opened = yield* openRuntime(fake);
+            const thread = yield* ensure(opened);
+            yield* startTurn(opened.runtime, thread);
+            const turn = yield* opened.takeEvent((event) => event.type === "provider_turn.updated");
+            if (turn.type !== "provider_turn.updated") return assert.fail("no provider turn");
+            const process = fake.current();
 
-              yield* opened.runtime.interruptTurn({
-                providerThread: thread,
-                providerTurnId: turn.providerTurn.id,
-                ...options,
-              });
-              yield* process.emit(completed(1, "cancelled"));
-              const terminal = yield* opened.takeEvent(isTerminal);
+            yield* opened.runtime.interruptTurn({
+              providerThread: thread,
+              providerTurnId: turn.providerTurn.id,
+              ...options,
+            });
+            yield* process.emit(completed(1, "cancelled"));
+            const terminal = yield* opened.takeEvent(isTerminal);
 
-              assert.deepStrictEqual(
-                requestsTo(process, "droid.interrupt_session").map((request) => request.params),
-                [{}],
-              );
-              assert.deepStrictEqual(process.signals(), []);
-              assert.isTrue(
-                terminal.type === "turn.terminal" &&
-                  terminal.status === "interrupted" &&
-                  terminal.threadDisposition === "reusable",
-              );
-              assert.strictEqual(sessionStatuses(opened.all).at(-1), "ready");
-              assert.isFalse(Deferred.isDoneUnsafe(opened.streamEnded), "the session stays up");
-            }).pipe(Effect.scoped, Effect.provide(layerTest)),
-        );
-      }
+            assert.deepStrictEqual(
+              requestsTo(process, "droid.interrupt_session").map((request) => request.params),
+              [{}],
+            );
+            assert.deepStrictEqual(process.signals(), []);
+            assert.isTrue(
+              terminal.type === "turn.terminal" &&
+                terminal.status === "interrupted" &&
+                terminal.threadDisposition === "reusable",
+            );
+            assert.strictEqual(sessionStatuses(opened.all).at(-1), "ready");
+            assert.isFalse(Deferred.isDoneUnsafe(opened.streamEnded), "the session stays up");
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
     });
   });
 

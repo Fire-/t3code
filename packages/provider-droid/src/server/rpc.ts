@@ -359,11 +359,9 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
   };
 
   /**
-   * A dead leader cannot tell us whether its descendants are alive, and once nothing is left
-   * in the group the OS may recycle the pid, so the first check treats a dead leader as
-   * "nothing to stop". After our own SIGTERM that shortcut is wrong: a descendant can ignore
-   * it and outlive the leader. POSIX never reuses a pid as a process or group id while any
-   * process is still in that group, so a successful group probe still means our group, and
+   * The first check treats a dead leader as "nothing to stop", but after our own SIGTERM a
+   * descendant can ignore it and outlive the leader. POSIX never reuses a pid as a group id while
+   * any process is still in that group, so a successful group probe still means our group, and
    * after the leader died it is the only evidence of a survivor.
    */
   const probeGroup = (): "alive" | "lingering" | "gone" => {
@@ -711,39 +709,38 @@ export const makeDroidRpcRuntime = Effect.fn("makeDroidRpcRuntime")(function* (
     Effect.forkIn(scope),
   );
 
-  const request = (
+  const request = Effect.fn("DroidRpc.request")(function* (
     method: string,
     params: object = {},
     requestOptions?: { readonly timeout?: Duration.Input },
-  ): Effect.Effect<unknown, DroidRpcRequestError> =>
-    Effect.gen(function* () {
-      const id = String(yield* Ref.getAndUpdate(nextId, (current) => current + 1));
-      const deferred = yield* Deferred.make<unknown, DroidRpcRequestError>();
-      const registered = yield* Ref.modify(state, (current) => {
-        if (current.terminating) return [false, current] as const;
-        const pending = new Map(current.pending).set(id, { method, deferred });
-        return [true, { ...current, pending }] as const;
-      });
-      if (!registered) {
-        return yield* Deferred.await(terminated).pipe(Effect.flatMap(Effect.fail));
-      }
-      if (method === "droid.add_user_message") {
-        yield* Ref.set(turnMayBeRunning, true);
-      }
-      yield* write(envelope({ type: "request", id, method, params })).pipe(
-        Effect.tapError(() => removePending(id)),
-      );
-      const timeout = Duration.fromInputUnsafe(requestOptions?.timeout ?? timeoutForMethod(method));
-      const result = yield* Deferred.await(deferred).pipe(
-        Effect.timeoutOption(timeout),
-        Effect.onInterrupt(() => removePending(id)),
-      );
-      if (Option.isNone(result)) {
-        yield* removePending(id);
-        return yield* new DroidRpcTimeoutError({ method, timeoutMs: Duration.toMillis(timeout) });
-      }
-      return result.value;
+  ): Effect.fn.Return<unknown, DroidRpcRequestError> {
+    const id = String(yield* Ref.getAndUpdate(nextId, (current) => current + 1));
+    const deferred = yield* Deferred.make<unknown, DroidRpcRequestError>();
+    const registered = yield* Ref.modify(state, (current) => {
+      if (current.terminating) return [false, current] as const;
+      const pending = new Map(current.pending).set(id, { method, deferred });
+      return [true, { ...current, pending }] as const;
     });
+    if (!registered) {
+      return yield* Deferred.await(terminated).pipe(Effect.flatMap(Effect.fail));
+    }
+    if (method === "droid.add_user_message") {
+      yield* Ref.set(turnMayBeRunning, true);
+    }
+    yield* write(envelope({ type: "request", id, method, params })).pipe(
+      Effect.tapError(() => removePending(id)),
+    );
+    const timeout = Duration.fromInputUnsafe(requestOptions?.timeout ?? timeoutForMethod(method));
+    const result = yield* Deferred.await(deferred).pipe(
+      Effect.timeoutOption(timeout),
+      Effect.onInterrupt(() => removePending(id)),
+    );
+    if (Option.isNone(result)) {
+      yield* removePending(id);
+      return yield* new DroidRpcTimeoutError({ method, timeoutMs: Duration.toMillis(timeout) });
+    }
+    return result.value;
+  });
 
   const takeOpenInbound = (id: string) =>
     Ref.modify(openInbound, (current) => {

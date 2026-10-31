@@ -14,7 +14,7 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import * as OS from "node:os";
+import * as NodeOS from "node:os";
 
 import {
   DROID_RPC_REPLAY_PROTOCOL,
@@ -40,15 +40,12 @@ import {
 import { DROID_PROBE_FIXTURES } from "./droidReplayProbes.ts";
 import { collectHostIds, collectMachineIds, scrubDroidEntries } from "./droidReplayScrub.ts";
 
-/**
- * Which fixtures may be recorded, and what each needs around the binary. The fixture
- * registration in `fixtures/index.ts` owns the prompts, the model and the runtime mode.
- *
- * - `awaitPreviousExit`: start a Droid process only after the previous one exited. A fixture
- *   sends its next message immediately after the idle release, so without this the second
- *   process could load a session the first is still closing.
- */
+/** What each recordable fixture needs around the binary; `fixtures/index.ts` owns the rest. */
 interface DroidRecordingScenario {
+  /**
+   * A fixture sends its next message right after the idle release, so without waiting for the
+   * previous process to exit the next one could load a session the first is still closing.
+   */
   readonly awaitPreviousExit?: boolean;
 }
 
@@ -116,13 +113,13 @@ if (!RECORDABLE_MODELS.has(variant.modelSelection.model)) {
   );
 }
 
-const home = OS.homedir();
-const userName = OS.userInfo().username;
-const hostName = OS.hostname();
+const home = NodeOS.homedir();
+const userName = NodeOS.userInfo().username;
+const hostName = NodeOS.hostname();
 const hostNames = [hostName, hostName.split(".")[0] ?? ""].filter(
   (name) => name.length >= MIN_HOST_NAME_CHARS,
 );
-const systemTmpDir = OS.tmpdir().replace(/\/+$/u, "");
+const systemTmpDir = NodeOS.tmpdir().replace(/\/+$/u, "");
 
 class DroidRecorderError extends Schema.TaggedError<DroidRecorderError>()("DroidRecorderError", {
   detail: Schema.String,

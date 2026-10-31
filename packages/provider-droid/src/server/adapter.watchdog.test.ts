@@ -317,36 +317,34 @@ describe("DroidAdapterV2 inactivity watchdog", () => {
       },
     ];
 
-    for (const { name, method, params, answer, opens, settles } of cases) {
-      it.effect(
-        `${name} that nobody has answered is not silence, and the ten minutes begin when it is answered`,
-        () =>
-          Effect.gen(function* () {
-            const { opened, process } = yield* silentTurn("approval-required");
-            yield* process.emitInbound("inbound-1", method, params);
-            const shown = yield* observe(opened, opens);
-            if (shown.type !== "runtime_request.updated") return assert.fail("no request");
+    it.effect.each(cases)(
+      "$name that nobody has answered is not silence, and the ten minutes begin when it is answered",
+      ({ method, params, answer, opens, settles }) =>
+        Effect.gen(function* () {
+          const { opened, process } = yield* silentTurn("approval-required");
+          yield* process.emitInbound("inbound-1", method, params);
+          const shown = yield* observe(opened, opens);
+          if (shown.type !== "runtime_request.updated") return assert.fail("no request");
 
-            yield* TestClock.adjust(Duration.minutes(25));
-            assert.strictEqual(terminals(opened.all).length, 0, "an open request is not silence");
+          yield* TestClock.adjust(Duration.minutes(25));
+          assert.strictEqual(terminals(opened.all).length, 0, "an open request is not silence");
 
-            yield* opened.runtime.respondToRuntimeRequest({
-              requestId: shown.runtimeRequest.id,
-              ...answer,
-            });
-            yield* observe(opened, settles);
+          yield* opened.runtime.respondToRuntimeRequest({
+            requestId: shown.runtimeRequest.id,
+            ...answer,
+          });
+          yield* observe(opened, settles);
 
-            yield* TestClock.adjust(JUST_UNDER_TEN_MINUTES);
-            assert.strictEqual(terminals(opened.all).length, 0, "the window began at the answer");
-            yield* TestClock.adjust(ONE_MILLI);
-            const terminal = yield* opened.takeEvent(isTerminal);
+          yield* TestClock.adjust(JUST_UNDER_TEN_MINUTES);
+          assert.strictEqual(terminals(opened.all).length, 0, "the window began at the answer");
+          yield* TestClock.adjust(ONE_MILLI);
+          const terminal = yield* opened.takeEvent(isTerminal);
 
-            assertWatchdogTerminal(opened, terminal);
-            assert.isTrue(process.answers().some((reply) => reply.id === "inbound-1"));
-            yield* assertTornDown(opened, process);
-          }).pipe(Effect.scoped, Effect.provide(layerTest)),
-      );
-    }
+          assertWatchdogTerminal(opened, terminal);
+          assert.isTrue(process.answers().some((reply) => reply.id === "inbound-1"));
+          yield* assertTornDown(opened, process);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
   });
 
   it.effect(

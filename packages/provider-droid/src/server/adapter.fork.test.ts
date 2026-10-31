@@ -120,9 +120,11 @@ const forkInput = (
   ownerNodeId: OWNER_NODE_ID,
 });
 
+const hasStringId = Schema.is(Schema.Struct({ id: Schema.String }));
+
 const messageIdsOf = (fake: FakeDroid, sessionId: string | null | undefined) =>
   (fake.sessions.get(String(sessionId))?.messages ?? []).map((message) =>
-    Schema.is(Schema.Struct({ id: Schema.String }))(message) ? message.id : undefined,
+    hasStringId(message) ? message.id : undefined,
   );
 
 const loadedSessions = (fake: FakeDroid) =>

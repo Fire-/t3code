@@ -167,22 +167,13 @@ export const definedDroidEnvironment = (environment: NodeJS.ProcessEnv): Record<
   );
 
 /**
- * Boots Droid once in RPC mode and reads its model registry. The cwd is a fresh temp
- * directory, never a project checkout, so no workspace MCP servers or hooks start; the
- * runtime adds the hooks-off settings file. Only `droid.list_models` goes over the wire, then
- * closing the scope ends the child. That is deliberate: `droid.close_session` is a session
- * method and no session exists. It never fails: an error, a malformed or empty result, or a
- * timeout comes back as a short reason that is safe to log.
+ * The cwd is a fresh temp directory so no workspace MCP servers or hooks start; the runtime adds
+ * the hooks-off settings. Only `droid.list_models` goes over the wire and closing the scope ends
+ * the child, since `droid.close_session` needs a session. Never fails: an error, a malformed or
+ * empty result, or a timeout comes back as a short reason that is safe to log.
  */
-const discoverDroidModels = (
-  droidSettings: DroidSettings,
-  environment: NodeJS.ProcessEnv,
-): Effect.Effect<
-  Result.Result<ReadonlyArray<ServerProviderModel>, string>,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
-> =>
-  Effect.gen(function* () {
+const discoverDroidModels = Effect.fn("DroidProviderStatus.discoverDroidModels")(
+  function* (droidSettings: DroidSettings, environment: NodeJS.ProcessEnv) {
     const fileSystem = yield* FileSystem.FileSystem;
     const neutralCwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-droid-probe-cwd-" });
     const runtime = yield* makeDroidRpcRuntime({
@@ -197,18 +188,19 @@ const discoverDroidModels = (
       { timeout: DROID_DISCOVERY_TIMEOUT_MS },
     );
     return buildDroidModelsFromListModels(listed);
-  }).pipe(
-    Effect.scoped,
-    Effect.timeoutOption(DROID_DISCOVERY_TIMEOUT_MS),
-    Effect.map(
-      Option.match({
-        onNone: () => Result.fail("timed out"),
-        onSome: (models) =>
-          models.length === 0 ? Result.fail("returned no models") : Result.succeed(models),
-      }),
-    ),
-    Effect.catchCause((cause) => Effect.succeed(Result.fail(causeErrorTag(cause)))),
-  );
+  },
+  Effect.scoped,
+  Effect.timeoutOption(DROID_DISCOVERY_TIMEOUT_MS),
+  Effect.map(
+    Option.match({
+      onNone: (): Result.Result<ReadonlyArray<ServerProviderModel>, string> =>
+        Result.fail("timed out"),
+      onSome: (models) =>
+        models.length === 0 ? Result.fail("returned no models") : Result.succeed(models),
+    }),
+  ),
+  Effect.catchCause((cause) => Effect.succeed(Result.fail(causeErrorTag(cause)))),
+);
 
 /**
  * Best-effort credential hint. It looks at two things only: whether `FACTORY_API_KEY` is
@@ -269,42 +261,40 @@ export const withDroidAuthFailure = (draft: ServerProviderDraft): ServerProvider
           "Droid could not authenticate its last turn. Set FACTORY_API_KEY or run `droid` once to sign in.",
       };
 
-export function buildInitialDroidProviderSnapshot(
-  droidSettings: DroidSettings,
-): Effect.Effect<ServerProviderDraft> {
-  return Effect.gen(function* () {
-    const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const models = droidModelsFromSettings(droidSettings.customModels);
-    if (!droidSettings.enabled) {
-      return buildServerProvider({
-        presentation: DROID_PRESENTATION,
-        enabled: false,
-        checkedAt,
-        models,
-        probe: {
-          installed: false,
-          version: null,
-          status: "warning",
-          auth: unknownAuth,
-          message: "Droid is disabled in T3 Code settings.",
-        },
-      });
-    }
+export const buildInitialDroidProviderSnapshot = Effect.fn(
+  "DroidProviderStatus.buildInitialDroidProviderSnapshot",
+)(function* (droidSettings: DroidSettings): Effect.fn.Return<ServerProviderDraft> {
+  const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
+  const models = droidModelsFromSettings(droidSettings.customModels);
+  if (!droidSettings.enabled) {
     return buildServerProvider({
       presentation: DROID_PRESENTATION,
-      enabled: true,
+      enabled: false,
       checkedAt,
       models,
       probe: {
-        installed: true,
+        installed: false,
         version: null,
         status: "warning",
         auth: unknownAuth,
-        message: "Checking Droid CLI availability...",
+        message: "Droid is disabled in T3 Code settings.",
       },
     });
+  }
+  return buildServerProvider({
+    presentation: DROID_PRESENTATION,
+    enabled: true,
+    checkedAt,
+    models,
+    probe: {
+      installed: true,
+      version: null,
+      status: "warning",
+      auth: unknownAuth,
+      message: "Checking Droid CLI availability...",
+    },
   });
-}
+});
 
 export const checkDroidProviderStatus = Effect.fn("checkDroidProviderStatus")(function* (
   droidSettings: DroidSettings,

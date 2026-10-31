@@ -153,6 +153,9 @@ export const makeAdapter = Effect.fnUntraced(function* (
     : make.pipe(Effect.provideService(DroidAuthSignal, authSignal));
 });
 
+const decodeServerSettings = Schema.decodeEffect(ServerSettings);
+const decodeDroidConfig = Schema.decodeEffect(DroidAdapterV2Driver.configSchema);
+
 const SAVED_BLOCK = {
   driver: "droid",
   enabled: true,
@@ -161,14 +164,14 @@ const SAVED_BLOCK = {
 
 /** The adapter a restart builds: the saved `droid` provider instance block through the driver. */
 export const adapterFromSavedBlock = Effect.fnUntraced(function* (fake: FakeDroid) {
-  const settings = yield* Schema.decodeEffect(ServerSettings)({
+  const settings = yield* decodeServerSettings({
     providerInstances: { droid: SAVED_BLOCK },
   });
   const saved = settings.providerInstances[DROID_INSTANCE_ID];
   if (saved === undefined || !Predicate.isObject(saved.config)) {
     return assert.fail("the saved droid block did not decode");
   }
-  const config = yield* Schema.decodeEffect(DroidAdapterV2Driver.configSchema)({
+  const config = yield* decodeDroidConfig({
     enabled: saved.enabled,
     ...saved.config,
   });

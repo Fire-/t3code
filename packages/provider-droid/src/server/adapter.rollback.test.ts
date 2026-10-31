@@ -92,9 +92,11 @@ const rollbackToStart = (
   providerThreadTurns: turns,
 });
 
+const hasStringId = Schema.is(Schema.Struct({ id: Schema.String }));
+
 const messageIdsOf = (fake: FakeDroid, sessionId: string | null | undefined) =>
   (fake.sessions.get(String(sessionId))?.messages ?? []).map((message) =>
-    Schema.is(Schema.Struct({ id: Schema.String }))(message) ? message.id : undefined,
+    hasStringId(message) ? message.id : undefined,
   );
 
 const newRef = (nativeId: string) => ({
