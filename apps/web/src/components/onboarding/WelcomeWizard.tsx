@@ -44,6 +44,7 @@ import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { completeOnboarding } from "../../onboarding/firstRun";
 import {
   groupOnboardingProjects,
+  isOutsideImportWindow,
   partitionOnboardingProjects,
   onboardingProjectKey,
   resolveOnboardingLandingProject,
@@ -1408,6 +1409,9 @@ function ImportStep({
       title="Import your projects"
       description="Import projects and conversations from Claude Code, Codex, and Droid on your selected computers."
     >
+      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+        Only conversations from the last 30 days are imported.
+      </p>
       {candidates.length > 0 ? (
         <div className="mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
           <span role="status">
@@ -1694,6 +1698,9 @@ function ImportCandidateRow({
         </TooltipTrigger>
         <TooltipPopup variant="code">{candidate.path}</TooltipPopup>
       </Tooltip>
+      {isOutsideImportWindow(candidate.lastActiveAt) ? (
+        <span className="shrink-0 text-2xs text-muted-foreground">No recent conversations</span>
+      ) : null}
       <ImportRowMeta
         sources={nested ? null : candidate.sources}
         threadCount={candidate.threadCount}
