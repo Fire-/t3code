@@ -38,13 +38,11 @@ export function thinkingCapabilitiesForPrimeModel(
         id: "thinking",
         label: "Thinking",
         type: "select",
-        options: levels.map(
-          (level): ProviderOptionChoice => ({
-            id: level,
-            label: PRIME_THINKING_LEVEL_LABELS[level],
-            ...(level === defaultLevel ? { isDefault: true } : {}),
-          }),
-        ),
+        options: levels.map((level): ProviderOptionChoice => ({
+          id: level,
+          label: PRIME_THINKING_LEVEL_LABELS[level],
+          ...(level === defaultLevel ? { isDefault: true } : {}),
+        })),
       },
     ],
   });
