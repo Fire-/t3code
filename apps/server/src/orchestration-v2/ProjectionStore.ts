@@ -6291,16 +6291,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         `;
           return yield* Effect.forEach(rows, (row) =>
             decodeThreadPayload(row.payload_json).pipe(
-              Effect.map(
-                (thread): ProjectionThreadPullRequests => ({
-                  id: thread.id,
-                  projectId: thread.projectId,
-                  lineage: thread.lineage,
-                  settledOverride: thread.settledOverride,
-                  settledAt: thread.settledAt,
-                  pullRequests: thread.pullRequests ?? [],
-                }),
-              ),
+              Effect.map((thread): ProjectionThreadPullRequests => ({
+                id: thread.id,
+                projectId: thread.projectId,
+                lineage: thread.lineage,
+                settledOverride: thread.settledOverride,
+                settledAt: thread.settledAt,
+                pullRequests: thread.pullRequests ?? [],
+              })),
             ),
           );
         },
