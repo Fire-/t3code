@@ -30,7 +30,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
-  type MessageId,
+  MessageId,
   type ModelSelection,
   type ProviderApprovalDecision,
   type ProviderInstanceId,
@@ -558,6 +558,10 @@ const turnPromptId = (sessionId: string, attemptId: string) =>
   SessionMessage.ID.make(`msg_t3_turn_${sessionId}:${attemptId}`);
 const steerPromptId = (sessionId: string, messageId: string) =>
   SessionMessage.ID.make(`msg_t3_steer_${sessionId}:${messageId}`);
+const steerMessageId = (sessionId: string, inboxID: string) => {
+  const prefix = `msg_t3_steer_${sessionId}:`;
+  return inboxID.startsWith(prefix) ? MessageId.make(inboxID.slice(prefix.length)) : undefined;
+};
 
 const promptOf = (turn: OrchestrationV2ProviderTurn) => {
   const nativeId = turn.nativeTurnRef?.nativeId;
@@ -724,6 +728,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
       Queue.offer(events, event).pipe(Effect.asVoid);
     const ownerOf = (sessionId: string) => childOwners.get(sessionId) ?? threads.get(sessionId);
+    const reportDiscardedSteer = (state: ThreadState, inboxID: string) => {
+      const threadId = state.providerThread.appThreadId;
+      const messageId = steerMessageId(state.sessionId, inboxID);
+      return threadId === null || messageId === undefined
+        ? Effect.void
+        : emit({ type: "steer.discarded", driver, threadId, messageId });
+    };
     const markUnsettled = (state: ThreadState) => {
       state.unsettled = true;
       state.unsettledStarted = busy.has(state.sessionId);
@@ -2401,7 +2412,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         const turn = state.active;
         if (turn !== undefined && turn.steers.delete(event.data.inboxID)) {
           turn.settledInbox.add(event.data.inboxID);
-          if (event.type === "session.inbox.cancelled") yield* endIfSettled(state, turn);
+          if (event.type === "session.inbox.cancelled") {
+            yield* reportDiscardedSteer(state, event.data.inboxID);
+            yield* endIfSettled(state, turn);
+          }
         }
         return;
       }
@@ -2861,7 +2875,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             Effect.exit,
             Effect.map(Exit.isSuccess),
           );
-        if (cancelled) state.strandedSteers.delete(inboxID);
+        if (!cancelled) continue;
+        state.strandedSteers.delete(inboxID);
+        yield* reportDiscardedSteer(state, inboxID);
       }
     });
 
