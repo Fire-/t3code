@@ -6328,16 +6328,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         `;
           return yield* Effect.forEach(rows, (row) =>
             decodeThreadPayload(row.payload_json).pipe(
-              Effect.map(
-                (thread): ProjectionThreadPullRequests => ({
-                  id: thread.id,
-                  projectId: thread.projectId,
-                  lineage: thread.lineage,
-                  settledOverride: thread.settledOverride,
-                  settledAt: thread.settledAt,
-                  pullRequests: thread.pullRequests ?? [],
-                }),
-              ),
+              Effect.map((thread): ProjectionThreadPullRequests => ({
+                id: thread.id,
+                projectId: thread.projectId,
+                lineage: thread.lineage,
+                settledOverride: thread.settledOverride,
+                settledAt: thread.settledAt,
+                pullRequests: thread.pullRequests ?? [],
+              })),
             ),
           );
         },
@@ -6761,29 +6759,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND json_extract(t.payload_json, '$.archivedAt') IS NULL
         ORDER BY t.updated_at ASC, t.thread_id ASC
       `;
-      return rows.map(
-        (row): ActiveShellIndexEntry => ({
-          id: ThreadId.make(row.thread_id),
-          projectId: ProjectId.make(row.project_id),
-          lineage: {
-            parentThreadId:
-              row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
-            relationshipToParent:
-              row.relationship_to_parent === "fork" || row.relationship_to_parent === "subagent"
-                ? row.relationship_to_parent
-                : null,
-            rootThreadId: ThreadId.make(row.root_thread_id),
-          },
-          settledOverride:
-            row.settled_override === "settled" || row.settled_override === "active"
-              ? row.settled_override
+      return rows.map((row): ActiveShellIndexEntry => ({
+        id: ThreadId.make(row.thread_id),
+        projectId: ProjectId.make(row.project_id),
+        lineage: {
+          parentThreadId:
+            row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
+          relationshipToParent:
+            row.relationship_to_parent === "fork" || row.relationship_to_parent === "subagent"
+              ? row.relationship_to_parent
               : null,
-          settledAt: row.settled_at === null ? null : DateTime.makeUnsafe(row.settled_at),
-          pinnedAt: row.pinned_at === null ? null : DateTime.makeUnsafe(row.pinned_at),
-          snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
-          mayBeLive: row.may_be_live === 1,
-        }),
-      );
+          rootThreadId: ThreadId.make(row.root_thread_id),
+        },
+        settledOverride:
+          row.settled_override === "settled" || row.settled_override === "active"
+            ? row.settled_override
+            : null,
+        settledAt: row.settled_at === null ? null : DateTime.makeUnsafe(row.settled_at),
+        pinnedAt: row.pinned_at === null ? null : DateTime.makeUnsafe(row.pinned_at),
+        snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
+        mayBeLive: row.may_be_live === 1,
+      }));
     }, Effect.mapError(shellSnapshotReadError));
 
     const findGuestShareThreadId = Effect.fn("ProjectionStore.findGuestShareThreadId")(function* (
