@@ -3156,7 +3156,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         wake.dropped = true;
         for (const childId of wake.children) retire(childId);
       }
-      for (let grew = retired.size > 0; grew; ) {
+      for (let grew = retired.size > 0; grew;) {
         grew = false;
         for (const [childId, info] of announced) {
           if (info.parentID === undefined || !retired.has(info.parentID)) continue;
