@@ -44,6 +44,7 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
+  canRollbackToCheckpoint,
   IDLE_COMPACTION_TEXT,
   idleCompactionOf,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
@@ -5166,13 +5167,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               rootNodes: [],
               staleCheckpoints: [],
             };
+            // The rollback service applies the stricter file-restore rule.
             if (
               providerThread === undefined ||
               providerThread.providerSessionId === null ||
               checkpoint === undefined ||
               scope === undefined ||
               checkpoint.scopeId !== scope.id ||
-              checkpoint.status !== "ready" ||
+              !canRollbackToCheckpoint(checkpoint.status, false) ||
               providerThread.id !== thread.activeProviderThreadId ||
               providerThread.providerInstanceId !== thread.modelSelection.instanceId
             )
