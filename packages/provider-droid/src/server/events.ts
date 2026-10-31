@@ -1,11 +1,8 @@
 /**
- * Droid session notifications to v2 provider events. Pure: each call takes the turn's mapper
- * state and returns the next state plus the events to emit. No Effect services and no I/O; the
- * adapter owns the clock, logging, requests, subagents, and `turn.terminal`.
- *
- * `ctx.providerThread` and `ctx.providerTurn` must be the adapter's current records: events that
- * carry them (`provider_thread.updated`) are built from them, so the adapter adopts the emitted
- * record before the next call.
+ * Pure: each call takes the turn's mapper state and returns the next state plus events; the adapter
+ * owns the clock, logging, requests, subagents, and `turn.terminal`. `ctx.providerThread` and
+ * `ctx.providerTurn` must be the adapter's current records: `provider_thread.updated` is built
+ * from them, so the adapter adopts the emitted record before the next call.
  */
 import {
   type NodeId,
@@ -271,10 +268,6 @@ function nodeEvent(
     },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Streaming text and reasoning
-// ---------------------------------------------------------------------------
 
 const blockKey = (kind: StreamBlock["kind"], messageId: string, blockIndex: number): string =>
   `${kind}:${messageId}:${blockIndex}`;
@@ -692,10 +685,6 @@ export function flushDroidStreams(
   return events.length === 0 ? unchanged(state) : { state: { ...state, blocks }, events };
 }
 
-// ---------------------------------------------------------------------------
-// Tools
-// ---------------------------------------------------------------------------
-
 type ToolSettleStatus = "completed" | "failed" | "interrupted" | "cancelled";
 
 export interface DroidToolSettlement {
@@ -1055,10 +1044,6 @@ function mapToolProgress(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Proposed plans
-// ---------------------------------------------------------------------------
-
 /**
  * The plan Droid wrote before asking to leave spec mode: a `proposed_plan` item in the turn and
  * its artifact, which supersedes the thread's previous proposal. `sourceId` is the ExitSpecMode
@@ -1115,10 +1100,6 @@ export function mapDroidProposedPlan(
   );
   return { state: { ...state, nextItemOrdinal: state.nextItemOrdinal + 1 }, events, plan };
 }
-
-// ---------------------------------------------------------------------------
-// Todo lists
-// ---------------------------------------------------------------------------
 
 const DROID_TODO_LINE = /^\s*\d+\.\s*\[([a-z_]+)\]\s*(.*?)\s*$/u;
 
@@ -1210,10 +1191,6 @@ export function mapDroidTodoList(
     plan,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Token usage
-// ---------------------------------------------------------------------------
 
 /** Droid's `inputTokens` excludes cache reads and writes; t3's input counts both. */
 const contextInputTokens = (counts: DroidTokenCounts): number =>
@@ -1317,11 +1294,10 @@ function turnUsage(
 }
 
 /**
- * The turn's main-agent usage. `agent_turn_completed.tokenUsage` includes Task children, so
- * theirs is subtracted. A zero or missing report (a turn cancelled before any call, or the
- * `process_exit` terminator) falls back to the session's growth since the turn began, which is
- * exact whenever the session total at turn start is known: a fresh session starts at zero.
- * Only a loaded session whose total was never seen is `unavailable`.
+ * Main-agent usage: `agent_turn_completed.tokenUsage` includes Task children, so theirs is
+ * subtracted. A zero or missing report (cancelled before any call, or `process_exit`) falls back
+ * to the session's growth since the turn began, exact when the starting total is known (a fresh
+ * session starts at zero). Only a loaded session whose total was never seen is `unavailable`.
  */
 export function droidTurnTokenUsage(
   state: DroidMapperState,
@@ -1438,10 +1414,6 @@ function mapTurnCompleted(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Compaction
-// ---------------------------------------------------------------------------
-
 export type DroidCompactionStatus = "running" | "completed" | "failed" | "cancelled";
 
 const COMPACTION_TITLE: Readonly<Record<DroidCompactionStatus, string>> = {
@@ -1483,10 +1455,6 @@ export function droidCompactionEvents(
     },
   ];
 }
-
-// ---------------------------------------------------------------------------
-// Entry points
-// ---------------------------------------------------------------------------
 
 /**
  * Maps one Droid notification. Content, tool, and usage notifications map here; lifecycle and

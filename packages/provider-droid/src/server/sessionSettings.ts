@@ -116,11 +116,10 @@ export interface DroidSessionSettings {
 }
 
 /**
- * What t3 asks Droid for, from the thread's current selection alone. The effort is the selection's
- * own, else the selected model's catalog default from the model list the session reported. Nothing
- * remembers where an earlier effort came from, so the same selection always yields the same
- * settings. With no effort to ask for (the router, a model that lists none, or no model list yet)
- * the frame carries none and Droid keeps what it holds.
+ * Built from the thread's current selection alone, so the same selection always yields the same
+ * settings. The effort is the selection's own, else the model's catalog default from the session's
+ * model list; with neither (the router, a model that lists none, no model list yet) the frame
+ * carries no effort and Droid keeps what it holds.
  */
 export const droidSessionSettings = (input: {
   readonly runtimeMode: RuntimeMode;

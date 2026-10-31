@@ -1,9 +1,8 @@
 /**
- * Droid's sessions on disk, as the agent-session importer reads them. Droid writes each session to
- * `~/.factory/sessions/<cwd with "/" as "-">/<session id>.jsonl`: a `session_start` record (id,
- * title, cwd, and `callingSessionId` on a subagent's own session), then `message` records that wrap
- * what `load_session` returns as `{ type: "message", id, timestamp, message: { role, content } }`.
- * The folder name is lossy, so the cwd comes from `session_start`.
+ * Droid writes each session to `~/.factory/sessions/<cwd with "/" as "-">/<session id>.jsonl`: a
+ * `session_start` record (id, title, cwd, `callingSessionId` on a subagent's session), then
+ * `message` records wrapping what `load_session` returns. The folder name is lossy, so the cwd
+ * comes from `session_start`.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";

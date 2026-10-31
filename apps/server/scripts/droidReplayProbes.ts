@@ -409,11 +409,10 @@ const WAKE_ROLLBACK_EXTRA_REPLY = "EXTRA_DONE";
 const WAKE_ROLLBACK_EXTRA_PROMPT = `Reply exactly ${WAKE_ROLLBACK_EXTRA_REPLY} and stop. Do not call any tool.`;
 
 /**
- * Rolls a thread back across its wake turn: a background Task, the continuation turn Droid starts
- * when the task reports, one more user turn, then a rollback to the checkpoint before the wake
- * turn. The adapter rewinds to the wake turn's own ref (`task-completion:<id>`), so the recording
- * shows whether Droid keeps a message under that id and what a rewind to it leaves. Either answer
- * is a valid recording.
+ * A background Task, the wake turn Droid starts when it reports, one more user turn, then a
+ * rollback to before the wake turn. The adapter rewinds to the wake turn's own ref
+ * (`task-completion:<id>`), so this records whether Droid keeps a message under that id and what a
+ * rewind to it leaves. Either answer is a valid recording.
  */
 function assertWakeRollback(
   result: OrchestratorV2ScenarioResult,

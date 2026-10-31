@@ -1,16 +1,8 @@
 /**
- * Droid's stored history, as `load_session` returns it. Droid keeps its own plumbing there next to
- * the conversation: `context-<id>` (the user's private injected context, tens of thousands of
- * characters) and `__internal__system-reminder__<uuid>`, both `llm_only`. None of it may reach an
- * event, an item, or a snapshot, so it is dropped here and never copied.
- *
- * Only the visible messages are read from the list (`visibleDroidHistory`). Turns are never
- * rebuilt from it: a user message in the list may be a steer Droid folded into a running turn,
- * and spec-mode turns carry `llm_only` reminders of their own, so the list alone does not say
- * where a t3 turn begins. The provider turns t3 recorded already carry the message ids, so a
- * rollback reads those (`droidRollbackMessageId`), and a steer stays with the t3 turn it was sent
- * to. A fork reads the stored ids once, to tell the recorded turns the history still holds from
- * the ones a rollback removed (`droidForkRewindMessageId`).
+ * `load_session` history holds Droid's `llm_only` plumbing (`context-<id>`, the user's private
+ * injected context, and `__internal__system-reminder__<uuid>`); none of it may reach an event,
+ * item, or snapshot. Turns are never rebuilt from the list: a user message may be a folded steer,
+ * so rollbacks and forks go by the message ids on the provider turns t3 recorded.
  */
 import type { OrchestrationV2ProviderRef } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
@@ -56,11 +48,10 @@ export function visibleDroidHistory(messages: unknown): ReadonlyArray<DroidHisto
 }
 
 /**
- * The Droid message a t3 rollback rewinds to, read from the provider turns t3 recorded: each one
- * keeps the id of the user message that began it as its `nativeTurnRef`. The boundary is the
- * earliest turn after the target, so a steer folded into the target turn (it sits before the next
- * turn's message) stays with the target. Returns `null` when no turn follows the target (nothing
- * to discard) and `undefined` when that turn has no strong ref to rewind to.
+ * Each recorded provider turn keeps the id of its first user message as `nativeTurnRef`. The
+ * boundary is the earliest turn after the target, so a steer folded into the target stays with it.
+ * `null` when no turn follows the target (nothing to discard), `undefined` when that turn has no
+ * strong ref to rewind to.
  */
 export function droidRollbackMessageId(input: {
   readonly target:
@@ -92,11 +83,10 @@ export function droidMessageIds(messages: unknown): ReadonlySet<string> {
 }
 
 /**
- * The message `execute_rewind` takes to cut a fork just after the target turn: the user message of
- * the first later turn the stored history still holds. The recorded turns include ones a rollback
- * removed and compaction turns that began with no user message, so a turn only counts when it
- * has a strong ref whose id `sourceMessageIds` lists. `null` when no such turn follows (the fork
- * already ends at the target) or when there is no target (a fork from the head).
+ * `execute_rewind` cuts the fork at the first later turn the stored history still holds. Recorded
+ * turns include ones a rollback removed and compaction turns with no user message, so a turn counts
+ * only with a strong ref whose id `sourceMessageIds` lists. `null` when no such turn follows or
+ * there is no target (a fork from the head).
  */
 export function droidForkRewindMessageId(input: {
   readonly targetOrdinal: number | undefined;

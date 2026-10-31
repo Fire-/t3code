@@ -1,13 +1,8 @@
 /**
- * Droid `Task` subagents to v2 subagent events. Pure, like `events.ts`: each call takes the
- * subagent's record and returns the next record plus the events to emit. The adapter owns the
- * records, the clock, and the roster of pending background tasks.
- *
- * A record freezes the ids it launched under (run, provider turn, nodes), so a background
- * subagent can still settle after the turn that launched it has ended.
- *
- * A child session gets a read-only child thread. Droid does not stream a child's events, so the
- * thread holds the Task prompt while the child runs and its transcript once it has ended.
+ * Pure, like `events.ts`; the adapter owns the records, the clock, and pending background tasks.
+ * A record freezes the ids it launched under, so a background subagent can settle after its turn
+ * ends. Droid does not stream a child's events, so the read-only child thread holds the Task
+ * prompt while the child runs and its transcript once it has ended.
  */
 import type {
   ModelSelection,
@@ -459,13 +454,10 @@ function announce(
 const DROPPED_FOLLOW_UP = "Droid dropped this follow-up because the subagent was still running.";
 
 /**
- * `child_session_available` starts the subagent. Droid has named the child by now, which is why
- * the subagent starts here and not at the Task call. Returns nothing for a duplicate or a late
- * frame of a subagent that has started or ended: those never reopen it.
- *
- * A Task `resume` of a child another subagent is still running gets a child session too, but
- * Droid never delivers its prompt: the child goes on with what it was doing. That launch ends
- * failed at once and leaves the child thread to the subagent running it.
+ * Starts here, not at the Task call, because Droid has named the child by now. Returns nothing for
+ * a duplicate or late frame of a started or ended subagent. A Task `resume` of a child another
+ * subagent is running gets a child session but never its prompt, so that launch ends failed at
+ * once and leaves the child thread to the subagent running it.
  */
 export function launchDroidSubagent(
   known: DroidSubagent | undefined,

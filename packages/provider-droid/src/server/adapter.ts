@@ -1572,11 +1572,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       /**
-       * Droid asks to leave spec mode once its plan is written. t3 captures the plan as a proposal
-       * and cancels the request: Droid stays in spec mode, finishes the turn without implementing,
-       * and implementing is a later turn of the user's choosing. The user is never asked, and no
-       * `proceed_*` option is ever sent (the `proceed_new_session*` ones would move Droid to a
-       * session t3 does not follow).
+       * t3 captures the plan as a proposal and cancels the request without asking the user, so
+       * Droid finishes the turn in spec mode and implementing is a later turn of the user's
+       * choosing. No `proceed_*` option is ever sent: `proceed_new_session*` would move Droid to
+       * a session t3 does not follow.
        */
       const answerExitSpecMode = Effect.fnUntraced(function* (
         state: DroidThreadState | null,
@@ -2471,11 +2470,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       const wakePending = () => pendingWake !== null;
 
       /**
-       * Moves the thread to a new Droid session that ends just before the first message of the
-       * turn after the target. The rewind forks a session and leaves the process on the one it
-       * holds, so the new one is loaded before it takes any frame. The session id only ever
-       * moves forward: the old session keeps its history on Droid's side, and nothing here or in
-       * `handleEvent` looks at it again.
+       * The rewind forks a session ending just before the turn after the target but leaves the
+       * process on the old one, so the new one is loaded before it takes any frame. The session id
+       * only moves forward: the old session keeps its history on Droid's side, and nothing here or
+       * in `handleEvent` looks at it again.
        */
       const rollbackThread = Effect.fnUntraced(function* (
         rollbackInput: ProviderAdapter.ProviderAdapterV2RollbackThreadInput,
@@ -2771,11 +2769,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       /**
-       * Forks the source's Droid session for another thread, cut after the target turn. Droid's
        * `fork_session` forks whichever session the process holds and leaves the process there, so
-       * the source is loaded first. A fork from an earlier turn then rewinds the copy, which is
-       * another new session; the source is never touched. The thread the runtime hosted before is
-       * replaced: a runtime serves one thread, and the fork's is the one the caller goes on with.
+       * the source is loaded first; a fork from an earlier turn then rewinds the copy, and the
+       * source is never touched. A runtime serves one thread, so the fork's replaces the one it
+       * hosted before.
        */
       const forkThread = Effect.fnUntraced(function* (
         forkInput: ProviderAdapter.ProviderAdapterV2ForkThreadInput,

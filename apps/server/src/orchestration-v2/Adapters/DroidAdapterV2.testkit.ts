@@ -142,12 +142,10 @@ function turnMessageId(frame: unknown): string | undefined {
 }
 
 /**
- * Compares a recorded request against the ids the adapter minted for this run, so the
- * correlation Droid recorded holds without pinning counter values or per-run uuids. The id of a
- * `response` the adapter writes back to a Droid request stays exact.
- *
- * A recorded message id the replay has already bound names an existing turn (the target of a
- * rewind), so the adapter must send the id it chose for that turn. An unbound one is a new turn.
+ * Keeps the recorded correlation without pinning counter values or per-run uuids; the id of a
+ * `response` to a Droid request stays exact. A recorded message id the replay already bound names
+ * an existing turn (a rewind target), so the adapter must send the id it chose for that turn. An
+ * unbound one is a new turn.
  */
 function withAdapterIds(
   expected: unknown,

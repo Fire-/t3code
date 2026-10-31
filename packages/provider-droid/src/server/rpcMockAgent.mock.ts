@@ -5,158 +5,15 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 /**
- * Mock `droid` CLI for tests. Plain Node (run through type stripping), launched
- * through `@t3tools/provider-testing/fakeCli`, so `process.argv.slice(2)` holds the CLI args.
- *
- * Modes (by argv):
- * - `--version` anywhere: prints `0.244.0` and exits 0 before stdin is touched.
- * - `exec --input-format stream-jsonrpc --output-format stream-jsonrpc --cwd <dir> --settings <file>`:
- *   Droid's stream-jsonrpc protocol on stdin/stdout (LF-delimited JSON, Droid envelope,
- *   string ids). Implemented methods: `droid.list_models`, `droid.initialize_session`,
- *   `droid.load_session`, `droid.add_user_message`, `droid.interrupt_session`,
- *   `droid.update_session_settings`, `droid.compact_session`, `droid.execute_rewind`,
- *   `droid.close_session`. `compact_session` answers -32603 before any completed turn and
- *   -32602 while a turn runs, else replies with the SAME session id and follows the response
- *   with `session_compacted`. `execute_rewind` forks the session so it ends just before the
- *   given messageId (tagged `rewind`) and answers `{newSessionId, counts 0}`; the process
- *   stays on the old session until `load_session`. The next `add_user_message` is preceded by
- *   a `session_title_updated` on the pre-rewind session id (SYNTHETIC: a late notification
- *   from the session the rewind left behind). Inbound validation mirrors
- *   Droid: -32700 (id null) for non-JSON, a `type` other than request/response, a missing
- *   `factoryApiVersion`, or a non-string id; -32601 for unknown methods; -32602 for a missing
- *   `params`; -32603 for a session method before `initialize_session`/`load_session`;
- *   -32004 `Session not found` for `load_session` with an id this process never created and
- *   no state file holds (ids not matching `[A-Za-z0-9_-]+` are always rejected). A loaded
- *   session's result has no `sessionId`, matching Droid.
- *
- * Environment:
- * - `DROID_MOCK_LOG`: file path; one JSON line is appended per event: `argv` (with the child's pid), `env`
- *   (whether `FACTORY_API_KEY` reached the child and the names of every `FACTORY_*` variable it
- *   saw; never the values),
- *   `settings_file` (path + content, null when missing), `recv` (every stdin line,
- *   written BEFORE any reply), `response` (client answer to a mock request), `stale_response`,
- *   `invalid_option`, `no_reply`, `tool_executed`, `session_switch` (from + to ids),
- *   `stdin_eof`, `sigterm`, `exit`.
- * - `DROID_MOCK_PROTOCOL_VERSION`: overrides the outgoing `factoryProtocolVersion` (default 1.269.0).
- * - `DROID_MOCK_LIST_MODELS`: `error` answers `droid.list_models` with a -32603 error (its message
- *   and data echo `FACTORY_API_KEY` when set, as a failing real Droid may); `noreply`
- *   never answers it (the request hangs until the caller times out and closes); `malformed`
- *   answers with a body that decodes to no models.
- * - `DROID_MOCK_STUBBORN=1`: same as the `STUBBORN` token, from process start.
- * - `DROID_MOCK_SIGTERM=die`: installs no SIGTERM handler, so SIGTERM ends the process by signal.
- * - `DROID_MOCK_GRANDCHILD=ignore-sigterm`: before reading stdin, spawns a Node process that
- *   ignores SIGTERM and stays in this process's group (not detached), and logs its pid as a
- *   `grandchild` entry once it has installed that handler. The first reply therefore proves the
- *   grandchild is armed. The grandchild outlives this process unless the group is SIGKILLed.
- * - `DROID_MOCK_STATE_DIR`: opt-in directory standing in for Droid's session store, so a later
- *   mock process can `load_session` a session an earlier one created. `<dir>/<sessionId>.json`
- *   is written synchronously on `initialize_session`, on every appended message (before its
- *   `create_message` notification, as real Droid persists each message when created, so a
- *   SIGTERM or crash mid-turn keeps what was emitted), and after every finished turn, and read
- *   only by `load_session` when the id is not in this process's own store. Unset: sessions live
- *   only as long as the process.
- *
- * RPC trigger tokens (substring of `add_user_message.text`; default is a plain text turn):
- * - `TOOL_ME`: Execute tool turn without a permission prompt; `tool_call` fires twice per tool.
- * - `APPROVE_ME`: Execute tool behind an inbound `droid.request_permission` (exec, low impact);
- *   held until the client answers, the client interrupts, or stdin ends. Skipped when the
- *   session autonomy level already covers low impact.
- * - `APPROVE_FILE`: like `APPROVE_ME` with a Create tool (`create` confirmation).
- * - `ASK_ME`: AskUser tool behind an inbound `droid.ask_user` (two questions, the second
- *   multi-select); `{cancelled: true}` or a JSON-RPC error cancels the tool and still ends the
- *   turn `completed`.
- * - `ASK_PERM_ME`: AskUser behind an inbound `droid.request_permission` with
- *   `confirmationType: "ask_user"` (SDK shape; answers travel in the result's `comment`).
- *   An interrupt resolves it with a `permission_resolved` cancel, like a permission.
- * - `PICK_ME`: SlackChannelPicker tool behind `droid.pick_options`; any answer cancels the tool.
- * - `PLAN_ME`: ExitSpecMode tool behind an `exit_spec_mode` permission prompt (9 options,
- *   including the hidden `proceed_new_session*` ones); the plan text is in `details.plan`.
- * - `SWITCH_SESSION`: like `PLAN_ME`, but an approving answer hands off to a fresh session id
- *   (logged as `session_switch`): the implementation runs there as a Droid-generated `impl-turn`
- *   whose completion does not settle the original turn, which ends `spec_handoff` on the old id.
- *   Matches the live order (p13 line 42): the retired session's `session_title_updated` still
- *   arrives mid-turn, after the handoff and before the old-id `spec_handoff` completion, which
- *   is the old session's FINAL event (nothing follows it).
- * - `INTERRUPT_ME`: streams part of a reply, then holds until `interrupt_session` (or stdin EOF).
- * - `INTERRUPT_WEDGED`: like INTERRUPT_ME, but every `interrupt_session` is answered with a
- *   -32603 error and the turn stays silent and held (Droid wedged mid-turn). The second and
- *   later interrupts are announced with a `session_title_updated` so a test can observe the
- *   watchdog's own interrupt landing. Only stdin EOF ends it (with `process_exit`).
- * - `INTERRUPT_GHOST`: like INTERRUPT_ME, but `interrupt_session` is never answered and the
- *   turn never ends. Each received interrupt is announced with a `session_title_updated` so
- *   a test can observe it landing. Only stdin EOF ends it (with `process_exit`).
- * - `STEER_ME`: holds after the thinking deltas until a second `add_user_message` (the steer),
- *   acknowledges it, finishes the first reply, echoes the steer's user `create_message`, answers
- *   it with `QUEUED`, and sends ONE completion carrying the first turn id.
- * - `STEER_DROP`: like STEER_ME, but after acknowledging the steer it holds for
- *   `interrupt_session` and then reports `queued_messages_discarded` (unscoped, with the steer
- *   text and the steer's JSON-RPC request id) before the `cancelled` completion.
- *   `STEER_DROP_ECHO` (SYNTHETIC): after the discard and the cancelled tail, the steer's user
- *   `create_message` and a completion for it arrive anyway - the discard report and the
- *   delivery crossed.
- * - `LATE_STEER`: holds after the first text delta until the steer arrives, acknowledges it,
- *   then completes the FIRST turn before the steer's user `create_message`; the steer then runs
- *   as its own turn and completes with the steer's messageId as `turnId` (p13 race).
- *   `LATE_STEER_FOLD`: the steer's turn is deferred until the client's next message, which
- *   folds into it (see `deferredDroidTurn`, SYNTHETIC timing).
- * - `BG_TASK`: launches a Task subagent with `await: false` (`child_session_available`, then
- *   the launch acknowledgement as its result), completes, and the subagent's report runs as a
- *   turn Droid starts itself: a `task-completion:*` system message, a reply, and a completion
- *   with that id (p17). `BG_TASK_FOLD` / `BG_TASK_BEHIND` defer the report until the client's
- *   next message, which folds into the report turn or runs as its own turn after it.
- * - `RETRACT_ME`: one pre-retract text delta, `llm_retry`, `assistant_message_retracted`, then
- *   the same messageId streams `QUEUED` from scratch and the turn completes.
- * - `AUTH_FAIL`: an `error` notification (`AuthenticationError`), a `user_only` system message,
- *   and a completion with `reason: "model_authentication_failed"`; the process stays up.
- * - `AUTO_COMPACT`: a plain turn that compacts mid-turn (`compacting_conversation` +
- *   `session_compacted`) after the assistant message, same session id.
- * - `EOF_TOOLS`: announces an Execute tool, then holds before running it. `interrupt_session`
- *   cancels the tool (no `tool_executed`) and ends the turn `cancelled`; stdin EOF runs that tool
- *   and a second one, then completes with `process_exit` and exits 0.
- * - `LONG_TOOL`: an Execute tool that enters the `executing` phase (with the start progress
- *   update) and then goes completely silent, as real Droid does during a long tool (no
- *   heartbeat). Held until any client message: a steer releases it (acknowledged, folded in,
- *   turn completes `completed`), `interrupt_session` cancels the tool (turn `cancelled`), and
- *   stdin EOF lets it finish with `process_exit`.
- * - `STALL_AFTER_TOOL`: like LONG_TOOL, but once released the tool result is followed by
- *   more silence instead of a completion; the second hold ends on `interrupt_session`
- *   (cancelled tail) or stdin EOF (turn completes with `process_exit`). A releasing steer's
- *   fold-in echo precedes the tool result (it maps to no canonical event, so the result can
- *   never be observed before the echo was processed).
- * - `EXIT_MID_TURN`: behaves as if stdin ended right after the turn started: `idle`, the plain
- *   reply, `agent_turn_completed {reason: "process_exit"}`, exit 0.
- * - `IDLE_MID_TURN`: plain turn with an `idle` working state between two text deltas.
- * - `REROUTE_ME`: plain turn whose assistant message reports `deepseek-v4.1-flash` (baseten)
- *   regardless of the requested model.
- * - `HUGE_RESULT`: tool turn whose `tool_result` line is over 10 MB; the content ends with
- *   U+2028 U+2029 `end`.
- * - `UNKNOWN_EVENT`: unknown notification types, an unknown notification method, and a
- *   notification without a `notification` field, mid-turn.
- * - `UNKNOWN_INBOUND`: sends an inbound request with method `droid.future_request`, holds until
- *   the client answers it (expected: -32601), then finishes a plain turn.
- * - `NO_REPLY`: the `add_user_message` request is never answered and no turn starts.
- * - `REJECT_MESSAGE`: the `add_user_message` request is answered with a -32603 error and no
- *   turn starts (the session stays alive).
- * - `CRASH_ME`: without answering `add_user_message`, floods stderr (64 KB, last line
- *   `fatal: mock crash`; when `FACTORY_API_KEY` is set, the line before it echoes the key, as a
- *   failing real Droid may) and exits 1.
- * - `CRASH_MID_TURN`: answers `add_user_message`, starts the turn, then crashes like `CRASH_ME`.
- * - `MALFORMED_LINE`: without answering `add_user_message`, writes one stderr line and one
- *   non-JSON stdout line, then waits.
- * - `MALFORMED_MID_TURN`: answers `add_user_message`, starts the turn, then writes like
- *   `MALFORMED_LINE` and waits.
- * - `STUBBORN`: from then on `close_session` is answered but does not exit, stdin EOF is
- *   ignored, and SIGTERM only logs `sigterm`; the process exits only on SIGKILL. The turn itself
- *   is a plain text turn.
- *
- * Holds are released only by client messages (an answer, `interrupt_session`, stdin EOF), never
- * by timers or file watches. `close_session` replies `{}` then exits 0; stdin EOF while idle
- * exits 0; stdin EOF mid-turn finishes the scripted turn (an open permission ends it with zero
- * usage), completes it with `reason: "process_exit"`, and exits 0. SIGTERM ends an open turn
- * with `process_exit` and exits 0.
+ * Mock `droid` CLI for tests, launched through `@t3tools/provider-testing/fakeCli`. A scenario is
+ * picked by a token in `add_user_message.text` (see `runTurn` and `handleAddUserMessage`) or a
+ * `DROID_MOCK_*` variable. Holds are released only by client messages (an answer,
+ * `interrupt_session`, stdin EOF), never by timers or file watches.
  */
 
 const args = process.argv.slice(2);
+// One JSON line per event; `recv` is written before any reply, and `env` logs only whether
+// `FACTORY_API_KEY` reached the child and the `FACTORY_*` names, never values.
 const logPath = process.env.DROID_MOCK_LOG;
 
 function log(entry: Record<string, unknown>): void {
@@ -227,10 +84,6 @@ function readSettingsFile(): boolean {
   }
 }
 
-// ---------------------------------------------------------------------------
-// RPC mode: envelope and output
-// ---------------------------------------------------------------------------
-
 const API_VERSION = "1.0.0";
 const PROTOCOL_VERSION = process.env.DROID_MOCK_PROTOCOL_VERSION || "1.269.0";
 
@@ -284,10 +137,6 @@ function notify(notification: Json, sessionId: string | undefined = session?.id)
 function notifyUnscoped(notification: Json): void {
   sendNotification({ notification });
 }
-
-// ---------------------------------------------------------------------------
-// RPC mode: models, settings, sessions
-// ---------------------------------------------------------------------------
 
 const MODELS: ReadonlyArray<Json> = [
   {
@@ -515,6 +364,9 @@ interface Session {
 const sessions = new Map<string, Session>();
 let session: Session | undefined;
 
+// Stands in for Droid's session store so a later mock process can `load_session` what an earlier
+// one created. Saved before each `create_message`, as real Droid persists a message when created,
+// so a SIGTERM or crash mid-turn keeps what was emitted. Unset: sessions die with the process.
 const stateDir = process.env.DROID_MOCK_STATE_DIR || undefined;
 const SAFE_SESSION_ID = /^[A-Za-z0-9_-]+$/;
 
@@ -594,10 +446,6 @@ function readSavedSession(id: string): Session | undefined {
   return makeSession(id, parsed.settings, messages, readUsage(parsed.usage), seq);
 }
 
-// ---------------------------------------------------------------------------
-// RPC mode: turns and holds
-// ---------------------------------------------------------------------------
-
 interface Waiter<T> {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
@@ -636,6 +484,8 @@ interface Turn {
 }
 
 let activeTurn: Turn | undefined;
+// Also set by the `STUBBORN` token: `close_session` is answered without exiting, stdin EOF is
+// ignored, and SIGTERM only logs, so only SIGKILL ends the process.
 let stubborn = process.env.DROID_MOCK_STUBBORN === "1";
 let stdinEnded = false;
 let closed = false;
@@ -879,8 +729,6 @@ function finishPlainTurn(
   notify({ type: "session_title_updated", title: "Mock title", updateType: "llm_generated" });
   finishTurn(turn, "completed");
 }
-
-// --- tools -----------------------------------------------------------------
 
 interface MockTool {
   readonly id: string;
@@ -2372,10 +2220,6 @@ async function runTurn(turn: Turn): Promise<void> {
   finishPlainTurn(turn);
 }
 
-// ---------------------------------------------------------------------------
-// RPC mode: request dispatch
-// ---------------------------------------------------------------------------
-
 const SESSIONLESS_METHODS = new Set([
   "droid.list_models",
   "droid.initialize_session",
@@ -2508,7 +2352,8 @@ function handleAddUserMessage(id: string, params: Json, current: Session): void 
 
 function handleRequest(id: string, method: string, params: Json): void {
   if (method === "droid.list_models") {
-    // DROID_MOCK_LIST_MODELS drives discovery failure modes for the provider's probe tests.
+    // DROID_MOCK_LIST_MODELS drives discovery failure modes for the provider's probe tests;
+    // `error` echoes `FACTORY_API_KEY` as a failing real Droid may.
     const listModelsMode = process.env.DROID_MOCK_LIST_MODELS;
     if (listModelsMode === "error") {
       const apiKey = process.env.FACTORY_API_KEY;
