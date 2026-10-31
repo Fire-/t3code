@@ -55,6 +55,7 @@ import {
   type OrchestrationV2IdleCompaction,
   type WorktreeSetupSnapshot,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2UserWait,
   type RunAttemptId,
   type RuntimeRequestId,
   RunId,
@@ -62,6 +63,7 @@ import {
   type TurnItemId,
 } from "@t3tools/contracts";
 import type { ThreadRunSummary } from "@t3tools/client-runtime/state/shell";
+import { workedMsBetween } from "@t3tools/client-runtime/state/models";
 import { resolveT3McpToolDefinition } from "@t3tools/shared/t3McpToolPresentation";
 import { compactDynamicToolOutput } from "@t3tools/shared/toolOutput";
 import { htmlRenderReferencesEqual, type HtmlRenderReference } from "@t3tools/shared/htmlRender";
@@ -469,13 +471,6 @@ export function resolveTimelineMinimapInteractiveWidth(
   return expanded ? TIMELINE_MINIMAP_EXPANDED_HIT_STRIP_WIDTH : collapsedWidth;
 }
 
-function computeElapsedMs(startIso: string, endIso: string): number | null {
-  const start = Date.parse(startIso);
-  const end = Date.parse(endIso);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  return Math.max(0, end - start);
-}
-
 function maxIsoTimestamp(a: string | null, b: string | null): string | null {
   if (a === null) return b;
   if (b === null) return a;
@@ -530,6 +525,8 @@ type MessagesTimelineRowContent =
       createdAt: string | null;
       /** A running compaction owns the working row, so its divider appears only once it ends. */
       compacting?: true;
+      /** The timer holds here while the agent waits on the user. */
+      pausedAt?: string;
     }
   | {
       kind: "thinking";
@@ -1006,7 +1003,10 @@ function deriveTurnFolds(input: {
   runlessWorkActive: boolean;
   liveSubagentEntryIds: ReadonlySet<string>;
   completeSupersededReplyEntryIds: ReadonlySet<string>;
+  userWaits?: ReadonlyArray<OrchestrationV2UserWait> | undefined;
 }): ReadonlyMap<string, TurnFold> {
+  const workedMs = (startIso: string, endIso: string) =>
+    workedMsBetween(startIso, endIso, input.userWaits ?? []);
   const interruptedRunIds = new Set<RunId>();
   const promptIndexByRunId = new Map<RunId, number>();
   for (const [index, entry] of input.timelineEntries.entries()) {
@@ -1166,8 +1166,8 @@ function deriveTurnFolds(input: {
     const lastEntryEnd = timelineEntryEnd(lastEntry);
     const elapsedMs =
       input.latestRun?.runId === runId && input.latestRun.startedAt && input.latestRun.completedAt
-        ? computeElapsedMs(input.latestRun.startedAt, input.latestRun.completedAt)
-        : computeElapsedMs(
+        ? workedMs(input.latestRun.startedAt, input.latestRun.completedAt)
+        : workedMs(
             group.startBoundary ?? firstEntry.createdAt,
             maxIsoTimestamp(group.terminalEntry?.message.updatedAt ?? null, lastEntryEnd) ??
               lastEntryEnd,
@@ -1199,7 +1199,7 @@ function deriveTurnFolds(input: {
       const entries = group.entries.slice(startIndex, group.steerSegments[index + 1]?.startIndex);
       const anchorEntry = entries[0];
       if (anchorEntry === undefined || !hidesNonCompactionWork(entries)) continue;
-      const segmentMs = computeElapsedMs(
+      const segmentMs = workedMs(
         steer.createdAt,
         entries.map(timelineEntryEnd).reduce<string | null>(maxIsoTimestamp, null) ??
           steer.createdAt,
@@ -1402,6 +1402,8 @@ export function deriveMessagesTimelineRows(input: {
   /** Native subagent work has no app run; runless entries form the live response. */
   runlessWorkActive?: boolean;
   activeTurnStartedAt?: string | null;
+  activeTurnPausedAt?: string | null;
+  userWaits?: ReadonlyArray<OrchestrationV2UserWait>;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   supportsConversationRollback: boolean;
   threadStartCheckpointReady?: boolean;
@@ -1461,6 +1463,7 @@ export function deriveMessagesTimelineRows(input: {
     runlessWorkActive,
     liveSubagentEntryIds,
     completeSupersededReplyEntryIds: completeSupersededReplyIds,
+    userWaits: input.userWaits,
   });
   const timelineEntryById = new Map(timelineEntries.map((entry) => [entry.id, entry]));
   const collapsedEntryIds = new Set<string>();
@@ -1653,14 +1656,17 @@ export function deriveMessagesTimelineRows(input: {
   const appendWorkingRow = () => {
     if (compactionOnlyRunFinished) return;
     if (runningCompactionRunId !== null && activeCompactionRunId === null) return;
+    const compactionStartedAt = compactsOnReturn
+      ? undefined
+      : resumeCompactionEntry?.entry.createdAt;
     nextRows.push({
       kind: "working",
       id: "working-indicator-row",
-      createdAt:
-        (compactsOnReturn ? undefined : resumeCompactionEntry?.entry.createdAt) ??
-        input.activeTurnStartedAt ??
-        null,
+      createdAt: compactionStartedAt ?? input.activeTurnStartedAt ?? null,
       ...(activeCompactionRunId !== null ? { compacting: true as const } : {}),
+      ...(compactionStartedAt === undefined && input.activeTurnPausedAt
+        ? { pausedAt: input.activeTurnPausedAt }
+        : {}),
     });
   };
   let hasActivityRow = false;
