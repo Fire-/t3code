@@ -480,6 +480,9 @@ export function routeProviderEvent(
     }
     case "message.updated":
       return [ownsRun(event.message.runId) || ownsChildThread(event.message.threadId), state];
+    case "steer.discarded":
+      // The session manager persists these itself; the run may already be gone.
+      return [false, state];
     case "turn_item.updated": {
       if (ownsRun(event.turnItem.runId) || ownsChildThread(event.turnItem.threadId)) {
         return [true, state];
@@ -511,6 +514,8 @@ export function routeProviderEvent(
       ];
     case "background_work.updated":
       return [state.ownedProviderTurns.has(event.providerTurnId), state];
+    case "runtime_mode.raised":
+      return [event.threadId === input.threadId, state];
     case "command_output.delta":
       // The session manager hands live output to the command output hub; runs never see it.
       return [false, state];

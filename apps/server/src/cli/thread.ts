@@ -26,10 +26,22 @@ import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
-import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import * as ContextHandoffService from "../orchestration-v2/ContextHandoffService.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import { recoverDroidRun } from "../project/DroidRunRecovery.ts";
+import * as ServerOwnership from "../serverOwnership.ts";
+import {
+  clearPersistedServerRuntimeState,
+  readPersistedServerRuntimeState,
+} from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 /**
@@ -757,6 +769,62 @@ const threadShowCommand = Command.make("show", {
   ),
 );
 
+const layerOfflineRecovery = Layer.mergeAll(
+  RuntimeLayer.layerEventSink,
+  ProjectionStore.layer,
+  ContextHandoffService.layer,
+).pipe(Layer.provideMerge(IdAllocator.layer), Layer.provideMerge(SqlitePersistence.layerConfig));
+
+const threadRecoverRunCommand = Command.make("recover-run", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  run: Flag.Int("run").pipe(Flag.withDescription("Ordinal of the run to rebuild.")),
+  transcript: Flag.String("transcript").pipe(
+    Flag.withDescription("The Droid session transcript (.jsonl) that holds the run."),
+  ),
+  dryRun: Flag.Boolean("dry-run").pipe(
+    Flag.withDescription("Report what would change without writing it."),
+    Flag.withDefault(false),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Rebuild a Droid run whose live events were lost, from Droid's transcript. Runs only while T3 Code is stopped.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      const logLevel = yield* GlobalFlag.LogLevel;
+      const config = yield* resolveCliAuthConfig(flags, logLevel);
+      // A running server serves its own projections; never write behind it.
+      yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath).pipe(
+        Effect.provide(ProcessRunner.layer),
+      );
+      yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+      const result = yield* recoverDroidRun({
+        threadId,
+        runOrdinal: flags.run,
+        transcriptPath: flags.transcript,
+        dryRun: flags.dryRun,
+      }).pipe(
+        Effect.provide(
+          layerOfflineRecovery.pipe(
+            Layer.provide(ServerConfig.layer(config)),
+            Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
+          ),
+        ),
+      );
+      yield* Console.log(
+        [
+          `Run ${flags.run} (${result.statusBefore}) ${result.written ? "is now" : "would end"} interrupted.`,
+          `  ${result.items} items: ${result.settled} settled from the transcript, ${result.added} added, ${result.interrupted} interrupted.`,
+          `  Handoff to the next turn: ${result.handoffMessages} messages, ${result.handoffOmittedItems} left out.`,
+          `  ${result.events} events${result.written ? " written" : "; dry run, nothing written"}.`,
+        ].join("\n"),
+      );
+    }).pipe(Effect.scoped, reportThreadErrors),
+  ),
+);
+
 export const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Start, message, and read threads on the running server."),
   Command.withSubcommands([
@@ -764,5 +832,6 @@ export const threadCommand = Command.make("thread").pipe(
     threadStartCommand,
     threadSendCommand,
     threadShowCommand,
+    threadRecoverRunCommand,
   ]),
 );

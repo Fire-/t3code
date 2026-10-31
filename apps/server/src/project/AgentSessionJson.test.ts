@@ -45,6 +45,31 @@ describe("transcript JSON projection", () => {
     },
   );
 
+  it("keeps the tail of limited strings and reserves what they keep, however they are chunked", () => {
+    const lines = Array.from({ length: 500 }, (_, index) => `line ${index}`).join("\n");
+    const text = JSON.stringify({ output: lines, note: "a\nb" });
+    const reserved = (stringLimit?: (path: ReadonlyArray<string | number | null>) => number) => {
+      let bytes = 0;
+      const reader = createTranscriptJsonReader(
+        (amount) => {
+          bytes += amount;
+        },
+        () => true,
+        stringLimit === undefined ? undefined : { stringLimit },
+      );
+      for (let offset = 0; offset < text.length; offset += 7) {
+        reader.write(text.slice(offset, offset + 7));
+      }
+      return { value: reader.finish(), bytes };
+    };
+
+    const limited = reserved((path) => (path[0] === "output" ? 100 : Number.POSITIVE_INFINITY));
+    expect(limited.value).toEqual({ output: lines.slice(-100), note: "a\nb" });
+    // Each escape is its own chunk; without a limit those chunks reserve far more than the text.
+    expect(limited.bytes).toBeLessThan(1_000);
+    expect(reserved().bytes).toBeGreaterThan(lines.length * 2 + 500 * 64);
+  });
+
   it("retains the import allocation and depth limits", () => {
     const limited = createTranscriptJsonReader(
       () => {
