@@ -119,6 +119,7 @@ const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const FX_DRIVER_KIND = ProviderDriverKind.make("fx");
 const MUSE_DRIVER_KIND = ProviderDriverKind.make("muse");
 const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
+const PRIME_DRIVER_KIND = ProviderDriverKind.make("prime-agent");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 const DROID_DRIVER_KIND = ProviderDriverKind.make("droid");
@@ -150,6 +151,8 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [ACP_REGISTRY_DRIVER_KIND]: "default",
   // "default" defers to the user's own Pi settings.json model selection.
   [PI_DRIVER_KIND]: "default",
+  // "default" keeps the model from the user's own Prime settings; it is never sent to Prime.
+  [PRIME_DRIVER_KIND]: "default",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
   [DROID_DRIVER_KIND]: "claude-opus-5-5",
   [ProviderDriverKind.make("antigravity")]: ANTIGRAVITY_DEFAULT_MODEL,
@@ -202,6 +205,7 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [MUSE_DRIVER_KIND]: "Muse Code",
   [ACP_REGISTRY_DRIVER_KIND]: "ACP Registry",
   [PI_DRIVER_KIND]: "Pi",
+  [PRIME_DRIVER_KIND]: "Prime",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
   [DROID_DRIVER_KIND]: "Droid",
 };
