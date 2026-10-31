@@ -247,42 +247,40 @@ const runPrimeVersionCommand = Effect.fn("PrimeProviderStatus.runPrimeVersionCom
   );
 });
 
-export function buildInitialPrimeProviderSnapshot(
-  primeSettings: PrimeSettings,
-): Effect.Effect<ServerProviderDraft> {
-  return Effect.gen(function* () {
-    const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const models = primeModelsFromSettings(primeSettings.customModels);
-    if (!primeSettings.enabled) {
-      return buildServerProvider({
-        presentation: PRIME_PRESENTATION,
-        enabled: false,
-        checkedAt,
-        models,
-        probe: {
-          installed: false,
-          version: null,
-          status: "warning",
-          auth: { status: "unknown" },
-          message: "Prime is disabled in T3 Code settings.",
-        },
-      });
-    }
+export const buildInitialPrimeProviderSnapshot = Effect.fn(
+  "PrimeProviderStatus.buildInitialPrimeProviderSnapshot",
+)(function* (primeSettings: PrimeSettings): Effect.fn.Return<ServerProviderDraft> {
+  const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
+  const models = primeModelsFromSettings(primeSettings.customModels);
+  if (!primeSettings.enabled) {
     return buildServerProvider({
       presentation: PRIME_PRESENTATION,
-      enabled: true,
+      enabled: false,
       checkedAt,
       models,
       probe: {
-        installed: true,
+        installed: false,
         version: null,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Checking Prime CLI availability...",
+        message: "Prime is disabled in T3 Code settings.",
       },
     });
+  }
+  return buildServerProvider({
+    presentation: PRIME_PRESENTATION,
+    enabled: true,
+    checkedAt,
+    models,
+    probe: {
+      installed: true,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
+      message: "Checking Prime CLI availability...",
+    },
   });
-}
+});
 
 function expandHomePath(input: string, home: string, path: Path.Path): string {
   if (input === "~") return home;

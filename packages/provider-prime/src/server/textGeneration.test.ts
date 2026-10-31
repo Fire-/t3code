@@ -30,6 +30,8 @@ import { makePrimeTextGeneration } from "./textGeneration.ts";
 
 const decodeJsonLine = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeServerSettings = Schema.decodeEffect(ServerSettings);
+const decodePrimeConfig = Schema.decodeUnknownEffect(PrimeDriver.configSchema);
 
 const PRIME_ID = ProviderInstanceId.make("prime-agent");
 const SETTINGS: PrimeSettings = {
@@ -511,7 +513,7 @@ it.layer(layerDriver)("Prime text generation from saved settings", (it) => {
     "[VAL-CROSS-001] the saved prime-agent block and text-generation selection produce a thread title",
     () =>
       Effect.gen(function* () {
-        const settings = yield* Schema.decodeEffect(ServerSettings)({
+        const settings = yield* decodeServerSettings({
           providerInstances: {
             "prime-agent": {
               driver: "prime-agent",
@@ -530,7 +532,7 @@ it.layer(layerDriver)("Prime text generation from saved settings", (it) => {
         });
         const entry = settings.providerInstances[PRIME_ID];
         assert.isDefined(entry);
-        const config = yield* Schema.decodeUnknownEffect(PrimeDriver.configSchema)(entry!.config);
+        const config = yield* decodePrimeConfig(entry!.config);
         const prime = yield* makeFakePrime({ reply: titleReply });
         const instance = yield* PrimeDriver.create({
           instanceId: PRIME_ID,

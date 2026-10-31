@@ -843,9 +843,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             schedule: PRIME_SESSION_ACTIVE_RETRY,
             while: (error) => primeSessionAlreadyActive(error) !== undefined,
           }),
-          Effect.catchTag(
-            "PrimeRpcError",
-            (error): Effect.Effect<never, PrimeRpcError | PrimeSessionLeaseConflictError> => {
+          Effect.catchTags({
+            PrimeRpcError: (
+              error,
+            ): Effect.Effect<never, PrimeRpcError | PrimeSessionLeaseConflictError> => {
               const active = primeSessionAlreadyActive(error);
               if (active === undefined) return Effect.fail(error);
               const conflict = new PrimeSessionLeaseConflictError({
@@ -858,7 +859,7 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 sessionId: conflict.sessionId,
               }).pipe(Effect.andThen(Effect.fail(conflict)));
             },
-          ),
+          }),
         );
 
       const tokenUsageFromStats = (
@@ -1857,11 +1858,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
       );
 
       /**
-       * For terminal paths that skip the idle probe while Prime stays alive:
-       * the run may have created a schedule or heartbeat, and the pin is the
-       * only thing that keeps T3's idle release from stopping the worker (and
-       * Prime from cancelling those jobs). A terminating process has nothing
-       * left to pin.
+       * For terminal paths that skip the idle probe while Prime stays alive: the run may have
+       * created a schedule or heartbeat, and only the pin keeps T3's idle release from stopping
+       * the worker (and Prime from cancelling those jobs). A terminating process needs no pin.
        */
       const refreshBackgroundJobs = Effect.gen(function* () {
         if (stopRequested || closed) return;
@@ -1916,11 +1915,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
         actions !== null && (actions.active !== undefined || actions.queuedCount > 0);
 
       /**
-       * Prime has no `agent_settled`, and `agent_end` is not idle: a goal,
-       * queued follow-up, or session command can keep the session working.
-       * After a trigger (agent_end or a cleared session command) the turn
-       * waits while the pushed session actions are busy, then confirms with
-       * one `get_state`. Only transitions call this, never a timer.
+       * Prime has no `agent_settled`, and `agent_end` is not idle: a goal, queued follow-up, or
+       * session command can keep the session working. After a trigger (agent_end or a cleared
+       * session command) the turn waits out busy pushed session actions, then confirms with one
+       * `get_state`. Only transitions call this, never a timer.
        */
       const requestSettle = Effect.fn("PrimeAdapter.requestSettle")(function* (
         turn: ActivePrimeTurn,
@@ -2306,11 +2304,9 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               yield* settleAfterCompaction(turn);
               return;
             }
-            // An overflow can surface as a model error (`message_end` with
-            // stopReason error) before Prime compacts and retries the turn. Clear
-            // that failure only when Prime confirms that compaction will retry;
-            // a successful non-retrying compaction must not erase an exhausted
-            // provider retry.
+            // An overflow can surface as a model error (`message_end` with stopReason error)
+            // before Prime compacts and retries the turn. Clear that failure only when Prime
+            // confirms the retry; a non-retrying compaction must not erase an exhausted retry.
             if (event["willRetry"] === true) turn.failure = null;
             turn.latestCompactionAfterTokens =
               nonNegativeInteger(result, "estimatedTokensAfter") ?? null;
@@ -2507,11 +2503,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               if (pendingPrompt?.sessionCommand !== undefined && responseTurn !== null) {
                 responseTurn.sessionCommands.add(pendingPrompt.sessionCommand);
               }
-              // Deferred success ack. Command-only prompts (pure extension
-              // slash commands) never start an agent run and never emit
-              // `agent_end`, so probe for idleness. The probe result is
-              // re-queued behind any events Prime emitted before answering
-              // get_state, which keeps the check stream-ordered.
+              // Deferred success ack. Command-only prompts (pure extension slash commands)
+              // never start an agent run or emit `agent_end`, so probe for idleness. The probe
+              // result is re-queued behind events Prime emitted before answering get_state,
+              // which keeps the check stream-ordered.
               if (
                 pendingPrompt?.kind === "turn_start" &&
                 responseTurn !== null &&
@@ -2999,8 +2994,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             ...turnInput,
             message: { ...turnInput.message, text: "/compact" },
           }),
-        startTurn: (turnInput) =>
-          Effect.gen(function* () {
+        startTurn: Effect.fn("PrimeAdapter.startTurn")(
+          function* (turnInput) {
             if (rollbackBarrier !== null)
               return yield* protocolError("Cannot start a Prime turn during rollback");
             const state = threadState;
@@ -3035,13 +3030,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 Effect.ignore,
               );
             }
-            // Resolved before the turn is installed: a failure here (an
-            // unreadable attachment) must not leave `activeTurn` set, which
-            // would reject every later turn as already active.
-            // Orchestration instructions reach prime-agent through the T3 MCP
-            // extension's before_agent_start system-prompt hook, never by
-            // wrapping the user text: a wrapped first message would no
-            // longer start with "/" and slash commands would stop expanding.
+            // Resolved before the turn is installed: a failure (an unreadable attachment) must
+            // not leave `activeTurn` set and reject every later turn. Orchestration instructions
+            // arrive via the T3 MCP extension's before_agent_start hook, never by wrapping the
+            // user text, which would no longer start with "/" and stop slash commands expanding.
             const payload = continuation
               ? null
               : yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments);
@@ -3179,20 +3171,23 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             // and extension commands may block on user dialogs indefinitely.
             // Rejections therefore return later as id-less response records
             // handled by the event pump.
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterTurnStartError({
-                  driver: PRIME_PROVIDER,
-                  threadId: turnInput.threadId,
-                  providerThreadId: turnInput.providerThread.id,
-                  runId: turnInput.runId,
-                  cause,
-                }),
+          },
+          (effect, turnInput) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: PRIME_PROVIDER,
+                    threadId: turnInput.threadId,
+                    providerThreadId: turnInput.providerThread.id,
+                    runId: turnInput.runId,
+                    cause,
+                  }),
+              ),
             ),
-          ),
-        steerTurn: (steerInput: ProviderAdapter.ProviderAdapterV2SteerInput) =>
-          Effect.gen(function* () {
+        ),
+        steerTurn: Effect.fn("PrimeAdapter.steerTurn")(
+          function* (steerInput: ProviderAdapter.ProviderAdapterV2SteerInput) {
             const turn = threadState?.activeTurn ?? null;
             if (turn === null || turn.providerTurn.id !== steerInput.providerTurnId) {
               return yield* protocolError(`Prime turn ${steerInput.providerTurnId} is not active`);
@@ -3201,12 +3196,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               steerInput.message.text,
               steerInput.message.attachments,
             );
-            // Prompt with streamingBehavior steer is atomic on Prime's side: it
-            // queues during an active run and starts a new run if settlement
-            // won the race. A direct `steer` sent after Prime became idle would
-            // remain queued forever. Send fire-and-forget under the session
-            // permit so a slash-command dialog cannot block the turn, and so
-            // settlement cannot overtake the active-turn check.
+            // A `prompt` with streamingBehavior steer is atomic in Prime: it queues during a run
+            // and starts a new one if settlement won the race; a direct `steer` after Prime went
+            // idle stays queued forever. Fire-and-forget under the session permit, so a dialog
+            // cannot block the turn and settlement cannot overtake the active-turn check.
             yield* sessionEventPermit.withPermits(1)(
               Effect.gen(function* () {
                 if (threadState?.activeTurn !== turn) {
@@ -3228,17 +3221,20 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 turn.settleProbeGeneration += 1;
               }),
             );
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterSteerRunError({
-                  driver: PRIME_PROVIDER,
-                  providerThreadId: steerInput.providerThread.id,
-                  providerTurnId: steerInput.providerTurnId,
-                  cause,
-                }),
+          },
+          (effect, steerInput) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterSteerRunError({
+                    driver: PRIME_PROVIDER,
+                    providerThreadId: steerInput.providerThread.id,
+                    providerTurnId: steerInput.providerTurnId,
+                    cause,
+                  }),
+              ),
             ),
-          ),
+        ),
         setRuntimeMode: ({ providerThread, runtimeMode }) =>
           sessionEventPermit
             .withPermits(1)(
@@ -3264,8 +3260,8 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                   }),
               ),
             ),
-        interruptTurn: (interruptInput) =>
-          Effect.gen(function* () {
+        interruptTurn: Effect.fn("PrimeAdapter.interruptTurn")(
+          function* (interruptInput) {
             const turn = threadState?.activeTurn ?? null;
             if (turn === null && interruptInput.requestRuntimeRestart === true) {
               if (pendingWake !== null)
@@ -3297,19 +3293,22 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterInterruptError({
-                  driver: PRIME_PROVIDER,
-                  providerThreadId: interruptInput.providerThread.id,
-                  providerTurnId: interruptInput.providerTurnId,
-                  cause,
-                }),
+          },
+          (effect, interruptInput) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterInterruptError({
+                    driver: PRIME_PROVIDER,
+                    providerThreadId: interruptInput.providerThread.id,
+                    providerTurnId: interruptInput.providerTurnId,
+                    cause,
+                  }),
+              ),
             ),
-          ),
-        respondToRuntimeRequest: (requestInput) =>
-          Effect.gen(function* () {
+        ),
+        respondToRuntimeRequest: Effect.fn("PrimeAdapter.respondToRuntimeRequest")(
+          function* (requestInput) {
             const pending = pendingPrompts.get(String(requestInput.requestId));
             if (pending === undefined) {
               return yield* protocolError(
@@ -3366,19 +3365,22 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                 updatedAt: resolvedAt,
               },
             });
-          }).pipe(
-            sessionEventPermit.withPermits(1),
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                  driver: PRIME_PROVIDER,
-                  requestId: requestInput.requestId,
-                  cause,
-                }),
+          },
+          (effect, requestInput) =>
+            effect.pipe(
+              sessionEventPermit.withPermits(1),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                    driver: PRIME_PROVIDER,
+                    requestId: requestInput.requestId,
+                    cause,
+                  }),
+              ),
             ),
-          ),
-        readThreadSnapshot: (snapshotInput) =>
-          Effect.gen(function* () {
+        ),
+        readThreadSnapshot: Effect.fn("PrimeAdapter.readThreadSnapshot")(
+          function* (snapshotInput) {
             const state = threadState;
             const boundNativeId = state?.providerThread.nativeThreadRef?.nativeId;
             const wantedNativeId = snapshotInput.providerThread.nativeThreadRef?.nativeId;
@@ -3431,18 +3433,21 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               messages,
               runtimeRequests: [],
             };
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
-                  driver: PRIME_PROVIDER,
-                  providerThreadId: snapshotInput.providerThread.id,
-                  cause,
-                }),
+          },
+          (effect, snapshotInput) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
+                    driver: PRIME_PROVIDER,
+                    providerThreadId: snapshotInput.providerThread.id,
+                    cause,
+                  }),
+              ),
             ),
-          ),
-        rollbackThread: (rollbackInput) =>
-          Effect.gen(function* () {
+        ),
+        rollbackThread: Effect.fn("PrimeAdapter.rollbackThread")(
+          function* (rollbackInput) {
             const state = threadState;
             if (state === null) {
               return yield* protocolError("Prime session has no registered thread");
@@ -3587,19 +3592,22 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
                   if (rollbackBarrier === barrier) rollbackBarrier = null;
                 }),
             );
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterRollbackThreadError({
-                  driver: PRIME_PROVIDER,
-                  providerThreadId: rollbackInput.providerThread.id,
-                  checkpointId: rollbackInput.target.checkpointId,
-                  cause,
-                }),
+          },
+          (effect, rollbackInput) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                    driver: PRIME_PROVIDER,
+                    providerThreadId: rollbackInput.providerThread.id,
+                    checkpointId: rollbackInput.target.checkpointId,
+                    cause,
+                  }),
+              ),
             ),
-          ),
-        forkThread: (forkInput) =>
-          Effect.gen(function* () {
+        ),
+        forkThread: Effect.fn("PrimeAdapter.forkThread")(
+          function* (forkInput) {
             if (threadState?.activeTurn != null) {
               return yield* protocolError("Cannot fork while a Prime turn is active");
             }
@@ -3649,11 +3657,10 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               }
               return boundary;
             });
-            // `--fork` writes the session copy before any RPC can be asked
-            // (main.ts createSessionManager -> SessionManager.forkFrom), and core
-            // forks on the target thread's runtime, so the source's Prime process
-            // may not exist. Reading the source file read-only, as Prime will read
-            // it, refuses an unsupported cut before anything is copied.
+            // `--fork` writes the session copy before any RPC can be asked (forkFrom), and core
+            // forks on the target thread's runtime, so the source's Prime process may not exist.
+            // Reading the source file read-only, as Prime will, refuses an unsupported cut before
+            // anything is copied.
             if (target !== undefined) {
               const reader = primeSessionForkReader();
               const read = yield* fileSystem.stream(sourceFile).pipe(
@@ -3763,16 +3770,19 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
               },
               false,
             );
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterForkThreadError({
-                  driver: PRIME_PROVIDER,
-                  providerThreadId: forkInput.sourceProviderThread.id,
-                  cause,
-                }),
+          },
+          (effect, forkInput) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterForkThreadError({
+                    driver: PRIME_PROVIDER,
+                    providerThreadId: forkInput.sourceProviderThread.id,
+                    cause,
+                  }),
+              ),
             ),
-          ),
+        ),
       };
       return runtime;
     }),

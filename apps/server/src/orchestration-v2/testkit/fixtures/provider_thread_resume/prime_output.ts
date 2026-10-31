@@ -81,7 +81,7 @@ export function assertPrimeProviderThreadResumeOutput(
   // The respawned process could not revive the first process's Python kernel.
   assert.deepEqual(
     projection.turnItems.flatMap((item) => (item.type === "system_notice" ? [item.message] : [])),
-    ["Python kernel state could not be revived — the kernel is starting fresh."],
+    ["Python kernel state could not be revived. The kernel is starting fresh."],
     "the kernel restore row is one line",
   );
   assert.isFalse(

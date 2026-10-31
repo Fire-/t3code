@@ -564,7 +564,7 @@ describe("Prime custom messages", () => {
       "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: df, model, helpers.";
     assert.equal(
       primeCustomMessageNotice(custom("ipython_state_restored", content, true, { restored: true })),
-      "Python kernel state restored — 3 names revived.",
+      "Python kernel state restored (3 names revived).",
     );
   });
 
@@ -573,13 +573,13 @@ describe("Prime custom messages", () => {
       name: "one name",
       content:
         "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: df.",
-      notice: "Python kernel state restored — 1 name revived.",
+      notice: "Python kernel state restored (1 name revived).",
     },
     {
       name: "a failed revive",
       content:
         "[python-state-restored]\n\nYour previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.",
-      notice: "Python kernel state could not be revived — the kernel is starting fresh.",
+      notice: "Python kernel state could not be revived. The kernel is starting fresh.",
     },
     {
       name: "no name list",

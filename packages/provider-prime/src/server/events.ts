@@ -206,12 +206,12 @@ function hasDedicatedMapping(message: unknown, customType: string): boolean {
 /** Prime's restore row (core/agent-session.ts _onIpythonStateRestored) lists every revived name. */
 function ipythonRestoredSummary(content: string): string {
   if (content.includes("could not be revived")) {
-    return "Python kernel state could not be revived — the kernel is starting fresh.";
+    return "Python kernel state could not be revived. The kernel is starting fresh.";
   }
   const names = /available again:\s*([^.]*)\./u.exec(content)?.[1];
   if (names === undefined) return "Python kernel state restored.";
   const count = names.split(",").filter((name) => name.trim().length > 0).length;
-  return `Python kernel state restored — ${count} ${count === 1 ? "name" : "names"} revived.`;
+  return `Python kernel state restored (${count} ${count === 1 ? "name" : "names"} revived).`;
 }
 
 /** The notice for a displayed custom message that no dedicated mapping covers. */
@@ -608,12 +608,10 @@ export interface PrimeTurnEntries {
 }
 
 /**
- * Custom rows Prime keeps out of the model's context (core/messages.ts
- * convertToLlm). The harness digest does reach the model, but it describes
- * the user's Prime harness rather than the conversation, and Prime replaces
- * it whenever it goes stale (core/agent-session.ts _appendHarnessDigestIfStale)
- * and builds context from the newest copy only (core/session-manager.ts
- * buildSessionContext), so a copy kept across a cut holds nothing T3 discarded.
+ * Custom rows Prime keeps out of the model's context (core/messages.ts convertToLlm). The harness
+ * digest reaches the model but describes the harness, not the conversation, and Prime builds
+ * context from its newest copy only (core/session-manager.ts buildSessionContext), so a copy kept
+ * across a cut holds nothing T3 discarded.
  */
 const CONTEXT_EXCLUDED_CUSTOM_TYPES = new Set([
   "session_slash_command",
@@ -660,11 +658,10 @@ export function primeUserEntryHash(text: string): string {
 }
 
 /**
- * Records which user entries a turn added to the Prime session, in order, and
- * what its model-visible history began with. Prime's `get_fork_messages` lists
- * exactly the persisted user messages that have text (core/agent-session.ts
- * getUserMessagesForForking), and a T3 turn adds zero (a session command, a
- * heartbeat) or more (prompt, steers, continuations).
+ * Records which user entries a turn added to the Prime session, in order, and what its
+ * model-visible history began with. `get_fork_messages` lists exactly the persisted user messages
+ * with text (core/agent-session.ts getUserMessagesForForking); a T3 turn adds zero (a session
+ * command, a heartbeat) or more (prompt, steers, continuations).
  */
 export function primeTurnFingerprint(entries: PrimeTurnEntries): string {
   const hashes = entries.hashes.length === 0 ? "none" : entries.hashes.join(".");
@@ -767,12 +764,10 @@ const entriesMatch = (
   );
 
 /**
- * Finds the first user entry the turns after `boundaryOrdinal` added, walking
- * them newest first against the tail of `get_fork_messages`. History before
- * the thread's first turn (a forked session's copied entries) stays put.
- * `skipUnmatched` tolerates turns whose entries are gone from the session,
- * which is what a fork source's rolled-back turns look like; the boundary
- * turn's own entries must still sit right before the result.
+ * Finds the first user entry the turns after `boundaryOrdinal` added, walking them newest first
+ * against the tail of `get_fork_messages`; history before the first turn (a fork's copied entries)
+ * stays put. `skipUnmatched` tolerates turns whose entries are gone (a fork source's rolled-back
+ * turns); the boundary turn's own entries must still sit right before the result.
  */
 export function primeForkBoundary(input: {
   readonly messages: ReadonlyArray<PrimeForkMessage>;
@@ -907,18 +902,10 @@ function isPrimeMessage(message: unknown, version: number): boolean {
 }
 
 /**
- * Reads a Prime session JSONL line by line into what `get_fork_messages`
- * would list after `prime --fork` copied it, without asking Prime to copy it.
- * Mirrors Prime's loader (core/session-manager.ts:401-417 and 753-766: blank
- * lines are skipped, and the first entry must be a session header with a
- * string id) and AgentSession.getUserMessagesForForking (core/agent-session.ts:
- * 14817-14843): every `message` entry with role `user` and non-empty text, in
- * file order, abandoned branches included, because SessionManager.getEntries
- * returns every non-header entry.
- *
- * Prime also skips torn lines, but a line the reader cannot parse or an
- * entry shape it does not know could be a newer format, so either makes the
- * whole result untrusted rather than a guess.
+ * What `get_fork_messages` would list after `prime --fork`, read without asking Prime to copy.
+ * Mirrors Prime's session loader and getUserMessagesForForking: every user `message` with text, in
+ * file order, abandoned branches included. Prime skips torn lines, but an unparseable line or
+ * unknown entry shape could be a newer format, so either makes the whole result untrusted.
  */
 export function primeSessionForkReader() {
   let lineNumber = 0;

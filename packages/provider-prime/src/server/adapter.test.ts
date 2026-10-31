@@ -25,6 +25,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as PlatformError from "effect/PlatformError";
@@ -6308,7 +6309,7 @@ describe("Prime settle engine", () => {
         const hook = bridge.handlers.get("tool_call") as unknown as BridgeToolCallHook;
         const dialogs: Array<{ readonly id: string; readonly response: PrimeRpcRecord }> = [];
         const titles: Array<string> = [];
-        const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+        const runPromise = yield* FiberSet.makeRuntimePromise();
         const result = yield* Effect.promise(() =>
           hook(
             { toolName, input },
@@ -8530,7 +8531,7 @@ describe("Prime settle engine", () => {
           const notice = items[0]!;
           assert.isTrue(
             notice.type === "system_notice" &&
-              notice.message === "Python kernel state restored — 3 names revived." &&
+              notice.message === "Python kernel state restored (3 names revived)." &&
               notice.status === "completed" &&
               notice.providerTurnId === providerTurnId,
           );

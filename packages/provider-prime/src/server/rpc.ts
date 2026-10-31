@@ -286,11 +286,9 @@ export interface PrimeRpcConnection {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 /**
- * SIGTERM runs Prime's own shutdown (modes/rpc/rpc-mode.ts `shutdown`), whose
- * dispose sends `complete_owned_session` and waits while the daemon stops the
- * worker (up to 5 s for the worker's shutdown request). A SIGKILL before that
- * leaves the worker in its 30 s disconnect grace, and a resume of the same
- * session then fails with SessionAlreadyActiveError until the grace ends.
+ * SIGTERM runs Prime's shutdown (modes/rpc/rpc-mode.ts), which sends `complete_owned_session` and
+ * waits up to 5 s for the daemon to stop the worker. A SIGKILL first leaves the worker in its 30 s
+ * disconnect grace, and resuming that session fails with SessionAlreadyActiveError until it ends.
  */
 export const PRIME_TERMINATION_GRACE = Duration.seconds(10);
 
@@ -409,11 +407,10 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
   let diagnosingStdoutClose = false;
   const exitDeferred = yield* Deferred.make<number, PrimeRpcError>();
 
-  // Forked first. Before the reader, so an immediate crash populates
-  // `exitDeferred` before stdout-close diagnosis runs. Before the terminate
-  // finalizer, because finalizers run in reverse order: the watcher is then
-  // still running while terminate waits for the exit, instead of being
-  // interrupted first and making every close wait out the whole grace.
+  // Forked before the reader, so an immediate crash populates `exitDeferred` before stdout-close
+  // diagnosis runs, and before the terminate finalizer: finalizers run in reverse, so the watcher
+  // still runs while terminate waits for the exit instead of being interrupted first and making
+  // every close wait out the whole grace.
   yield* child.exitCode.pipe(
     Effect.matchEffect({
       onFailure: (cause) =>
@@ -630,8 +627,9 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
     Effect.forkIn(scope),
   );
 
-  const send = (record: PrimeRpcRecord): Effect.Effect<void, PrimeRpcError> =>
-    Effect.gen(function* () {
+  const send =
+    /* Protocol records and writes include streaming deltas; avoid a span per record. */
+    Effect.fnUntraced(function* (record: PrimeRpcRecord): Effect.fn.Return<void, PrimeRpcError> {
       const accepted = yield* Queue.offer(
         outgoing,
         new TextEncoder().encode(`${encodeJsonLine(record)}\n`),
@@ -641,32 +639,31 @@ export const makePrimeRpcConnection = Effect.fnUntraced(function* (options: Prim
       }
     });
 
-  const request = (
+  const request = Effect.fn("PrimeRpc.request")(function* (
     record: PrimeRpcRecord,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  ): Effect.Effect<unknown, PrimeRpcError | PrimeRpcTimeoutError> =>
-    Effect.gen(function* () {
-      const id = `t3-${nextRequestId++}`;
-      const deferred = yield* Deferred.make<unknown, PrimeRpcError>();
-      pendingRequests.set(id, { command: String(record["type"]), deferred });
-      yield* send({ ...record, id }).pipe(
-        Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
-      );
-      return yield* Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown)).pipe(
-        Effect.timeoutOrElse({
-          duration: Duration.millis(timeoutMs),
-          orElse: () =>
-            Effect.fail(
-              new PrimeRpcTimeoutError({
-                operation: String(record["type"] ?? "request"),
-                timeoutMs,
-              }),
-            ),
-        }),
-        Effect.onInterrupt(() => Effect.sync(() => pendingRequests.delete(id))),
-        Effect.onError(() => Effect.sync(() => pendingRequests.delete(id))),
-      );
-    });
+  ): Effect.fn.Return<unknown, PrimeRpcError | PrimeRpcTimeoutError> {
+    const id = `t3-${nextRequestId++}`;
+    const deferred = yield* Deferred.make<unknown, PrimeRpcError>();
+    pendingRequests.set(id, { command: String(record["type"]), deferred });
+    yield* send({ ...record, id }).pipe(
+      Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
+    );
+    return yield* Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown)).pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.millis(timeoutMs),
+        orElse: () =>
+          Effect.fail(
+            new PrimeRpcTimeoutError({
+              operation: String(record["type"] ?? "request"),
+              timeoutMs,
+            }),
+          ),
+      }),
+      Effect.onInterrupt(() => Effect.sync(() => pendingRequests.delete(id))),
+      Effect.onError(() => Effect.sync(() => pendingRequests.delete(id))),
+    );
+  });
 
   return {
     send,
