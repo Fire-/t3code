@@ -239,27 +239,18 @@ pnpm patch mechanism — our overlays never touch it.
 
 ## Commit Hooks
 
-The repo's pre-commit hook (`vp staged` via `.vite-hooks/`) runs `vp fmt` on
-all staged files.
+The repo's pre-commit hook (`vp staged` via `.vite-hooks/`) runs `vp fmt`
+and `vp lint` on staged files, plus knip when code or a manifest changes.
 
 - **Never bypass hooks.** `--no-verify` is forbidden.
-- Known failure mode: `Failed to load configuration file. Failed to parse
-  config: expected value at line 1 column 1`. This means `node_modules/oxfmt`
-  is a **stale broken symlink** (vp's core resolves `oxfmt` by walking up to
-  the root `node_modules/`, and a version bump that prunes the old store
-  entry orphans the link). Fix by repointing it:
-
-  ```bash
-  ln -sfn "$(cd node_modules && ls -d .pnpm/oxfmt@*/node_modules/oxfmt | tail -1)" node_modules/oxfmt
-  ```
-
-  The target must be relative to `node_modules/` (where the link lives), so
-  list from inside it; a `node_modules/.pnpm/...` target resolves to
-  `node_modules/node_modules/...` and stays broken. `vp lint` resolves
-  `oxlint` the same way; repoint `node_modules/oxlint` with the same command
-  (s/oxfmt/oxlint/) if it fails the same way.
-
-  Then re-run the commit. It is an environment state, not a content problem.
+- If the hook fails where upstream CI would pass (a rejected flag, missing
+  rules, fmt rewrapping code you didn't touch), compare `vp lint --version` and
+  `vp fmt --version` with the pins `vp --version` lists. A mismatch means vp
+  found a copy outside the repo
+  ([vite-plus#3065](https://github.com/voidzero-dev/vite-plus/issues/3065)).
+  dev-infra hoists oxlint, oxfmt and oxlint-tsgolint in `pnpm-workspace.yaml`
+  to stop that; if `node_modules/oxlint` is missing, re-run `pnpm install`.
+  Drop the hoist once that issue's fix ships in our vite-plus.
 
 ## Critical Git Rules
 

@@ -417,3 +417,10 @@ permissions:
 # pnpm keeps optional deps inside the virtual store, so hoist it to the root.
 publicHoistPattern:
   - "@cursor/sdk-*"
+  # vp looks for these from the cwd upward before using its own pinned copy, so
+  # a stray parent node_modules (e.g. ~/node_modules/oxlint) wins. Root links stop
+  # the walk. Drop once our vite-plus has the fix for
+  # https://github.com/voidzero-dev/vite-plus/issues/3065
+  - oxlint
+  - oxfmt
+  - oxlint-tsgolint
