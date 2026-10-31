@@ -497,8 +497,7 @@ async function preflight(args) {
 
 // Rehearsal copies of the database are the bulky part of a run; keep the newest few.
 function pruneOldRuns(keep) {
-  const runs = fs
-    .readdirSync(UPGRADES)
+  const runs = NodeFS.readdirSync(UPGRADES)
     .filter((d) => /^\d{4}-\d{2}-\d{2}/.test(d) && d !== keep)
     .sort()
     .reverse();
@@ -997,8 +996,7 @@ async function rehearse() {
     );
   }
   NodeFS.writeFileSync(NodePath.join(base, "pairing-url"), `${pairing}\n`, { mode: 0o600 });
-  const errors = fs
-    .readFileSync(serverLog, "utf8")
+  const errors = NodeFS.readFileSync(serverLog, "utf8")
     .split("\n")
     .filter((l) => /\b(ERROR|FATAL)\b/.test(l));
   record(state, "rehearse", "ok", {
@@ -1281,8 +1279,7 @@ function deploy() {
   const backup = NodePath.join(backups, `statev2-pre-upgrade-${state.id}.sqlite`);
   const b = exec("sqlite3", [`file:${LIVE_DB}?mode=ro`, `.backup '${backup}'`]);
   if (b.code !== 0) die(`Database backup failed: ${b.err}`);
-  const old = fs
-    .readdirSync(backups)
+  const old = NodeFS.readdirSync(backups)
     .filter((f) => /^statev2-pre-upgrade-.*\.sqlite$/.test(f))
     .sort()
     .reverse()
@@ -1327,8 +1324,7 @@ async function verifyDeploy() {
   const stamp = (d) =>
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   const log = NodeFS.existsSync(NodePath.join(RUNTIME, "daemon.log"))
-    ? fs
-        .readFileSync(NodePath.join(RUNTIME, "daemon.log"), "utf8")
+    ? NodeFS.readFileSync(NodePath.join(RUNTIME, "daemon.log"), "utf8")
         .split("\n")
         .filter((l) => l.slice(0, 19) >= stamp(since))
     : [];
