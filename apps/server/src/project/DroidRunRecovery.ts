@@ -471,41 +471,31 @@ export const recoverDroidRun = Effect.fn("DroidRunRecovery.recover")(function* (
   });
   const events: ReadonlyArray<OrchestrationV2DomainEvent> = [
     { ...common(), type: "run.updated", payload: recovery.run },
-    ...recovery.attempts.map(
-      (payload): OrchestrationV2DomainEvent => ({
-        ...common(payload.rootNodeId),
-        type: "run-attempt.updated",
-        payload,
-      }),
-    ),
-    ...recovery.providerTurns.map(
-      (payload): OrchestrationV2DomainEvent => ({
-        ...common(payload.nodeId),
-        type: "provider-turn.updated",
-        payload,
-      }),
-    ),
-    ...recovery.nodes.map(
-      (payload): OrchestrationV2DomainEvent => ({
-        ...common(payload.id),
-        type: "node.updated",
-        payload,
-      }),
-    ),
-    ...recovery.messages.map(
-      (payload): OrchestrationV2DomainEvent => ({
-        ...common(payload.nodeId),
-        type: "message.updated",
-        payload,
-      }),
-    ),
-    ...recovery.items.map(
-      (payload): OrchestrationV2DomainEvent => ({
-        ...common(payload.nodeId),
-        type: "turn-item.updated",
-        payload,
-      }),
-    ),
+    ...recovery.attempts.map((payload): OrchestrationV2DomainEvent => ({
+      ...common(payload.rootNodeId),
+      type: "run-attempt.updated",
+      payload,
+    })),
+    ...recovery.providerTurns.map((payload): OrchestrationV2DomainEvent => ({
+      ...common(payload.nodeId),
+      type: "provider-turn.updated",
+      payload,
+    })),
+    ...recovery.nodes.map((payload): OrchestrationV2DomainEvent => ({
+      ...common(payload.id),
+      type: "node.updated",
+      payload,
+    })),
+    ...recovery.messages.map((payload): OrchestrationV2DomainEvent => ({
+      ...common(payload.nodeId),
+      type: "message.updated",
+      payload,
+    })),
+    ...recovery.items.map((payload): OrchestrationV2DomainEvent => ({
+      ...common(payload.nodeId),
+      type: "turn-item.updated",
+      payload,
+    })),
     { ...common(), type: "context-handoff.updated", payload: handoff },
   ];
   if (!input.dryRun) yield* eventSink.write({ repositionTurnItems: true, events });

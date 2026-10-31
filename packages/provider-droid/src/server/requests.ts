@@ -189,20 +189,19 @@ export interface DroidUserInputRequest {
 const droidQuestionId = (index: number): string => `question-${index}`;
 
 export function droidUserInputRequest(params: unknown): DroidUserInputRequest {
-  const native = droidAskUserQuestionsFromParams(params).map(
-    (question): DroidQuestion => ({ ...question, id: droidQuestionId(question.index) }),
-  );
+  const native = droidAskUserQuestionsFromParams(params).map((question): DroidQuestion => ({
+    ...question,
+    id: droidQuestionId(question.index),
+  }));
   return {
     native,
-    questions: native.map(
-      (question): OrchestrationV2UserInputQuestion => ({
-        id: question.id,
-        header: question.topic ?? `Question ${question.index}`,
-        question: question.question,
-        options: question.options.map((label) => ({ label, description: label, value: label })),
-        multiSelect: question.multiSelect,
-      }),
-    ),
+    questions: native.map((question): OrchestrationV2UserInputQuestion => ({
+      id: question.id,
+      header: question.topic ?? `Question ${question.index}`,
+      question: question.question,
+      options: question.options.map((label) => ({ label, description: label, value: label })),
+      multiSelect: question.multiSelect,
+    })),
   };
 }
 

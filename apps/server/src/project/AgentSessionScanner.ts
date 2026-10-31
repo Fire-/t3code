@@ -412,8 +412,8 @@ export function parseAgentSessionTranscript(
 ): AgentSessionThread | null {
   if (lines.length > MAX_IMPORT_RECORDS) return null;
   const decode = input.source === "droid" ? decodeDroidTranscriptRecord : decodeTranscriptRecord;
-  const records = lines.flatMap(
-    (line): ReadonlyArray<DecodedTranscriptRecord> => Option.toArray(decode(line)),
+  const records = lines.flatMap((line): ReadonlyArray<DecodedTranscriptRecord> =>
+    Option.toArray(decode(line)),
   );
   const claudeFields =
     input.source === "claudeAgent"
@@ -1386,17 +1386,14 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    return Array.from(
-      byOwnerAndCwd.values(),
-      (group): RawCandidate => ({
-        cwd: group.cwd,
-        source,
-        providerInstanceId: group.providerInstanceId,
-        threadCount: group.transcripts.length,
-        lastActiveAtMs: group.lastActiveAtMs,
-        transcripts: group.transcripts,
-      }),
-    );
+    return Array.from(byOwnerAndCwd.values(), (group): RawCandidate => ({
+      cwd: group.cwd,
+      source,
+      providerInstanceId: group.providerInstanceId,
+      threadCount: group.transcripts.length,
+      lastActiveAtMs: group.lastActiveAtMs,
+      transcripts: group.transcripts,
+    }));
   });
 
   const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {

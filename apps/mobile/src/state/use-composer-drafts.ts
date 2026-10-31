@@ -2009,14 +2009,13 @@ export const newTaskComposerDraftsAtom = Atom.make((get): ComposerDraftsByKey =>
 
 type ComposerDraftUploadSource = Pick<ComposerDraft, "attachments" | "project">;
 type ComposerDraftUploadSources = Readonly<Record<string, ComposerDraftUploadSource>>;
-export const composerDraftUploadSourcesAtom = Atom.make(
-  (get): ComposerDraftUploadSources =>
-    Object.fromEntries(
-      Object.entries(get(composerDraftsAtom)).map(([key, draft]) => [
-        key,
-        { attachments: draft.attachments, project: draft.project },
-      ]),
-    ),
+export const composerDraftUploadSourcesAtom = Atom.make((get): ComposerDraftUploadSources =>
+  Object.fromEntries(
+    Object.entries(get(composerDraftsAtom)).map(([key, draft]) => [
+      key,
+      { attachments: draft.attachments, project: draft.project },
+    ]),
+  ),
 ).pipe(
   Atom.withEquality((a: ComposerDraftUploadSources, b: ComposerDraftUploadSources) => {
     const keys = Object.keys(a);

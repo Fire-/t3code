@@ -1162,16 +1162,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       )
       .pipe(
-        Effect.map(
-          (records): OrchestrationV2ThreadProjection => ({
-            ...records,
-            checkpoints: [],
-            plans: [],
-            contextHandoffs: [],
-            visibleTurnItems: [],
-            updatedAt: records.thread.updatedAt,
-          }),
-        ),
+        Effect.map((records): OrchestrationV2ThreadProjection => ({
+          ...records,
+          checkpoints: [],
+          plans: [],
+          contextHandoffs: [],
+          visibleTurnItems: [],
+          updatedAt: records.thread.updatedAt,
+        })),
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
       );
 
