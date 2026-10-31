@@ -26,11 +26,10 @@ function isIdlePrimeState(data: unknown): boolean {
 }
 
 /**
- * `/goal status` is a Prime session command with no agent run: no
- * `agent_start`/`agent_end`, only the session_command action, Prime's hidden
- * echo, a `goal_update` and the result row. The turn settles once, on an idle
- * `get_state` answered after the action cleared, the echo becomes no item, and
- * the result row becomes a system notice.
+ * `/goal status` is a Prime session command with no agent run: no `agent_start`/`agent_end`, only
+ * the session_command action, Prime's hidden echo, a `goal_update` and the result row. The turn
+ * settles once, on an idle `get_state` answered after the action cleared; the echo becomes no
+ * item and the result row a system notice.
  */
 export function assertPrimeSessionCommandOutput(
   result: OrchestratorV2ScenarioResult,

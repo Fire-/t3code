@@ -63,13 +63,10 @@ export function assertPrimeSettleProbesFollowAgentEnd(transcript: ProviderReplay
 }
 
 /**
- * Prime has no settled event: each turn settles on `agent_end` plus an idle
- * `get_state` probe. The recording must show that probe only after the run's
- * `agent_end` (no polling), its last answer idle, and the projection must hold
- * exactly one completed provider turn per prompt. Prime 1.0.0 rejects
- * `get_entries`, and a rejected session name would be rejected again, so
- * neither may appear more than the recording needs: one name per title per
- * Prime process (a respawned process starts without the name).
+ * Prime has no settled event: a turn settles on `agent_end` plus an idle `get_state` probe, sent
+ * only after the run's `agent_end` (no polling), last answered idle, one completed provider turn
+ * per prompt. Prime 1.0.0 rejects `get_entries` and would reject a rejected session name again, so
+ * neither appears more than needed: one name per title per Prime process (a respawn is unnamed).
  */
 export function assertPrimeTurnsSettleOnce(
   result: OrchestratorV2ScenarioResult,

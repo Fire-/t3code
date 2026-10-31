@@ -183,10 +183,9 @@ interface PrimeReplayProcess {
 }
 
 /**
- * Independent adapter fibers (skill discovery beside thread setup, a settle
- * probe beside a steer) can reach stdin in a different order than recorded, so
- * a write that matches a later outbound record of the same turn is held until
- * the transcript reaches it. A write that matches nothing before the next
+ * Independent adapter fibers (skill discovery beside thread setup, a settle probe beside a steer)
+ * can reach stdin out of recorded order, so a write matching a later outbound record of the same
+ * turn is held until the transcript reaches it. A write matching nothing before the next
  * turn-starting record fails immediately.
  */
 class PrimeReplayController {

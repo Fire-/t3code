@@ -35,13 +35,10 @@ function messageText(message: unknown): string {
 }
 
 /**
- * `/goal <objective>` runs as one session_command action across its agent
- * runs, so its turn stays open over `agent_end` and settles once after the
- * action clears. `/autonomous on --gate ...` then makes the next prompt's
- * run check a gate that fails once: Prime posts gate rows as custom messages
- * and feeds the failure back as a user-role `[autonomous-continuation:
- * gate-failed]` message, which must be a provider-created item, never a user
- * bubble.
+ * `/goal <objective>` is one session_command action across its agent runs, so its turn stays open
+ * over `agent_end` and settles once the action clears. `/autonomous on --gate ...` makes the next
+ * run check a gate that fails once: gate rows are custom messages, and the failure comes back as a
+ * user-role `[autonomous-continuation: gate-failed]` message: a provider item, never a user bubble.
  */
 export function assertPrimeGoalAutonomousOutput(
   result: OrchestratorV2ScenarioResult,

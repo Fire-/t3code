@@ -24,11 +24,10 @@ function frameOf(entry: ProviderReplayTranscript["entries"][number] | undefined)
 const NORMALIZED_UUID = /^00000000-0000-4000-8000-\d{12}$/u;
 
 /**
- * T3's bridge extension gates the `ipython` cell with `ctx.ui.confirm` under
- * approval-required. The confirm becomes one pending command request; the
- * accept goes back as an `extension_ui_response` carrying Prime's own dialog
- * id, and only then does the cell run. The turn completes once and no request
- * is left pending.
+ * T3's bridge extension gates the `ipython` cell with `ctx.ui.confirm` under approval-required.
+ * The confirm becomes one pending command request, the accept goes back as an
+ * `extension_ui_response` carrying Prime's own dialog id, and only then does the cell run. The
+ * turn completes once and no request is left pending.
  */
 export function assertPrimeApprovalOutput(
   result: OrchestratorV2ScenarioResult,
