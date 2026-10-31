@@ -2,6 +2,7 @@ import {
   TurnItemId,
   NodeId,
   MessageId,
+  PlanId,
   ProviderInstanceId,
   ProviderThreadId,
   ProviderSessionId,
@@ -11,6 +12,7 @@ import {
   RunId,
   ThreadId,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PlanStep,
   type OrchestrationV2RunStatus,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -27,6 +29,7 @@ import {
   deriveThreadRuntime,
   presentProviderGoal,
   presentRunStop,
+  presentThreadTodoList,
   threadRuntimeHasInterruptibleRun,
 } from "./threadExecution.ts";
 
@@ -486,5 +489,70 @@ describe("presentProviderGoal", () => {
         false,
       ).usage,
     ).toBe("1m / 1m tokens");
+  });
+});
+
+describe("presentThreadTodoList", () => {
+  const session = ProviderThreadId.make("session-thread");
+  const sessionRun = (id: string, ordinal: number, status: OrchestrationV2RunStatus) => ({
+    ...run(id, ordinal, status),
+    providerThreadId: session,
+  });
+  const todoList = (runId: string, statuses: ReadonlyArray<OrchestrationV2PlanStep["status"]>) => ({
+    id: PlanId.make(`plan-${runId}`),
+    threadId: v2Projection.thread.id,
+    runId: RunId.make(runId),
+    nodeId: NodeId.make(`node-${runId}`),
+    kind: "todo_list" as const,
+    status: "active" as const,
+    steps: statuses.map((status, index) => ({ id: `${index}`, text: `Step ${index}`, status })),
+  });
+  const projection = (
+    runs: ReadonlyArray<ReturnType<typeof sessionRun>>,
+    plans: ReadonlyArray<ReturnType<typeof todoList>>,
+  ) => ({
+    ...v2Projection,
+    thread: { ...v2Projection.thread, activeProviderThreadId: session },
+    runs,
+    plans,
+  });
+
+  it("shows the latest list's progress, current step and steps while its run works", () => {
+    const earlier = sessionRun("earlier", 1, "completed");
+    const current = todoList("current", ["completed", "running", "pending"]);
+    expect(
+      presentThreadTodoList(
+        projection(
+          [earlier, sessionRun("current", 2, "running")],
+          [current, todoList("earlier", ["pending"])],
+        ),
+      ),
+    ).toEqual({ title: "Tasks 1/3", current: "Step 1", steps: current.steps });
+    expect(
+      presentThreadTodoList(
+        projection(
+          [earlier, sessionRun("current", 2, "running")],
+          [todoList("current", ["completed", "completed"])],
+        ),
+      ),
+    ).toMatchObject({ title: "Tasks 2/2", current: null });
+  });
+
+  it("keeps unfinished tasks after the turn until they finish or another session takes over", () => {
+    const ended = sessionRun("ended", 1, "completed");
+    const unfinished = projection([ended], [todoList("ended", ["completed", "pending"])]);
+    expect(presentThreadTodoList(unfinished)).toMatchObject({
+      title: "Tasks 1/2",
+      current: "Step 1",
+    });
+    expect(
+      presentThreadTodoList(projection([ended], [todoList("ended", ["completed", "completed"])])),
+    ).toBeNull();
+    expect(
+      presentThreadTodoList({
+        ...unfinished,
+        thread: { ...unfinished.thread, activeProviderThreadId: ProviderThreadId.make("other") },
+      }),
+    ).toBeNull();
   });
 });
