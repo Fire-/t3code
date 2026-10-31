@@ -1245,7 +1245,7 @@ export function orchestrationV2UserWaitMs(
       end: Math.min(toMs, wait.endedAt === null ? toMs : DateTime.toEpochMillis(wait.endedAt)),
     }))
     .filter((span) => span.start < span.end)
-    .toSorted((left, right) => left.start - right.start);
+    .sort((left, right) => left.start - right.start);
   let total = 0;
   let coveredUntil = fromMs;
   for (const span of spans) {
