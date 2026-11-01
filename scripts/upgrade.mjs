@@ -1043,11 +1043,14 @@ async function ui() {
        AND json_extract(t.payload_json, '$.snoozedUntil') IS NULL LIMIT 20`,
   ).map((r) => r.title);
   // A thread with tool calls exercises the most rendering paths; its last user message proves the timeline rendered.
+  // Provider notices are user-role messages too, but the timeline shows a summary row instead of their text.
   const thread = sqliteRo(
     db,
     `SELECT t.thread_id AS id, t.title AS title,
        (SELECT json_extract(m.payload_json, '$.text') FROM orchestration_v2_projection_messages m
-        WHERE m.thread_id = t.thread_id AND m.role = 'user' ORDER BY m.created_at DESC LIMIT 1) AS lastUser
+        WHERE m.thread_id = t.thread_id AND m.role = 'user'
+          AND json_extract(m.payload_json, '$.notification') IS NULL
+        ORDER BY m.created_at DESC LIMIT 1) AS lastUser
      FROM orchestration_v2_projection_threads t
      WHERE ${live} AND EXISTS (SELECT 1 FROM orchestration_v2_projection_turn_items i
        WHERE i.thread_id = t.thread_id AND i.payload_json LIKE '%"tool%')
