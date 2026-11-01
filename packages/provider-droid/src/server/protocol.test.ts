@@ -15,7 +15,6 @@ import {
   droidAskUserQuestionsFromParams,
   droidEditDiffCounts,
   droidMessageText,
-  droidTaskCompletionMessageId,
   droidTaskCompletionOf,
   droidTaskResultReport,
   droidTokenCounts,
@@ -23,6 +22,7 @@ import {
   droidToolPath,
   droidToolResultOutput,
   droidToolSummary,
+  droidWakeMessageId,
   isDroidInboundRequestMethod,
   isDroidNotificationType,
   isZeroDroidUsage,
@@ -333,20 +333,27 @@ describe("background task completion", () => {
       expected,
     );
     assert.isUndefined(droidTaskCompletionOf(message("a-user-message", "system", text)));
+    // A background Execute command's completion wakes Droid too, but settles no subagent.
+    assert.isUndefined(droidTaskCompletionOf(message("execute-completion:abc", "user", text)));
     assert.isUndefined(
       droidTaskCompletionOf(message("task-completion:abc", "system", "not a report")),
     );
     assert.isUndefined(droidTaskCompletionOf({}));
   });
 
-  it("names the turn Droid opens for a task report by the message id alone, whatever the text", () => {
+  it("names the turn Droid opens for a task or command report by the message id alone, whatever the text", () => {
     assert.strictEqual(
-      droidTaskCompletionMessageId(message("task-completion:abc", "system", "not a report")),
+      droidWakeMessageId(message("task-completion:abc", "system", "not a report")),
       "task-completion:abc",
     );
-    assert.isUndefined(droidTaskCompletionMessageId(message("a-user-message", "system", "x")));
-    assert.isUndefined(droidTaskCompletionMessageId({ message: "task-completion:abc" }));
-    assert.isUndefined(droidTaskCompletionMessageId({}));
+    assert.strictEqual(
+      droidWakeMessageId(message("execute-completion:abc", "user", "not a report")),
+      "execute-completion:abc",
+    );
+    assert.isUndefined(droidWakeMessageId(message("context-execute-completion:abc", "user", "x")));
+    assert.isUndefined(droidWakeMessageId(message("a-user-message", "system", "x")));
+    assert.isUndefined(droidWakeMessageId({ message: "task-completion:abc" }));
+    assert.isUndefined(droidWakeMessageId({}));
   });
 
   it("reads a completed report and drops the trailing instructions to the model", () => {

@@ -350,8 +350,9 @@ export function droidTaskResultReport(content: unknown): string | undefined {
   return report === undefined ? undefined : boundDroidToolOutput(report);
 }
 
-/** Droid's id prefix for the message a background task's completion arrives as. */
+/** Droid's id prefixes for the messages background Task and Execute completions arrive as. */
 const DROID_TASK_COMPLETION_ID_PREFIX = "task-completion:";
+const DROID_EXECUTE_COMPLETION_ID_PREFIX = "execute-completion:";
 
 export interface DroidTaskCompletion {
   readonly taskId: string;
@@ -379,17 +380,25 @@ export function parseDroidTaskCompletion(text: string): DroidTaskCompletion | un
   return { taskId, status, summary: status === "failed" ? (failure ?? output) : output };
 }
 
+function droidMessageIdOf(notification: Readonly<Record<string, unknown>>): string | undefined {
+  const message = notification["message"];
+  return Predicate.isObject(message) ? asString(message["id"]) : undefined;
+}
+
 /**
- * The id of the `create_message` Droid opens a turn of its own with when a background task ends,
- * whatever the text says: the native turn that follows carries this id as its `turnId`.
+ * The id of the `create_message` Droid opens a turn of its own with when a background Task or
+ * Execute command ends, whatever the text says: the native turn that follows carries this id as
+ * its `turnId`.
  */
-export function droidTaskCompletionMessageId(
+export function droidWakeMessageId(
   notification: Readonly<Record<string, unknown>>,
 ): string | undefined {
-  const message = notification["message"];
-  if (!Predicate.isObject(message)) return undefined;
-  const id = asString(message["id"]);
-  return id !== undefined && id.startsWith(DROID_TASK_COMPLETION_ID_PREFIX) ? id : undefined;
+  const id = droidMessageIdOf(notification);
+  return id !== undefined &&
+    (id.startsWith(DROID_TASK_COMPLETION_ID_PREFIX) ||
+      id.startsWith(DROID_EXECUTE_COMPLETION_ID_PREFIX))
+    ? id
+    : undefined;
 }
 
 /**
@@ -401,7 +410,10 @@ export function droidTaskCompletionOf(
   notification: Readonly<Record<string, unknown>>,
 ): DroidTaskCompletion | undefined {
   const message = notification["message"];
-  if (!Predicate.isObject(message) || droidTaskCompletionMessageId(notification) === undefined) {
+  if (
+    !Predicate.isObject(message) ||
+    !droidMessageIdOf(notification)?.startsWith(DROID_TASK_COMPLETION_ID_PREFIX)
+  ) {
     return undefined;
   }
   return parseDroidTaskCompletion(droidMessageText(message["content"]));

@@ -35,6 +35,7 @@ import {
   wakeMessage,
   type Events,
   type OpenRuntime,
+  type WakeSource,
 } from "./adapterHarness.testkit.ts";
 import { FAKE_DROID_DEFAULT_SETTINGS, makeFakeDroid } from "./fakeDroid.testkit.ts";
 
@@ -60,17 +61,22 @@ const idleRuntime = Effect.fnUntraced(function* (
 /** Droid starts the turn of its own that a background task's report opens, and it answers. */
 const wakeStarts = Effect.fnUntraced(function* (
   { process }: Pick<Effect.Success<ReturnType<typeof idleRuntime>>, "process">,
-  options: { readonly id?: string; readonly reply?: string; readonly complete?: boolean } = {},
+  options: {
+    readonly id?: string;
+    readonly source?: WakeSource;
+    readonly reply?: string;
+    readonly complete?: boolean;
+  } = {},
 ) {
   const id = options.id ?? WAKE;
   yield* process.emit({
     type: "droid_working_state_changed",
     newState: "streaming_assistant_message",
   });
-  yield* process.emit(wakeMessage(id));
+  yield* process.emit(wakeMessage(id, options.source));
   if (options.reply !== undefined) yield* assistantSays(process, `reply-${id}`, options.reply);
   if (options.complete === true) {
-    yield* process.emit(wakeCompleted(id));
+    yield* process.emit(wakeCompleted(id, options.source));
     yield* process.emit({ type: "droid_working_state_changed", newState: "idle" });
   }
   yield* process.settle;
@@ -124,13 +130,13 @@ const completedTexts = (events: Events) =>
     .map((item) => (item.type === "assistant_message" ? item.text : ""));
 
 describe("DroidAdapterV2 wake buffering", () => {
-  it.effect(
-    "[VAL-SUB-009] a wake while idle is offered once and buffered, then replayed in order into the continuation turn and continued live",
-    () =>
+  it.effect.each(["task-completion", "execute-completion"] as const)(
+    "[VAL-SUB-009] a wake (%s) while idle is offered once and buffered, then replayed in order into the continuation turn and continued live",
+    (source) =>
       Effect.gen(function* () {
         const { fake, opened, thread, offers, process } = yield* idleRuntime();
 
-        yield* wakeStarts({ process }, { reply: "The subagent found two bugs." });
+        yield* wakeStarts({ process }, { source, reply: "The subagent found two bugs." });
         const offer = yield* Queue.take(offers);
         yield* sessionBecomes(opened, "running");
 
@@ -157,7 +163,7 @@ describe("DroidAdapterV2 wake buffering", () => {
         });
         yield* assistantCompleted(opened, "Both are in a.ts.");
         const turn = providerTurnsOf(opened.all).at(-1);
-        assert.strictEqual(turn?.nativeTurnRef?.nativeId, `task-completion:${WAKE}`);
+        assert.strictEqual(turn?.nativeTurnRef?.nativeId, `${source}:${WAKE}`);
         assert.deepStrictEqual(yield* pending(opened, thread), [false, false]);
         assert.deepStrictEqual(
           completedTexts(opened.all),
@@ -177,7 +183,7 @@ describe("DroidAdapterV2 wake buffering", () => {
 
         // Live from here on.
         yield* assistantSays(process, "reply-live", "Fixing them now.");
-        yield* process.emit(wakeCompleted(WAKE));
+        yield* process.emit(wakeCompleted(WAKE, source));
         const terminal = yield* opened.takeEvent(isTerminal);
 
         assert.isTrue(

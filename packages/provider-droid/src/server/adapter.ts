@@ -81,8 +81,8 @@ import {
 import {
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
-  droidTaskCompletionMessageId,
   droidTaskCompletionOf,
+  droidWakeMessageId,
   type DroidTaskCompletion,
   type DroidTokenCounts,
 } from "./protocol.ts";
@@ -1414,7 +1414,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           }
           return;
         }
-        const wakeId = droidTaskCompletionMessageId(notification);
+        const wakeId = droidWakeMessageId(notification);
         if (wakeId !== undefined) return yield* armWake(state, wakeId);
         // Droid flips its working state on its own account all the time; that is not activity.
         if (notification.type === "droid_working_state_changed") return;

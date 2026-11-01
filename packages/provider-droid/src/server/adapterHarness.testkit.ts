@@ -398,21 +398,32 @@ export const makeOfferQueue = Effect.fnUntraced(function* () {
   return { offers, continuationRequests };
 });
 
-/** The message Droid starts a turn of its own with when a background task ends. */
-export const wakeMessage = (wakeId: string, text = "Background task completed.") => ({
+/** What ended in the background: a Task subagent or an Execute command. */
+export type WakeSource = "task-completion" | "execute-completion";
+
+/** The message Droid starts a turn of its own with when a background task or command ends. */
+export const wakeMessage = (wakeId: string, source: WakeSource = "task-completion") => ({
   type: "create_message",
   message: {
-    id: `task-completion:${wakeId}`,
-    role: "system",
-    content: [{ type: "text", text }],
+    id: `${source}:${wakeId}`,
+    role: source === "task-completion" ? "system" : "user",
+    content: [
+      {
+        type: "text",
+        text:
+          source === "task-completion"
+            ? "Background task completed."
+            : "<system-reminder>Background Execute command finished.",
+      },
+    ],
     visibility: "llm_only",
   },
 });
 
-export const wakeCompleted = (wakeId: string, reason = "completed") => ({
+export const wakeCompleted = (wakeId: string, source: WakeSource = "task-completion") => ({
   type: "agent_turn_completed",
-  reason,
-  turnId: `task-completion:${wakeId}`,
+  reason: "completed",
+  turnId: `${source}:${wakeId}`,
   tokenUsage: {
     inputTokens: 10,
     outputTokens: 5,
