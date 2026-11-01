@@ -76,8 +76,10 @@ describe("droidTranscriptEntries", () => {
         toolUse("t-background", "Task", { description: "Find flake", prompt: "Find the flake" }),
         toolUse("t-lost", "Task", { description: "Never reported", prompt: "Lost" }),
         toolUse("t-unanswered", "Grep", { pattern: "race" }),
+        toolUse("t-todo", "TodoWrite", { todos: "1. [completed] Read logs\n2. [in_progress] Fix" }),
       ]),
       record("r2", "user", [
+        toolResult("t-todo", "TODO List Updated"),
         toolResult("t-awaited", "session_id: s1\nThe logs show a timeout."),
         toolResult(
           "t-background",
@@ -104,8 +106,19 @@ describe("droidTranscriptEntries", () => {
       ["subagent", "Find flake", "completed", "setup races the server"],
       ["subagent", "Never reported", "interrupted", null],
       ["dynamic_tool", "interrupted"],
+      ["dynamic_tool", "completed"],
       ["assistant", "A race in setup."],
     ]);
+    const todo = entries[9];
+    assert.deepStrictEqual(
+      todo?.type === "activity" && todo.activity.kind === "tool"
+        ? todo.activity.todoSteps
+        : undefined,
+      [
+        { id: "todo-0", text: "Read logs", status: "completed" },
+        { id: "todo-1", text: "Fix", status: "running" },
+      ],
+    );
     const execute = entries[3];
     assert.deepStrictEqual(execute?.type === "activity" ? execute.activity : undefined, {
       kind: "tool",

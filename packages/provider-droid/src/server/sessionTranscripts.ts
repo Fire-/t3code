@@ -4,6 +4,7 @@
  * `message` records wrapping what `load_session` returns. The folder name is lossy, so the cwd
  * comes from `session_start`.
  */
+import type { OrchestrationV2PlanStep } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -11,7 +12,12 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
-import { droidToolItemFields, droidToolItemType, type DroidToolItemFields } from "./events.ts";
+import {
+  droidTodoSteps,
+  droidToolItemFields,
+  droidToolItemType,
+  type DroidToolItemFields,
+} from "./events.ts";
 import { visibleDroidMessage } from "./history.ts";
 import {
   droidMessageText,
@@ -146,7 +152,12 @@ function droidTranscriptNotice(record: DroidTranscriptRecord): string | undefine
 }
 
 export type DroidTranscriptActivity =
-  | { readonly kind: "tool"; readonly item: DroidToolItemFields }
+  | {
+      readonly kind: "tool";
+      readonly item: DroidToolItemFields;
+      /** The list a TodoWrite call wrote; live turns also show it as a todo list. */
+      readonly todoSteps?: ReadonlyArray<OrchestrationV2PlanStep>;
+    }
   | {
       readonly kind: "subagent";
       readonly title: string | null;
@@ -343,11 +354,16 @@ export function droidTranscriptEntries(
               content: entry.result.content,
             };
       const itemType = droidToolItemType(entry.name, entry.input, true) ?? "dynamic_tool";
+      const todoSteps = entry.name === "TodoWrite" ? droidTodoSteps(entry.input) : [];
       return {
         type: "activity",
         startedAt: entry.startedAt,
         completedAt: entry.result?.at ?? entry.startedAt,
-        activity: { kind: "tool", item: droidToolItemFields(entry, itemType, settlement) },
+        activity: {
+          kind: "tool",
+          item: droidToolItemFields(entry, itemType, settlement),
+          ...(todoSteps.length === 0 ? {} : { todoSteps }),
+        },
         ...call,
       };
     }

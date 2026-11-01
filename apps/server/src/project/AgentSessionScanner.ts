@@ -254,9 +254,9 @@ export interface AgentSessionThread {
 const TRIMMED_HISTORY_NOTICE =
   "Earlier history was too large to import. The conversation continues from its most recent part.";
 
-// Raised when a Droid import starts showing more of a session (2: thinking). Threads imported
-// with an older version get their history again on the next import.
-const DROID_HISTORY_VERSION = 2;
+// Raised when a Droid import starts showing more of a session (2: thinking, 3: todo lists).
+// Threads imported with an older version get their history again on the next import.
+const DROID_HISTORY_VERSION = 3;
 
 const historyVersionFor = (provider: AgentSessionSource) =>
   provider === "droid" ? DROID_HISTORY_VERSION : 1;

@@ -11,6 +11,7 @@ import {
   EventId,
   MessageId,
   NodeId,
+  PlanId,
   ProjectId,
   ProviderDriverKind,
   ThreadId,
@@ -240,6 +241,43 @@ function activityEvent(input: {
   };
 }
 
+/** The todo list a TodoWrite call wrote, as live turns show it. History has no runs, so no plan. */
+function todoListEvent(input: {
+  readonly threadId: ThreadId;
+  readonly index: number;
+  readonly ordinal: number;
+  readonly entry: AgentSessionScanner.AgentSessionThreadActivity;
+  readonly steps: Extract<OrchestrationV2TurnItem, { readonly type: "todo_list" }>["steps"];
+}): OrchestrationV2DomainEvent {
+  const key = `${input.threadId}:todos:${String(input.index).padStart(6, "0")}`;
+  const completedAt = dateTime(input.entry.completedAt);
+  return {
+    id: EventId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${key}`),
+    type: "turn-item.updated",
+    threadId: input.threadId,
+    occurredAt: completedAt,
+    payload: {
+      id: TurnItemId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${key}`),
+      threadId: input.threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: input.ordinal,
+      startedAt: dateTime(input.entry.startedAt),
+      completedAt,
+      updatedAt: completedAt,
+      type: "todo_list",
+      status: "completed",
+      title: null,
+      planId: PlanId.make(`${IMPORT_EVENT_PREFIX}:plan:${key}`),
+      steps: input.steps,
+    },
+  };
+}
+
 /** Messages and the activity between them, in transcript order. */
 function historyEvents(
   threadId: ThreadId,
@@ -250,6 +288,7 @@ function historyEvents(
   let activityIndex = 0;
   let reasoningCount = 0;
   let otherActivityCount = 0;
+  let todoListCount = 0;
   const emitActivitiesBefore = (position: number) => {
     for (
       let entry = thread.activities[activityIndex];
@@ -259,6 +298,17 @@ function historyEvents(
       const kindIndex =
         entry.activity.kind === "reasoning" ? reasoningCount++ : otherActivityCount++;
       events.push(activityEvent({ threadId, thread, kindIndex, ordinal: ++ordinal, entry }));
+      if (entry.activity.kind === "tool" && entry.activity.todoSteps !== undefined) {
+        events.push(
+          todoListEvent({
+            threadId,
+            index: todoListCount++,
+            ordinal: ++ordinal,
+            entry,
+            steps: entry.activity.todoSteps,
+          }),
+        );
+      }
     }
   };
   thread.messages.forEach((message, index) => {

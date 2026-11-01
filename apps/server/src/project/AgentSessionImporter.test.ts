@@ -539,6 +539,24 @@ it.effect("imports activity between messages as settled turn items in transcript
           },
         },
       },
+      {
+        position: 2,
+        ...at,
+        activity: {
+          kind: "tool",
+          item: {
+            status: "completed",
+            title: "TodoWrite",
+            type: "dynamic_tool",
+            toolName: "TodoWrite",
+            input: {},
+          },
+          todoSteps: [
+            { id: "todo-0", text: "Read", status: "completed" },
+            { id: "todo-1", text: "Fix", status: "running" },
+          ],
+        },
+      },
     ]);
     const importer = yield* makeImporter([source]);
 
@@ -556,7 +574,15 @@ it.effect("imports activity between messages as settled turn items in transcript
       [5, "subagent", "completed", null],
       [6, "assistant_message", "completed", null],
       [7, "dynamic_tool", "interrupted", null],
+      [8, "dynamic_tool", "completed", null],
+      [9, "todo_list", "completed", null],
     ]);
+    expect(turnItems.find((item) => item.type === "todo_list")).toMatchObject({
+      steps: [
+        { id: "todo-0", text: "Read", status: "completed" },
+        { id: "todo-1", text: "Fix", status: "running" },
+      ],
+    });
     expect(turnItems.find((item) => item.type === "subagent")).toMatchObject({
       title: "Find the flake",
       prompt: "Find it",
