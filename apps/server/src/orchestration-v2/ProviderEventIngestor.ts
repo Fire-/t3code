@@ -11,7 +11,7 @@ import {
   type ModelSelection,
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
-  type RuntimeMode,
+  RuntimeMode,
   type ProviderInteractionMode,
   ProviderInstanceId,
   ProviderSessionId,
@@ -702,6 +702,23 @@ export const layer: Layer.Layer<
             }
             case "background_work.updated":
               return [];
+            case "runtime_mode.raised": {
+              const thread = yield* projections.getThread(input.event.threadId);
+              if (
+                RuntimeMode.literals.indexOf(input.event.runtimeMode) <=
+                RuntimeMode.literals.indexOf(thread.runtimeMode)
+              )
+                return [];
+              const now = yield* DateTime.now;
+              return [
+                yield* makeDomainEvent(input, {
+                  type: "thread.runtime-mode-updated",
+                  threadId: thread.id,
+                  payload: { ...thread, runtimeMode: input.event.runtimeMode, updatedAt: now },
+                  occurredAt: now,
+                }),
+              ];
+            }
             case "command_output.delta":
               // Live output is routed to the command output hub before ingestion.
               return [];

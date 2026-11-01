@@ -138,6 +138,31 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "provider-session.runtime-mode.set": {
+            const request = effect.request;
+            return Effect.gen(function* () {
+              const session = yield* providerSessions.get(request.providerSessionId);
+              const setRuntimeMode = Option.getOrUndefined(session)?.setRuntimeMode;
+              if (setRuntimeMode === undefined) return;
+              const { providerThreads } = yield* threads.getThreadRecords(effect.threadId, [
+                "providerThreads",
+              ]);
+              const providerThread = providerThreads.find(
+                (candidate) => candidate.id === request.providerThreadId,
+              );
+              if (providerThread === undefined) return;
+              yield* setRuntimeMode({ providerThread, runtimeMode: request.runtimeMode });
+            }).pipe(
+              // The session's next turn applies the thread's mode regardless, so a
+              // failed live update is not worth retrying or failing the effect.
+              Effect.catch((cause) =>
+                Effect.logWarning("orchestration-v2.runtime-mode-live-update-failed", {
+                  effectId: effect.id,
+                  cause,
+                }),
+              ),
+            );
+          }
           case "provider-turn.start":
             return providerTurnStart
               .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
