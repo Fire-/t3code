@@ -174,6 +174,7 @@ it("returns to full density when hidden items make the content fit", async () =>
 
 it("keeps full density when many automations make the content tall", async () => {
   using fixture = setup();
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", true);
   await using _screen = await render(
     <Card threadRef={threadB} inline fixture={fixture} rows={2} automationRows={6} />,
   );
