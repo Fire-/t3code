@@ -432,9 +432,16 @@ describe("attachment max edge", () => {
 
     const result = await prepareImageForAttachment(original, 10 * 1024 * 1024);
 
-    expect(result.ok && result.file).toBe(original);
     expect(result.ok && result.recompressed).toBe(false);
     expect(decode).not.toHaveBeenCalled();
+    if (!result.ok) return;
+    // Uploading the picked File itself fails on Android Chrome for some sources.
+    expect(result.file).not.toBe(original);
+    expect(result.file.name).toBe(original.name);
+    expect(result.file.type).toBe(original.type);
+    expect(new Uint8Array(await result.file.arrayBuffer())).toEqual(
+      new Uint8Array(await original.arrayBuffer()),
+    );
   });
 });
 
