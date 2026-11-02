@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   groupOnboardingProjects,
+  isOutsideImportWindow,
   partitionOnboardingProjects,
   onboardingProjectKey,
   resolveOnboardingLandingProject,
@@ -67,6 +68,19 @@ describe("partitionOnboardingProjects", () => {
     const { git: _git, ...legacy } = candidate("/projects/legacy");
 
     expect(partitionOnboardingProjects([legacy], now).recent).toEqual([legacy]);
+  });
+});
+
+describe("isOutsideImportWindow", () => {
+  it("flags folders whose newest conversation is older than 30 days", () => {
+    expect(isOutsideImportWindow("2026-07-01T12:00:00.000Z", now)).toBe(true);
+    expect(isOutsideImportWindow("2026-07-23T12:00:00.000Z", now)).toBe(false);
+    expect(isOutsideImportWindow("2026-08-20T12:00:00.000Z", now)).toBe(false);
+  });
+
+  it("does not flag unknown or future activity", () => {
+    expect(isOutsideImportWindow(null, now)).toBe(false);
+    expect(isOutsideImportWindow("2026-09-01T12:00:00.000Z", now)).toBe(false);
   });
 });
 
