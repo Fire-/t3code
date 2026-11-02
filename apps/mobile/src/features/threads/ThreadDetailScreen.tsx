@@ -42,6 +42,7 @@ import { deriveBottomControlInsets, type NativeLayoutMetrics } from "../../lib/r
 import type {
   EnvironmentId,
   MessageId,
+  OrchestrationV2UserWait,
   ProviderInteractionMode,
   RuntimeRequestId,
   ScopedThreadRef,
@@ -237,6 +238,7 @@ export interface ThreadDetailScreenProps {
   readonly activityRun: ThreadFeedLatestRun | null;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive?: boolean;
+  readonly userWaits?: ReadonlyArray<OrchestrationV2UserWait>;
   readonly providerSubagentStatus?: ProviderSubagentStatus | null;
   readonly isCompacting: boolean;
   readonly creationState:
@@ -1443,6 +1445,7 @@ function ThreadDetailBody(
               latestRun={props.activityRun}
               activeWorkStartedAt={props.activeWorkStartedAt}
               runlessWorkActive={props.runlessWorkActive ?? false}
+              userWaits={props.userWaits}
               listRef={listRef}
               freeze={freeze}
               anchorMessageId={anchorMessageId}
