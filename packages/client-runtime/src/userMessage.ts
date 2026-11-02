@@ -29,6 +29,48 @@ export const IDLE_COMPACTION_TITLES = {
   onReturn: "Context compacted before sending",
 } satisfies Record<OrchestrationV2IdleCompaction, string>;
 
+export interface SteerMarker {
+  readonly label: "Steer" | "Not delivered";
+  readonly delivered: boolean;
+  readonly description: string;
+}
+
+/** `undelivered` is a steer the provider dropped before the agent read it, usually on Stop. */
+export function resolveSteerMarker(message: {
+  readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
+  readonly undelivered?: boolean | undefined;
+}): SteerMarker | null {
+  if (message.inputIntent !== "steer" && message.inputIntent !== "promoted_queued_to_steer") {
+    return null;
+  }
+  if (message.undelivered === true) {
+    return {
+      label: "Not delivered",
+      delivered: false,
+      description: "The agent never received this message",
+    };
+  }
+  return {
+    label: "Steer",
+    delivered: true,
+    description:
+      message.inputIntent === "promoted_queued_to_steer"
+        ? "Originally queued, then promoted to steer the active turn"
+        : "Steered the active turn",
+  };
+}
+
+/** A delivered steer after a dropped one needs its own label, or it reads as dropped. */
+export function continuesSteerMarker(
+  message: Parameters<typeof resolveSteerMarker>[0] | undefined,
+  previous: Parameters<typeof resolveSteerMarker>[0] | undefined,
+): boolean {
+  if (message === undefined || previous === undefined) return false;
+  const current = resolveSteerMarker(message);
+  const before = resolveSteerMarker(previous);
+  return current !== null && before !== null && current.delivered === before.delivered;
+}
+
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
 const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
 
@@ -119,6 +161,7 @@ export function resolveUserMessagePresentation(message: {
 
 type GroupableUserMessage = Parameters<typeof resolveUserMessagePresentation>[0] & {
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
+  readonly undelivered?: boolean | undefined;
 };
 
 export function resolveUserMessageGrouping(
@@ -128,12 +171,10 @@ export function resolveUserMessageGrouping(
 ) {
   const isOwnMessage = (value: GroupableUserMessage | undefined) =>
     value?.role === "user" && resolveUserMessagePresentation(value).attribution === null;
-  const isSteer = (value: GroupableUserMessage | undefined) =>
-    value?.inputIntent === "steer" || value?.inputIntent === "promoted_queued_to_steer";
   const groupedWithPrevious = isOwnMessage(message) && isOwnMessage(previous);
   return {
     groupedWithPrevious,
     groupedWithNext: isOwnMessage(message) && isOwnMessage(next),
-    continuesSteer: groupedWithPrevious && isSteer(message) && isSteer(previous),
+    continuesSteer: groupedWithPrevious && continuesSteerMarker(message, previous),
   };
 }

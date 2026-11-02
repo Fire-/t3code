@@ -4,6 +4,8 @@ import {
   CheckpointScopeId,
   CommandId,
   NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -34,6 +36,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -84,6 +87,7 @@ function layerExecutorFor(input: {
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
   readonly rollback?: CheckpointRollbackService.CheckpointRollbackServiceV2Shape["execute"];
   readonly respond?: RuntimeRequestService.RuntimeRequestServiceV2["Service"]["respond"];
+  readonly sessionRuntime?: ProviderAdapter.ProviderAdapterV2SessionRuntime;
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -105,7 +109,7 @@ function layerExecutorFor(input: {
       ProviderSessionManager.ProviderSessionManagerV2.of({
         shutdown: Effect.void,
         open: () => Effect.die("unused open"),
-        get: () => Effect.succeedNone,
+        get: () => Effect.succeed(Option.fromUndefinedOr(input.sessionRuntime)),
         isLive: () => Effect.succeed(false),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
@@ -214,6 +218,65 @@ it.effect.each([
       });
     }).pipe(Effect.provide(layer));
     assert.deepEqual(yield* Ref.get(events), dispatched);
+  }),
+);
+
+it.effect("hands a runtime mode change to the live session and tolerates its failure", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const providerThread = {
+      id: providerThreadId,
+      driver: ProviderDriverKind.make("droid"),
+      providerInstanceId: ProviderInstanceId.make("droid"),
+      providerSessionId: oldSessionId,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: null,
+      nativeConversationHeadRef: null,
+      status: "active" as const,
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const execute = (runtimeMode: "auto" | "full-access") =>
+      Effect.gen(function* () {
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        yield* executor.execute({
+          ...restartEffect(now, { type: "detach" }),
+          request: {
+            type: "provider-session.runtime-mode.set",
+            providerSessionId: oldSessionId,
+            providerThreadId,
+            runtimeMode,
+          },
+        });
+      }).pipe(
+        Effect.provide(
+          layerExecutorFor({
+            events,
+            threads: {
+              getThreadRecords: () =>
+                Effect.succeed({ providerThreads: [providerThread] } as never),
+            },
+            sessionRuntime: {
+              setRuntimeMode: (input: { providerThread: { id: string }; runtimeMode: string }) =>
+                input.runtimeMode === "auto"
+                  ? Effect.fail(new Error("session rejected the mode") as never)
+                  : Ref.update(events, (current) => [
+                      ...current,
+                      `${input.providerThread.id}:${input.runtimeMode}`,
+                    ]),
+            } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+          }),
+        ),
+      );
+    yield* execute("full-access");
+    yield* execute("auto");
+    assert.deepEqual(yield* Ref.get(events), [`${providerThreadId}:full-access`]);
   }),
 );
 
