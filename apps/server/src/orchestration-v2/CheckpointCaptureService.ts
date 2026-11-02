@@ -111,13 +111,19 @@ export const layer: Layer.Layer<
               ordinalWithinScope: 0,
               forceMissing: sideChat,
             });
-      const baselineCheckpoint = hasReadyCheckpoint(baselineOrdinalWithinScope)
+      const materializedBaseline = hasReadyCheckpoint(baselineOrdinalWithinScope)
         ? null
         : yield* checkpoints.materializeBaselineCheckpoint({
             scope,
             ordinalWithinScope: baselineOrdinalWithinScope,
             forceMissing: sideChat,
           });
+      // Past the thread start, the baseline shares the previous run's checkpoint id. One without
+      // a snapshot (no Git) would erase that run's identity, which conversation rewind targets.
+      const baselineCheckpoint =
+        materializedBaseline?.status === "ready" || baselineOrdinalWithinScope === 0
+          ? materializedBaseline
+          : null;
       const checkpoint = yield* checkpoints.capture({
         scope,
         runId: run.id,
