@@ -553,12 +553,13 @@ it.layer(NodeServices.layer)("DroidTextGeneration", (it) => {
           return Effect.acquireRelease(
             Effect.gen(function* () {
               yield* Ref.set(launched, standard);
+              const args = standard.args.map(String);
               yield* Ref.set(
                 duringTheCall,
                 yield* Effect.all([
-                  fileSystem.exists(flagValue(standard.args, "-f")),
-                  fileSystem.exists(flagValue(standard.args, "--settings")),
-                  fileSystem.exists(flagValue(standard.args, "--cwd")),
+                  fileSystem.exists(flagValue(args, "-f")),
+                  fileSystem.exists(flagValue(args, "--settings")),
+                  fileSystem.exists(flagValue(args, "--cwd")),
                 ]),
               );
               yield* Deferred.succeed(spawned, undefined);
@@ -592,12 +593,13 @@ it.layer(NodeServices.layer)("DroidTextGeneration", (it) => {
         assert.isTrue(yield* Deferred.isDone(killed), "the child must be killed");
         assert.deepEqual(yield* Ref.get(duringTheCall), [true, true, true]);
         const command = (yield* Ref.get(launched)) ?? assert.fail("droid was never spawned");
+        const args = command.args.map(String);
         assert.equal(command.command, "droid");
         assert.equal(command.options.stdin, "ignore");
-        assert.equal(command.options.cwd, flagValue(command.args, "--cwd"));
-        assert.isFalse(yield* fileSystem.exists(flagValue(command.args, "-f")));
-        assert.isFalse(yield* fileSystem.exists(flagValue(command.args, "--settings")));
-        assert.isFalse(yield* fileSystem.exists(flagValue(command.args, "--cwd")));
+        assert.equal(command.options.cwd, flagValue(args, "--cwd"));
+        assert.isFalse(yield* fileSystem.exists(flagValue(args, "-f")));
+        assert.isFalse(yield* fileSystem.exists(flagValue(args, "--settings")));
+        assert.isFalse(yield* fileSystem.exists(flagValue(args, "--cwd")));
       }),
   );
 

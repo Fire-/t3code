@@ -209,7 +209,12 @@ it.layer(layerTest)("DroidDriver", (it) => {
       yield* instance.snapshot.refresh;
       yield* instance.snapshot.refresh;
       const methods = receivedMethods(yield* readLog);
-      assert.deepEqual(methods, ["droid.list_models", "droid.list_models"]);
+      // The probe `create` forks may land in the log too, so only the method kinds are exact.
+      assert.isAtLeast(methods.length, 2);
+      assert.deepEqual(
+        methods.filter((method) => method !== "droid.list_models"),
+        [],
+      );
     }).pipe(Effect.scoped, live),
   );
 
@@ -385,7 +390,8 @@ it.layer(layerTest)("DroidDriver", (it) => {
         }> = [];
         const spawner = ChildProcessSpawner.make((command) => {
           if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
-          const settingsPath = command.args[command.args.indexOf("--settings") + 1] ?? "";
+          const settingsPath =
+            command.args.map(String)[command.args.indexOf("--settings") + 1] ?? "";
           return fileSystem.readFileString(settingsPath).pipe(
             Effect.orElseSucceed(() => ""),
             Effect.map((settings) => {
@@ -458,7 +464,7 @@ it.layer(layerTest)("DroidDriver", (it) => {
           assert.equal(command.command, "/opt/droid/bin/droid");
           assert.equal(command.args[command.args.indexOf("-m") + 1], "claude-haiku-5-5");
           assert.include(command.args, "--only-tools");
-          const workingDirectory = command.args[command.args.indexOf("--cwd") + 1];
+          const workingDirectory = command.args.map(String)[command.args.indexOf("--cwd") + 1];
           assert.equal(command.options.cwd, workingDirectory);
           assert.isTrue(path.relative("/machine/project", workingDirectory ?? "").startsWith(".."));
           assert.notInclude(command.args, "/machine/project");
