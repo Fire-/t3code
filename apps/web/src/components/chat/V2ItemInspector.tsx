@@ -1,5 +1,11 @@
 import type { ToolCallDiffTarget } from "../../diffPanelStore";
-import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
+import { selectEnvironmentQueryData } from "@t3tools/client-runtime/state/runtime";
+import type {
+  EnvironmentId,
+  OrchestrationV2ProjectedTurnItem,
+  ThreadId,
+  TurnItemId,
+} from "@t3tools/contracts";
 import {
   toolCallLines,
   turnItemDetailRevision,
@@ -8,6 +14,7 @@ import {
   turnItemOutputText,
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
+import { commandHighlightLanguage } from "@t3tools/client-runtime/work-log/command-label";
 import { isJavaScriptReplTool } from "@t3tools/shared/toolActivity";
 import { ExternalLinkIcon } from "lucide-react";
 import { memo, type ReactNode, Suspense, use } from "react";
@@ -16,7 +23,9 @@ import { useRenderedAppearance } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
 import { resolveDiffThemeName } from "../../lib/diffRendering";
 import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
+import { orchestrationEnvironment } from "../../state/orchestration";
 import { useTurnItemDetail } from "../../state/queries";
+import { useEnvironmentQuerySelector } from "../../state/query";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { Button } from "../ui/button";
 import ChatMarkdown from "../ChatMarkdown";
@@ -25,6 +34,7 @@ import { RenderErrorBoundary } from "../RenderErrorBoundary";
 import { CommandOutputPanel, useCommandOutputStreaming } from "./CommandOutputPanel";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
+import { MarkdownCodeBlock } from "./MarkdownCodeBlock";
 import { ShellCommandBlock } from "./ShellCommandBlock";
 import type { TurnItemSource } from "./timelineRowContext";
 
@@ -221,11 +231,65 @@ function ToolCallBody(
         </div>
       ) : null}
       {call.argsText ? <StructuredValue value={call.argsText} highlightJson /> : null}
-      {props.outputSlot ?? <ToolOutput {...props} />}
+      <div className="border-t border-border/50 pt-1.5 first:border-t-0 first:pt-0 empty:hidden">
+        {props.outputSlot ?? <ToolOutput {...props} />}
+      </div>
       {props.exitCode !== undefined && props.exitCode !== 0 ? (
         <div className="text-destructive">exit {props.exitCode}</div>
       ) : null}
     </div>
+  );
+}
+
+interface StreamedCommand {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly itemId: TurnItemId;
+  readonly source: TurnItemSource["commandOutput"] | undefined;
+}
+
+function commandOutputAtom(command: StreamedCommand) {
+  const input = { threadId: command.threadId, itemId: command.itemId };
+  return command.source
+    ? command.source(input)
+    : orchestrationEnvironment.v2.commandOutput({ environmentId: command.environmentId, input });
+}
+
+/** Frames a tool call like a chat code fence so it stands apart from the work log around it. */
+function ToolCallFrame(props: {
+  readonly command?: string;
+  readonly args?: unknown;
+  readonly output: string | null;
+  /** The command whose streamed output replaces `output`. */
+  readonly streamedCommand?: StreamedCommand | undefined;
+  readonly children: ReactNode;
+}) {
+  const theme = useRenderedAppearance();
+  const call = toolCallLines({ command: props.command, args: props.args });
+  // Shares CommandOutputPanel's subscription. Streaming re-renders this frame, but React
+  // skips the unchanged children element, so the body does not re-render with it.
+  const streamed = useEnvironmentQuerySelector(
+    props.streamedCommand ? commandOutputAtom(props.streamedCommand) : null,
+    selectEnvironmentQueryData,
+  );
+  const input =
+    call.command ??
+    call.argsText ??
+    (props.args === undefined ? "" : JSON.stringify(props.args, null, 2));
+  const output = props.streamedCommand ? (streamed?.output.text ?? null) : props.output;
+  const copyText = [input, output ? `Output:\n${output}` : ""].filter(Boolean).join("\n\n");
+  return (
+    <MarkdownCodeBlock
+      code={copyText}
+      language={call.command ? commandHighlightLanguage(call.command) : "json"}
+      fenceTitle={null}
+      theme={theme}
+      isStreaming={false}
+      canWrap={false}
+      flush
+    >
+      <div className="px-3 pt-1 pb-2.5">{props.children}</div>
+    </MarkdownCodeBlock>
   );
 }
 
@@ -260,22 +324,37 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "command_execution" ? (
-        <ToolCallBody
+        <ToolCallFrame
           command={item.input}
-          exitCode={item.exitCode}
-          {...outputState}
-          onImageExpand={props.onImageExpand}
-          outputSlot={
-            streamsOutput ? (
-              <CommandOutputPanel
-                environmentId={props.environmentId}
-                threadId={props.projectedItem.sourceThreadId}
-                itemId={props.projectedItem.sourceItemId}
-                source={props.source?.commandOutput}
-              />
-            ) : undefined
+          output={outputState.output}
+          streamedCommand={
+            streamsOutput
+              ? {
+                  environmentId: props.environmentId,
+                  threadId: props.projectedItem.sourceThreadId,
+                  itemId: props.projectedItem.sourceItemId,
+                  source: props.source?.commandOutput,
+                }
+              : undefined
           }
-        />
+        >
+          <ToolCallBody
+            command={item.input}
+            exitCode={item.exitCode}
+            {...outputState}
+            onImageExpand={props.onImageExpand}
+            outputSlot={
+              streamsOutput ? (
+                <CommandOutputPanel
+                  environmentId={props.environmentId}
+                  threadId={props.projectedItem.sourceThreadId}
+                  itemId={props.projectedItem.sourceItemId}
+                  source={props.source?.commandOutput}
+                />
+              ) : undefined
+            }
+          />
+        </ToolCallFrame>
       ) : null}
 
       {item.type === "file_change" ? (
@@ -379,12 +458,14 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "dynamic_tool" ? (
-        <ToolCallBody
-          toolName={item.toolName}
-          args={item.input}
-          {...outputState}
-          onImageExpand={props.onImageExpand}
-        />
+        <ToolCallFrame args={item.input} output={outputState.output}>
+          <ToolCallBody
+            toolName={item.toolName}
+            args={item.input}
+            {...outputState}
+            onImageExpand={props.onImageExpand}
+          />
+        </ToolCallFrame>
       ) : null}
 
       {item.type === "approval_request" ? <StructuredValue value={item.prompt} /> : null}
