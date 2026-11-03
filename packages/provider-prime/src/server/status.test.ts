@@ -142,7 +142,7 @@ function makeFakePrime(options: FakePrimeOptions = {}) {
   const received: Array<Record<string, unknown>> = [];
   const spawner = ChildProcessSpawner.make((command) => {
     const record = ChildProcess.isStandardCommand(command)
-      ? { command: command.command, args: [...command.args] }
+      ? { command: command.command, args: command.args.map(String) }
       : { command: "", args: [] };
     spawns.push(record);
     if (options.missingBinary === true) {

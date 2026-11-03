@@ -30,6 +30,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -485,8 +486,13 @@ const makeFakePrime: Effect.Effect<FakePrime> = Effect.gen(function* () {
     Effect.sync(() => {
       if (ChildProcess.isStandardCommand(command)) {
         spawns.push({
-          args: command.args,
-          env: command.options.env ?? {},
+          args: command.args.map(String),
+          env: Object.fromEntries(
+            Object.entries(command.options.env ?? {}).map(([name, value]) => [
+              name,
+              Redacted.isRedacted(value) ? Redacted.value(value) : value,
+            ]),
+          ),
         });
       }
       return ChildProcessSpawner.makeHandle({
