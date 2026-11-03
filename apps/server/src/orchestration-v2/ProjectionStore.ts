@@ -99,7 +99,6 @@ import {
   isConversationHistoryItem,
   THREAD_HISTORY_MAX_RAW_TURNS,
   missingInterruptRequests,
-  deferWorkHistoryRows,
   selectDeferredWorkPage,
   encodeThreadHistoryCursor,
   olderHistoryPagePolicy,
@@ -5730,7 +5729,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               position,
               canonicalPosition: position,
             }));
-            const historyItems = workMode === "deferred" ? deferWorkHistoryRows(indexed) : indexed;
             const selection = yield* Effect.try({
               try: () => {
                 const policy = olderHistoryPagePolicy({ items: indexed, cursor, throughEntryId });
@@ -5744,11 +5742,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                         rowEncodedBytes: () => 0,
                       })
                     : selectHistoryPageFromCursor({
-                        items: historyItems,
+                        items: indexed,
                         cursor,
                         snapshotSequence,
                         rowEncodedBytes: () => 0,
                         policy,
+                        deferWork: workMode === "deferred",
                       });
                 return { policy, page };
               },
