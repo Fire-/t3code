@@ -1137,18 +1137,31 @@ export const make = Effect.gen(function* () {
     return identities;
   });
 
-  const readCheckout = Effect.fnUntraced(function* (directory: string) {
-    if (isExcludedProjectPath(directory)) return undefined;
-    const stats = yield* statOption(directory);
-    if (Option.isNone(stats) || stats.value.type !== "Directory") return undefined;
-    const realPath = yield* fileSystem
-      .realPath(directory)
-      .pipe(Effect.orElseSucceed(() => directory));
-    // Symlinks can disguise excluded worktree paths; re-check their targets.
-    if (isExcludedProjectPath(realPath)) return undefined;
-    const gitIdentities = yield* readGitIdentities([directory]);
-    return { stats: stats.value, gitIdentity: gitIdentities.get(directory)! };
+  /** The checkouts among `directories`, read in one batch of git identity reads. */
+  const readCheckouts = Effect.fnUntraced(function* (directories: Iterable<string>) {
+    const checkoutStats = new Map<string, FileSystem.File.Info>();
+    for (const directory of directories) {
+      if (isExcludedProjectPath(directory)) continue;
+      const stats = yield* statOption(directory);
+      if (Option.isNone(stats) || stats.value.type !== "Directory") continue;
+      const realPath = yield* fileSystem
+        .realPath(directory)
+        .pipe(Effect.orElseSucceed(() => directory));
+      // Symlinks can disguise excluded worktree paths; re-check their targets.
+      if (isExcludedProjectPath(realPath)) continue;
+      checkoutStats.set(directory, stats.value);
+    }
+    const gitIdentities = yield* readGitIdentities(Array.from(checkoutStats.keys()));
+    return new Map(
+      Array.from(
+        checkoutStats,
+        ([directory, stats]) =>
+          [directory, { stats, gitIdentity: gitIdentities.get(directory)! }] as const,
+      ),
+    );
   });
+  const readCheckout = (directory: string) =>
+    readCheckouts([directory]).pipe(Effect.map((checkouts) => checkouts.get(directory)));
   type Checkout = NonNullable<Effect.Success<ReturnType<typeof readCheckout>>>;
 
   /** The project that sessions run in `directory`, already read as `checkout`, belong to. */
@@ -1175,14 +1188,6 @@ export const make = Effect.gen(function* () {
       git: main.gitIdentity._tag === "Repository" ? main.gitIdentity.git : null,
       worktree: { path: directory, branch: gitIdentity.branch },
     };
-  });
-
-  /** The project that sessions run in `directory` belong to, if any. */
-  const projectPlacement = Effect.fn("AgentSessionScanner.projectPlacement")(function* (
-    directory: string,
-  ) {
-    const checkout = yield* readCheckout(directory);
-    return checkout === undefined ? undefined : yield* placeCheckout(directory, checkout);
   });
 
   const readCwd = Effect.fn("AgentSessionScanner.readCwd")(function* (
@@ -1972,20 +1977,54 @@ export const make = Effect.gen(function* () {
       string,
       { readonly worktree: AgentSessionWorktree } | null
     >();
+    /** Marks which `directories` are this project's linked worktrees, reading git in one batch. */
+    const placeWorktrees = Effect.fn("AgentSessionScanner.placeWorktrees")(function* (
+      directories: Iterable<string>,
+    ) {
+      const pointers: Array<string> = [];
+      for (const directory of directories) {
+        // Only a .git that is not a directory can lead to another checkout's repository.
+        const gitStats = yield* statOption(path.join(directory, ".git"));
+        if (Option.isNone(gitStats) || gitStats.value.type === "Directory") {
+          worktreePlacements.set(directory, null);
+        } else pointers.push(directory);
+      }
+      const checkouts = yield* readCheckouts(pointers);
+      for (const directory of pointers) {
+        const checkout = checkouts.get(directory);
+        const identity = checkout?.gitIdentity;
+        const mainCheckout = identity?._tag === "Worktree" ? identity.mainCheckout : null;
+        // Worktrees of other checkouts never belong here, so their checkout is not read.
+        const found =
+          checkout !== undefined &&
+          mainCheckout !== null &&
+          (yield* directoryIdentity(mainCheckout)) === rootIdentity
+            ? yield* placeCheckout(directory, checkout)
+            : undefined;
+        worktreePlacements.set(
+          directory,
+          found?.key === rootIdentity && found.worktree !== undefined
+            ? { worktree: found.worktree }
+            : null,
+        );
+      }
+    });
     /** How sessions run in `directory` belong to this project; undefined when they do not. */
     const placeInProject = Effect.fnUntraced(function* (directory: string) {
       if ((yield* directoryIdentity(directory)) === rootIdentity) return {};
-      let placement = worktreePlacements.get(directory);
-      if (placement === undefined) {
-        const found = yield* projectPlacement(directory);
-        placement =
-          found?.key === rootIdentity && found.worktree !== undefined
-            ? { worktree: found.worktree }
-            : null;
-        worktreePlacements.set(directory, placement);
-      }
-      return placement ?? undefined;
+      if (!worktreePlacements.has(directory)) yield* placeWorktrees([directory]);
+      return worktreePlacements.get(directory) ?? undefined;
     });
+
+    const candidateDirectories = new Set<string>();
+    for (const candidate of candidates) {
+      const expanded = expandHomePath(candidate.cwd.trim(), homeDir);
+      if (!path.isAbsolute(expanded)) continue;
+      const directory = path.resolve(expanded);
+      if ((yield* directoryIdentity(directory)) === rootIdentity) continue;
+      candidateDirectories.add(directory);
+    }
+    yield* placeWorktrees(candidateDirectories);
 
     const eligibleTranscripts: Array<{
       readonly candidate: RawCandidate;

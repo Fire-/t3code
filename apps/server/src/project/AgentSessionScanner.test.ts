@@ -25,6 +25,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -914,7 +915,16 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           path.join(worktree, ".git"),
           `gitdir: ${worktreeGitDir}\n`,
         );
-        for (const [index, cwd] of [repo, worktree].entries()) {
+        const otherRepos = [
+          yield* makeTempDir("t3code-workspace-other-a-"),
+          yield* makeTempDir("t3code-workspace-other-b-"),
+          yield* makeTempDir("t3code-workspace-other-c-"),
+        ];
+        for (const other of otherRepos) {
+          yield* fileSystem.makeDirectory(path.join(other, ".git"));
+          yield* fileSystem.writeFileString(path.join(other, ".git", "config"), "[core]\n");
+        }
+        for (const [index, cwd] of [repo, worktree, ...otherRepos].entries()) {
           yield* writeTranscript({
             filePath: path.join(
               codexHomePath,
@@ -939,7 +949,21 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         }
 
         const input = { claudeHomePath, codexHomePath };
-        const threads = yield* runRecentThreads({ ...input, workspaceRoot: repo });
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const spawnedPaths: Array<string> = [];
+        const recordingSpawner = ChildProcessSpawner.make((command) => {
+          if (ChildProcess.isStandardCommand(command)) {
+            spawnedPaths.push(...command.args.filter((arg) => typeof arg === "string"));
+          }
+          return spawner.spawn(command);
+        });
+        const threads = yield* runRecentThreads({ ...input, workspaceRoot: repo }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, recordingSpawner),
+        );
+        // A folder whose .git is a directory cannot be a linked worktree, so it costs no git reads.
+        expect(
+          spawnedPaths.filter((arg) => otherRepos.some((other) => arg.startsWith(other))),
+        ).toEqual([]);
         expect(
           threads.map((thread) => ({ id: thread.providerSessionId, worktree: thread.worktree })),
         ).toEqual([
