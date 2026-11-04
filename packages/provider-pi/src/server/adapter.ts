@@ -6,6 +6,7 @@ import * as Predicate from "effect/Predicate";
 import {
   ProviderDriverKind,
   type ChatAttachment,
+  type MessageId,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
@@ -21,6 +22,7 @@ import {
   type ProviderApprovalDecision,
   type ProviderInstanceId,
   type OrchestrationV2ProviderTurnTokenUsage,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { PiSettings } from "../settings.ts";
 import * as Cause from "effect/Cause";
@@ -405,6 +407,7 @@ interface PiPromptSend {
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly kind: "turn_start" | "steer";
   readonly record: PiRpcRecord;
+  readonly steer?: { readonly threadId: ThreadId; readonly messageId: MessageId };
 }
 
 interface PiThreadState {
@@ -2081,6 +2084,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               yield* Effect.logWarning("Pi rejected a steer message.", {
                 errorLength: recordString(event, "error")?.length,
               });
+              if (pendingPrompt?.steer !== undefined) {
+                yield* emit({
+                  type: "steer.discarded",
+                  driver: PI_PROVIDER,
+                  ...pendingPrompt.steer,
+                });
+              }
               return;
             }
             const failedTurn =
@@ -2736,6 +2746,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                       message: payload.message,
                       streamingBehavior: "steer",
                       ...(payload.images.length === 0 ? {} : { images: payload.images }),
+                    },
+                    steer: {
+                      threadId: steerInput.threadId,
+                      messageId: steerInput.message.messageId,
                     },
                   });
                 }
