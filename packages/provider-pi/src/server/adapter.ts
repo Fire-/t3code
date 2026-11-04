@@ -604,6 +604,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
 
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
+      const reportDiscardedSteer = (prompt: PiPromptSend | undefined) =>
+        prompt?.steer === undefined
+          ? Effect.void
+          : emit({ type: "steer.discarded", driver: PI_PROVIDER, ...prompt.steer });
 
       const updateProviderSession =
         /* Provider events include streaming deltas; avoid a span for each update. */
@@ -2084,13 +2088,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               yield* Effect.logWarning("Pi rejected a steer message.", {
                 errorLength: recordString(event, "error")?.length,
               });
-              if (pendingPrompt?.steer !== undefined) {
-                yield* emit({
-                  type: "steer.discarded",
-                  driver: PI_PROVIDER,
-                  ...pendingPrompt.steer,
-                });
-              }
+              yield* reportDiscardedSteer(pendingPrompt);
               return;
             }
             const failedTurn =
@@ -2199,8 +2197,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     turn?.providerTurn.id !== held.providerTurnId ||
                     turn.interrupted ||
                     stopRequested
-                  )
+                  ) {
+                    yield* reportDiscardedSteer(held);
                     continue;
+                  }
                   yield* sendPrompt(held);
                   releasedPromptTurnId = held.providerTurnId;
                 }
@@ -2222,6 +2222,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   protocolError("Pi transport closed during rollback"),
                 );
               pendingWake = null;
+              for (const held of heldPrompts.splice(0)) yield* reportDiscardedSteer(held);
               const interrupted = state?.activeTurn?.interrupted === true;
               if (state?.activeTurn != null) {
                 state.activeTurn.failure = interrupted

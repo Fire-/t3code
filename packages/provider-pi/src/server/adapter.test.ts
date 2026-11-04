@@ -4301,7 +4301,7 @@ describe("PiAdapterV2", () => {
   );
 
   it.effect.each([{ restart: false }, { restart: true }])(
-    "restarts Pi when Stop interrupts a prompt held for detached compaction, restart=$restart",
+    "restarts Pi when Stop interrupts prompts held for detached compaction, restart=$restart",
     ({ restart }) =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
@@ -4347,6 +4347,27 @@ describe("PiAdapterV2", () => {
         const providerTurnId =
           running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
         assert.isDefined(providerTurnId);
+        yield* runtime.steerTurn({
+          threadId: THREAD_ID,
+          runId: RunId.make("run:thread-pi-test:2"),
+          providerThread,
+          providerTurnId: providerTurnId!,
+          message: {
+            messageId: "message:thread-pi-test:held-steer" as never,
+            text: "Held steer",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        });
+        const discarded: Array<readonly [string, string]> = [];
+        const takeNotingDiscards = (
+          predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+        ) =>
+          takeEvent((event) => {
+            if (event.type === "steer.discarded") discarded.push([event.threadId, event.messageId]);
+            return predicate(event);
+          });
 
         const interruptedAt = fake.allRequests().length;
         if (restart) {
@@ -4373,7 +4394,7 @@ describe("PiAdapterV2", () => {
             method: "confirm",
             title: "Continue?",
           });
-          yield* takeEvent((event) => event.type === "runtime_request.updated");
+          yield* takeNotingDiscards((event) => event.type === "runtime_request.updated");
           yield* fake.emit({ type: "response", id: abort["id"], command: "abort", success: true });
           yield* Fiber.join(stop);
         } else {
@@ -4381,7 +4402,7 @@ describe("PiAdapterV2", () => {
           assert.isFalse(fake.allRequests().some((request) => request["type"] === "abort"));
         }
         yield* fake.closeStdout;
-        const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        const terminal = yield* takeNotingDiscards((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
         assert.isFalse(
           fake
@@ -4389,6 +4410,7 @@ describe("PiAdapterV2", () => {
             .slice(interruptedAt)
             .some((request) => request["type"] === "prompt"),
         );
+        assert.deepEqual(discarded, [[THREAD_ID, "message:thread-pi-test:held-steer"]]);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
