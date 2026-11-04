@@ -390,25 +390,35 @@ function primeToolOutput(result: unknown, toolName: string): unknown {
   if (typeof structured === "string" && structured === contentText(content)) {
     structured = undefined;
   }
-  // Native read repeats its image and first text note as structured output.
-  // Drop only that exact mirror; an extension's extra metadata stays distinct.
-  if (toolName === "read" && Predicate.isObject(structured)) {
+  // Native read repeats its image and first text note as structured output. Drop that
+  // exact mirror; when an extension adds metadata, keep it but drop the duplicate image
+  // bytes, which tool details would otherwise show as base64 text.
+  if (Predicate.isObject(structured) && typeof structured.data === "string") {
     const image = readToolOutputImage(structured);
-    const note =
-      recordString(
-        content.find((block) => recordField(block, "type") === "text"),
-        "text",
-      ) ?? "";
     if (
       image !== null &&
-      Object.keys(structured).every((key) => ["type", "data", "mimeType", "note"].includes(key)) &&
-      recordString(structured, "note") === note &&
       content.some((block) => {
         const match = readToolOutputImage(block);
         return match !== null && match.mimeType === image.mimeType && match.data === image.data;
       })
     ) {
-      structured = undefined;
+      const note =
+        recordString(
+          content.find((block) => recordField(block, "type") === "text"),
+          "text",
+        ) ?? "";
+      if (
+        toolName === "read" &&
+        Object.keys(structured).every((key) =>
+          ["type", "data", "mimeType", "note"].includes(key),
+        ) &&
+        recordString(structured, "note") === note
+      ) {
+        structured = undefined;
+      } else {
+        const { data: _data, ...metadata } = structured;
+        structured = metadata;
+      }
     }
   }
   if (structured !== undefined && !isBoundedStructuredToolValue(structured)) {

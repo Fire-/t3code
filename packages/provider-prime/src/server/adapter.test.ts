@@ -2674,7 +2674,11 @@ describe("PrimeAdapterV2", () => {
         });
         assert.equal(turnItemOutputText(event.turnItem), text);
         const note = "Read image file [image/png]";
-        const image = { type: "image", data: "AAAA", mimeType: "image/png" };
+        const image = {
+          type: "image",
+          data: Buffer.from("mirrored read image").toString("base64"),
+          mimeType: "image/png",
+        };
         const imageContent = [{ type: "text", text: note }, image];
         for (const structuredContent of [
           { ...image, note, width: 1200 },
@@ -2692,11 +2696,15 @@ describe("PrimeAdapterV2", () => {
           );
           if (event.type !== "turn_item.updated" || event.turnItem.type !== "dynamic_tool")
             return yield* Effect.die("Expected a read image tool item");
-          assert.deepEqual(event.turnItem.output, { content: imageContent, structuredContent });
-          assert.equal(
-            turnItemOutputText(event.turnItem),
-            JSON.stringify(structuredContent, null, 2),
-          );
+          const { data, ...metadata } = structuredContent;
+          const expected = data === image.data ? metadata : structuredContent;
+          assert.deepEqual(event.turnItem.output, {
+            content: imageContent,
+            structuredContent: expected,
+          });
+          const displayed = turnItemOutputText(event.turnItem);
+          assert.equal(displayed, JSON.stringify(expected, null, 2));
+          assert.notInclude(String(displayed), image.data);
         }
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
