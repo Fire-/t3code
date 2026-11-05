@@ -1,5 +1,4 @@
 import { assert, it } from "@effect/vitest";
-import { ScheduledTaskId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
@@ -28,18 +27,6 @@ it.effect.each([
   },
   { label: "never for a slash command", text: "  /compact", previousTimes: unread, sent: "hello" },
   {
-    label: "never for an agent message",
-    message: { createdBy: "agent" as const },
-    previousTimes: unread,
-    sent: "hello",
-  },
-  {
-    label: "never for a scheduled task",
-    message: { scheduledTaskId: ScheduledTaskId.make("scheduled-task") },
-    previousTimes: unread,
-    sent: "hello",
-  },
-  {
     label: "in the zone the message was sent from",
     message: { timeZone: "Asia/Tokyo" },
     previousTimes: Effect.succeed([]),
@@ -64,7 +51,6 @@ it.effect.each([
       timeZone: row.timeZone === null ? undefined : losAngeles,
       message: {
         text: row.text ?? "hello",
-        createdBy: "user",
         createdAt: at("2026-09-04T12:02:30Z"),
         ...row.message,
       },

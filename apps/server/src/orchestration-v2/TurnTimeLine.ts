@@ -41,17 +41,12 @@ export const layerMachineTimeZone = Layer.effect(
   }),
 );
 
-type StampedMessage = Pick<
-  OrchestrationV2ConversationMessage,
-  "text" | "createdBy" | "scheduledTaskId" | "createdAt" | "timeZone"
->;
+type StampedMessage = Pick<OrchestrationV2ConversationMessage, "text" | "createdAt" | "timeZone">;
 
-const stampsMessage = (message: StampedMessage) =>
-  message.createdBy === "user" &&
-  message.scheduledTaskId === undefined &&
-  !message.text.trimStart().startsWith("/");
+// Providers only recognize a slash command at the very start of the prompt.
+const stampsMessage = (message: StampedMessage) => !message.text.trimStart().startsWith("/");
 
-/** Prefixes when a person sent the message, in their device's zone, and how long after the latest earlier time. */
+/** Prefixes when the message was sent, in the sender's device zone if known, and how long after the latest earlier time. */
 export const stampProviderText = Effect.fn("TurnTimeLine.stampProviderText")(function* <E>(input: {
   readonly timeZone: Effect.Effect<string> | undefined;
   readonly message: StampedMessage;
