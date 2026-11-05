@@ -106,8 +106,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isContextStatsRequest(frame: unknown): frame is Record<string, unknown> {
-  return isRecord(frame) && frame.type === "request" && frame.method === "droid.get_context_stats";
+const CONTEXT_LIMIT_READS = ["droid.get_context_stats", "droid.get_context_breakdown"];
+
+function isContextLimitRead(
+  frame: unknown,
+): frame is Record<string, unknown> & { readonly method: string } {
+  return (
+    isRecord(frame) &&
+    frame.type === "request" &&
+    typeof frame.method === "string" &&
+    CONTEXT_LIMIT_READS.includes(frame.method)
+  );
 }
 
 function replayValueMatches(expected: unknown, actual: unknown): boolean {
@@ -256,16 +265,23 @@ class DroidReplayController {
   /** Cursor of the held frame once its gate opened, so the same frame is not held again. */
   private gateOpenedAt = -1;
   /**
-   * Recordings made before the adapter read the context window never expect that read, so replay
-   * answers it without a limit and the window stays unknown, as it was when they were recorded.
+   * Recordings made before the adapter read its context limits never expect those reads, so replay
+   * answers each unrecorded one without a value and the limit stays unknown, as it was when recorded.
    */
-  private readonly answersContextStats: boolean;
+  private readonly unrecordedContextReads: ReadonlySet<string>;
 
   constructor(transcript: DroidRpcReplayTranscript, replayGate?: ProviderReplayGate) {
     this.transcript = transcript;
     this.replayGate = replayGate;
-    this.answersContextStats = !transcript.entries.some(
-      (entry) => entry.type === "expect_outbound" && isContextStatsRequest(entry.frame),
+    const recorded = new Set(
+      transcript.entries.flatMap((entry) =>
+        entry.type === "expect_outbound" && isContextLimitRead(entry.frame)
+          ? [entry.frame.method]
+          : [],
+      ),
+    );
+    this.unrecordedContextReads = new Set(
+      CONTEXT_LIMIT_READS.filter((method) => !recorded.has(method)),
     );
   }
 
@@ -287,7 +303,7 @@ class DroidReplayController {
 
   receive(process: DroidReplayProcess, actual: unknown): void {
     if (this.failure !== null) return;
-    if (this.answersContextStats && isContextStatsRequest(actual)) {
+    if (isContextLimitRead(actual) && this.unrecordedContextReads.has(actual.method)) {
       const answer = {
         jsonrpc: "2.0",
         type: "response",
