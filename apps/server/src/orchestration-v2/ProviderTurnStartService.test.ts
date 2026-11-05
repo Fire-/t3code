@@ -54,6 +54,7 @@ import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as TurnTimeLine from "./TurnTimeLine.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
@@ -276,6 +277,8 @@ function makeLocalCommandHarness(input: {
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
+  readonly message?: Partial<OrchestrationV2ThreadProjection["messages"][number]>;
+  readonly previousUserMessageAt?: DateTime.Utc;
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
   readonly ensureThreadFailure?: unknown;
@@ -364,6 +367,7 @@ function makeLocalCommandHarness(input: {
     creationSource: "web",
     createdAt: now,
     updatedAt: now,
+    ...input.message,
   };
   let projection: OrchestrationV2ThreadProjection = {
     thread: {
@@ -960,6 +964,7 @@ function makeLocalCommandHarness(input: {
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThreadRecords,
           getTurnStartContext,
+          getLatestUserMessageAt: () => Effect.succeed(input.previousUserMessageAt),
           getRuntimeRecoveryProjection: () =>
             Effect.as(failReadIfRunning, {
               ...projection,
@@ -1002,6 +1007,7 @@ function makeLocalCommandHarness(input: {
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
           resolve: resolveRuntimePolicy,
         }),
+        Layer.succeed(TurnTimeLine.TurnTimeZone, Effect.succeed("America/Los_Angeles")),
       ),
     ),
   );
@@ -1286,7 +1292,7 @@ effectIt.effect.each([
         expect.objectContaining({ runtimePolicy: expect.objectContaining({ runtimeMode }) }),
       );
       expect(harness.startTurn.mock.calls.map(([turn]) => turn.message.text)).toEqual([
-        withInlineContext(context, "What is the main thread doing?"),
+        withInlineContext(context, "[09-04 05:00 PDT]\nWhat is the main thread doing?"),
       ]);
       expect(harness.projection().contextHandoffs).toMatchObject([
         {
@@ -1346,6 +1352,37 @@ effectIt.effect.each([
 
     expect(harness.interruptTurn).not.toHaveBeenCalled();
     expect(harness.projection().runs.at(-1)?.status).toBe("running");
+  }),
+);
+
+effectIt.effect.each([
+  {
+    label: "since the previous run finished",
+    text: "Continue",
+    previousUserMessageAt: "2026-09-04T11:50:00Z",
+    sent: "[09-04 05:02 PDT Δ2m]\nContinue",
+  },
+  {
+    label: "since a later user message",
+    text: "Continue",
+    previousUserMessageAt: "2026-09-04T12:01:00Z",
+    sent: "[09-04 05:02 PDT Δ1m]\nContinue",
+  },
+])("tells the provider when the user sent the message $label", (row) =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: row.text,
+      message: { createdAt: DateTime.makeUnsafe("2026-09-04T12:02:30Z") },
+      ...(row.previousUserMessageAt === undefined
+        ? {}
+        : { previousUserMessageAt: DateTime.makeUnsafe(row.previousUserMessageAt) }),
+      previousTurn: { runStatus: "completed", turnStatus: "completed" },
+    });
+
+    yield* harness.start;
+
+    expect(harness.startRootRun.mock.calls[0]?.[0].message.text).toBe(row.sent);
+    expect(harness.projection().messages.at(-1)?.text).toBe(row.text);
   }),
 );
 
