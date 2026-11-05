@@ -742,15 +742,22 @@ describe("DroidAdapterV2", () => {
 
     describe("context window", () => {
       const LIMITS: Readonly<Record<string, number>> = { [MODEL]: 872_000, "gpt-6-sol": 922_000 };
-      /** Answers `get_context_stats` the way Droid does: the window of the model the session holds. */
+      /**
+       * Answers `get_context_stats` the way Droid does: the window of the model the session holds.
+       * `get_context_breakdown`'s `contextBudget` is the compaction limit, 250k by default.
+       */
       const fakeWithContextStats = (sessions?: Record<string, FakeDroidSession>) =>
         Effect.gen(function* () {
+          const heldModel = () => {
+            const model = fake.current().settings()?.["modelId"];
+            return typeof model === "string" && LIMITS[model] !== undefined ? model : undefined;
+          };
           const fake: FakeDroid = yield* makeFakeDroid({
             ...(sessions === undefined ? {} : { sessions }),
             overrides: {
               "droid.get_context_stats": () => {
-                const model = fake.current().settings()?.["modelId"];
-                const limit = typeof model === "string" ? LIMITS[model] : undefined;
+                const model = heldModel();
+                const limit = model === undefined ? undefined : LIMITS[model];
                 return limit === undefined
                   ? undefined
                   : {
@@ -763,19 +770,39 @@ describe("DroidAdapterV2", () => {
                       },
                     };
               },
+              "droid.get_context_breakdown": () => {
+                const model = heldModel();
+                return model === undefined
+                  ? undefined
+                  : {
+                      result: {
+                        modelId: model,
+                        modelDisplayName: model,
+                        contextBudget: 250_000,
+                        usedTokens: 1_000,
+                        freeTokens: 249_000,
+                        categories: [],
+                        skills: [],
+                        mcpServers: [],
+                        droids: [],
+                      },
+                    };
+              },
             },
           });
           return fake;
         });
-      const usageWindow = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) => {
+      const latestUsage = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) => {
         const latest = events.findLast(
           (event) =>
             event.type === "provider_thread.updated" && event.providerThread.contextUsage !== null,
         );
         return latest?.type === "provider_thread.updated"
-          ? latest.providerThread.contextUsage?.maxTokens
+          ? latest.providerThread.contextUsage
           : undefined;
       };
+      const usageWindow = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+        latestUsage(events)?.maxTokens;
 
       it.effect("a new session knows its model's window, and its usage carries it", () =>
         Effect.gen(function* () {
@@ -785,6 +812,7 @@ describe("DroidAdapterV2", () => {
           assert.strictEqual(opened.runtime.getModelContextWindow?.(selection()), 872_000);
           yield* runTurn(opened, fake, thread);
           assert.strictEqual(usageWindow(opened.all), 872_000);
+          assert.strictEqual(latestUsage(opened.all)?.autoCompactThreshold, 250_000);
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
       );
 

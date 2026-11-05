@@ -636,6 +636,8 @@ export interface ProviderAdapterV2SessionRuntime {
     cwd?: string | null,
   ) => number | undefined;
   readonly canReuseContextUsage?: (previous: ModelSelection, next: ModelSelection) => boolean;
+  /** Set if the provider compacts on its own before a send crosses its threshold, so handoffs may fill the model window. */
+  readonly handoffsIgnoreAutoCompact?: true;
   readonly ensureThread: (
     input: ProviderAdapterV2EnsureThreadInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;

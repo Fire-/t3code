@@ -636,8 +636,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       let settingsOwed = false;
       /** The model list the latest `initialize_session` or `load_session` reported. */
       let models: ReadonlyArray<DroidModelInfo> | undefined;
-      /** Input windows by Droid model id, `undefined` once Droid reported none. */
-      const contextWindows = new Map<string, number | undefined>();
+      /** Input windows and compaction limits by Droid model id; empty once Droid reported none. */
+      const contextLimits = new Map<
+        string,
+        { readonly window?: number; readonly autoCompactThreshold?: number }
+      >();
       /**
        * The policy and selection the thread last asked with. Only a turn names them and a rollback
        * names neither, so its frame is computed from these against the rewound session's models.
@@ -739,15 +742,19 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           });
         });
 
-      const eventContext = (state: DroidThreadState, turn: ActiveDroidTurn): DroidEventContext => ({
-        threadId: turn.turnInput.threadId,
-        runId: turn.turnInput.runId,
-        rootNodeId: turn.turnInput.rootNodeId,
-        providerThread: state.providerThread,
-        providerTurn: turn.providerTurn,
-        derive: idAllocator.derive,
-        contextWindow: known.modelId === undefined ? undefined : contextWindows.get(known.modelId),
-      });
+      const eventContext = (state: DroidThreadState, turn: ActiveDroidTurn): DroidEventContext => {
+        const limits = known.modelId === undefined ? undefined : contextLimits.get(known.modelId);
+        return {
+          threadId: turn.turnInput.threadId,
+          runId: turn.turnInput.runId,
+          rootNodeId: turn.turnInput.rootNodeId,
+          providerThread: state.providerThread,
+          providerTurn: turn.providerTurn,
+          derive: idAllocator.derive,
+          contextWindow: limits?.window,
+          autoCompactThreshold: limits?.autoCompactThreshold,
+        };
+      };
 
       /** The mapper builds `provider_thread.updated` from the thread it was given, so adopt each one. */
       const emitMapped = Effect.fnUntraced(function* (
@@ -1757,27 +1764,40 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               known = {};
             }),
           ),
-          Effect.tap(() => measureContextWindow()),
+          Effect.tap(() => measureContextLimits()),
         );
       };
 
-      /** The model list carries no window, so this asks `get_context_stats` once per model. */
-      const measureContextWindow = Effect.fnUntraced(function* () {
-        const modelId = known.modelId;
-        if (modelId === undefined || contextWindows.has(modelId) || ended) return;
-        const stats = yield* rpc
-          .request("droid.get_context_stats", {}, { timeout: CONTEXT_STATS_TIMEOUT })
-          .pipe(
-            Effect.tapError((error) =>
-              logDebug(`Droid did not report its context window: ${describeFailure(error)}`),
-            ),
-            Effect.option,
-          );
-        const limit = Option.isSome(stats) ? field(stats.value, "limit") : undefined;
-        contextWindows.set(
-          modelId,
-          Predicate.isNumber(limit) && Number.isInteger(limit) && limit > 0 ? limit : undefined,
+      const readContextLimit = (method: string, key: string) =>
+        rpc.request(method, {}, { timeout: CONTEXT_STATS_TIMEOUT }).pipe(
+          Effect.tapError((error) =>
+            logDebug(`Droid did not answer ${method}: ${describeFailure(error)}`),
+          ),
+          Effect.option,
+          Effect.map((answer) => {
+            const value = Option.isSome(answer) ? field(answer.value, key) : undefined;
+            return Predicate.isNumber(value) && Number.isInteger(value) && value > 0
+              ? value
+              : undefined;
+          }),
         );
+
+      /**
+       * The model list carries no limits, so this asks once per model: `get_context_stats.limit`
+       * is the model's input window, `get_context_breakdown.contextBudget` where Droid compacts.
+       */
+      const measureContextLimits = Effect.fnUntraced(function* () {
+        const modelId = known.modelId;
+        if (modelId === undefined || contextLimits.has(modelId) || ended) return;
+        const window = yield* readContextLimit("droid.get_context_stats", "limit");
+        const autoCompactThreshold = yield* readContextLimit(
+          "droid.get_context_breakdown",
+          "contextBudget",
+        );
+        contextLimits.set(modelId, {
+          ...(window === undefined ? {} : { window }),
+          ...(autoCompactThreshold === undefined ? {} : { autoCompactThreshold }),
+        });
       });
 
       /** The settings a turn or thread asks for, against the models the session reported. Records the ask. */
@@ -1858,7 +1878,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           subagents: new Map(),
         };
         noteStartedSession(settings, result);
-        yield* measureContextWindow();
+        yield* measureContextLimits();
         sessionUsage = DROID_ZERO_COUNTS;
         if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = state;
@@ -1896,7 +1916,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           subagents: new Map(),
         };
         noteLoadedSession(result);
-        yield* measureContextWindow();
+        yield* measureContextLimits();
         sessionUsage = undefined;
         if (threadState !== null) yield* retireBackground(threadState, "interrupted");
         threadState = state;
@@ -2870,8 +2890,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         backgroundTasksEndWithProcess: true,
         getModelContextWindow: (selection) =>
           selection.instanceId === options.instanceId
-            ? contextWindows.get(resolveDroidModelId(selection.model))
+            ? contextLimits.get(resolveDroidModelId(selection.model))?.window
             : undefined,
+        handoffsIgnoreAutoCompact: true,
         // A wake counts: Droid has work of its own under way for the thread that no turn owns yet.
         hasPendingBackgroundWork: Effect.sync(
           () =>

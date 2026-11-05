@@ -71,6 +71,8 @@ export interface DroidEventContext {
   >;
   /** Droid reports no context window in usage notifications; the adapter reads it once per model. */
   readonly contextWindow?: number | undefined;
+  /** Droid compacts well below the window (250k by default), read with the window. */
+  readonly autoCompactThreshold?: number | undefined;
   /**
    * Minimum gap between streaming updates of one block. Deltas inside the gap only grow the
    * block's text; `flushDroidStreams` (or the block's completion) emits the latest text.
@@ -1199,10 +1201,21 @@ const contextInputTokens = (counts: DroidTokenCounts): number =>
 const processedTokens = (counts: DroidTokenCounts): number =>
   contextInputTokens(counts) + counts.outputTokens;
 
-const maxTokensOf = (ctx: DroidEventContext): { readonly maxTokens?: number } =>
-  ctx.contextWindow !== undefined && Number.isInteger(ctx.contextWindow) && ctx.contextWindow > 0
-    ? { maxTokens: ctx.contextWindow }
-    : {};
+const positiveInt = (value: number | undefined): number | undefined =>
+  value !== undefined && Number.isInteger(value) && value > 0 ? value : undefined;
+
+const contextLimitsOf = (
+  ctx: DroidEventContext,
+): { readonly maxTokens?: number; readonly autoCompactThreshold?: number } => {
+  const maxTokens = positiveInt(ctx.contextWindow);
+  const threshold = positiveInt(ctx.autoCompactThreshold);
+  return {
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(threshold === undefined || (maxTokens !== undefined && threshold >= maxTokens)
+      ? {}
+      : { autoCompactThreshold: threshold }),
+  };
+};
 
 function totalsFields(totals: DroidTokenCounts | undefined) {
   if (totals === undefined || processedTokens(totals) <= 0) return {};
@@ -1258,7 +1271,7 @@ function mapTokenUsage(
   if (last === undefined || usedTokens <= 0) return { state: next, events: [] };
   const snapshot: ThreadTokenUsageSnapshot = {
     usedTokens,
-    ...maxTokensOf(ctx),
+    ...contextLimitsOf(ctx),
     lastUsedTokens: usedTokens,
     lastInputTokens: contextInputTokens(last),
     lastOutputTokens: last.outputTokens,
@@ -1377,10 +1390,14 @@ function completionContextUsage(
   }
   const totals = cumulative ?? nonZero(droidTokenCounts(notification["tokenUsage"]));
   if (totals !== undefined) {
-    return { usedTokens: processedTokens(totals), ...maxTokensOf(ctx), ...totalsFields(totals) };
+    return {
+      usedTokens: processedTokens(totals),
+      ...contextLimitsOf(ctx),
+      ...totalsFields(totals),
+    };
   }
   return state.sessionUsage !== undefined && isZeroDroidUsage(state.sessionUsage)
-    ? { usedTokens: 0, ...maxTokensOf(ctx) }
+    ? { usedTokens: 0, ...contextLimitsOf(ctx) }
     : undefined;
 }
 

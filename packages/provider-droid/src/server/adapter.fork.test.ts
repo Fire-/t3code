@@ -709,6 +709,7 @@ describe("DroidAdapterV2 restart after a fork", () => {
           [
             "droid.load_session",
             "droid.get_context_stats",
+            "droid.get_context_breakdown",
             "droid.update_session_settings",
             "droid.add_user_message",
           ],

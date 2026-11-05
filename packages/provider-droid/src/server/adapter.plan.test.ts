@@ -625,20 +625,21 @@ describe("DroidAdapterV2 plan mode", () => {
                 [
                   "droid.initialize_session",
                   "droid.get_context_stats",
+                  "droid.get_context_breakdown",
                   "droid.update_session_settings",
                   "droid.add_user_message",
                   "droid.update_session_settings",
                   "droid.add_user_message",
                 ],
               );
-              assert.deepStrictEqual(frames[4]?.[1], {
+              assert.deepStrictEqual(frames[5]?.[1], {
                 interactionMode: "auto",
                 autonomyLevel: level,
                 modelId: MODEL,
                 reasoningEffort: "high",
               });
-              assert.strictEqual(frames[5]?.[1]["text"], "Implement the plan.");
-              assert.strictEqual(frames[5]?.[1]["messageId"], messageIdFor(2));
+              assert.strictEqual(frames[6]?.[1]["text"], "Implement the plan.");
+              assert.strictEqual(frames[6]?.[1]["messageId"], messageIdFor(2));
               assert.deepStrictEqual(answersFor(fake.current(), "perm-exit-1"), [
                 { selectedOption: "cancel" },
               ]);
