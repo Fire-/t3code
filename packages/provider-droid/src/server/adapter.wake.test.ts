@@ -236,6 +236,50 @@ describe("DroidAdapterV2 wake buffering", () => {
   );
 
   it.effect(
+    "a background Execute command keeps the session from idling out until its completion arrives",
+    () =>
+      Effect.gen(function* () {
+        const { opened, thread, offers, process } = yield* idleRuntime();
+        const execute = (id: string, input: Record<string, unknown>, content: string) =>
+          Effect.gen(function* () {
+            yield* process.emit({
+              type: "tool_call",
+              toolUse: { type: "tool_use", id, name: "Execute", input },
+            });
+            yield* process.emit({ type: "tool_result", toolUseId: id, content, isError: false });
+          });
+
+        yield* startTurn(opened.runtime, thread, { runtimeMode: "auto" });
+        yield* execute("tool-fg", { command: "ls" }, "a.ts");
+        yield* execute(
+          "tool-bg",
+          { command: "sleep 3600", fireAndForget: true },
+          "Background process started (PID: 4242)",
+        );
+        yield* process.emit(completed(1));
+        yield* opened.takeEvent(isTerminal);
+        assert.deepStrictEqual(yield* pending(opened, thread), [true, true]);
+
+        yield* wakeStarts(
+          { process },
+          { id: "tool-bg", source: "execute-completion", reply: "Slept.", complete: true },
+        );
+        yield* Queue.take(offers);
+        yield* sessionBecomes(opened, "running");
+        yield* sessionBecomes(opened, "ready");
+        yield* startTurn(opened.runtime, thread, {
+          runOrdinal: 2,
+          continuation: true,
+          runtimeMode: "auto",
+        });
+        yield* opened.takeEvent(isTerminal);
+
+        assert.deepStrictEqual(completedTexts(opened.all), ["Slept."]);
+        assert.deepStrictEqual(yield* pending(opened, thread), [false, false]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
     "[VAL-SUB-009] a permission request the wake raises is held until a turn owns it, then shown and answered",
     () =>
       Effect.gen(function* () {

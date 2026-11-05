@@ -992,6 +992,26 @@ function mapToolResult(
 }
 
 /**
+ * The tool use id of a `fireAndForget` Execute command a tool result reports as started. It runs
+ * on after the turn, until Droid's `execute-completion:` message or the end of its process.
+ */
+export function droidBackgroundCommandStarted(
+  state: DroidMapperState,
+  ctx: DroidEventContext,
+  notification: DroidNotification,
+): string | undefined {
+  if (notification.type !== "tool_result" || notification["isError"] === true) return undefined;
+  const toolUseId = asTrimmed(notification["toolUseId"]);
+  const tool =
+    toolUseId === undefined ? undefined : state.tools.get(toolNativeItemId(ctx, toolUseId));
+  return tool?.name === "Execute" &&
+    Predicate.isObject(tool.input) &&
+    tool.input["fireAndForget"] === true
+    ? toolUseId
+    : undefined;
+}
+
+/**
  * Command output goes out as `command_output.delta` only. `fullOutput` is the accumulated
  * output (mid frames also carry a recent-tail `text`), so a frame's chunk is what grew since
  * the previous frame. When Droid rewrites rather than extends it (truncation), no chunk is

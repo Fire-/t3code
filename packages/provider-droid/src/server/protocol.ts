@@ -401,6 +401,16 @@ export function droidWakeMessageId(
     : undefined;
 }
 
+/** The tool use id of the background Execute command whose end a `create_message` reports. */
+export function droidBackgroundCommandEnded(
+  notification: Readonly<Record<string, unknown>>,
+): string | undefined {
+  const id = droidMessageIdOf(notification);
+  return id?.startsWith(DROID_EXECUTE_COMPLETION_ID_PREFIX)
+    ? id.slice(DROID_EXECUTE_COMPLETION_ID_PREFIX.length)
+    : undefined;
+}
+
 /**
  * The completion a `create_message` notification carries, when it is Droid's background-task
  * message: its id has the `task-completion:` prefix and its text follows the CLI's template. The

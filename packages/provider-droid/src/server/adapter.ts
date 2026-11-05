@@ -60,6 +60,7 @@ import { DroidAuthSignal } from "./authSignal.ts";
 import {
   createDroidTurnState,
   DROID_ZERO_COUNTS,
+  droidBackgroundCommandStarted,
   droidCompactionEvents,
   droidScriptCalls,
   droidTodoSteps,
@@ -81,6 +82,7 @@ import {
 import {
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
+  droidBackgroundCommandEnded,
   droidTaskCompletionOf,
   droidWakeMessageId,
   type DroidTaskCompletion,
@@ -338,6 +340,8 @@ interface DroidThreadState {
    * derived from the running background ones, so the two cannot disagree.
    */
   readonly subagents: Map<string, DroidSubagent>;
+  /** Tool use ids of the `fireAndForget` Execute commands still running. */
+  readonly backgroundCommands: Set<string>;
 }
 
 type DroidRequestEvent = Extract<DroidRpcEvent, { readonly _tag: "Request" }>;
@@ -363,6 +367,9 @@ const backgroundSubagentsOf = (state: DroidThreadState) =>
   [...state.subagents.values()].filter(
     (subagent) => subagent.background && subagent.status === "running",
   );
+
+const hasBackgroundWork = (state: DroidThreadState) =>
+  state.backgroundCommands.size > 0 || backgroundSubagentsOf(state).length > 0;
 
 /** How a Task subagent ends with the turn that still holds it open. */
 const subagentStatusOnTurnEnd = (outcome: TurnOutcome): DroidSubagentOutcome["status"] =>
@@ -835,14 +842,15 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       /**
-       * Ends the background subagents of a session the adapter stops following. Droid stops them
-       * with its process, and a replaced session is never read again, so nothing would clear them
-       * later.
+       * Ends the background subagents and commands of a session the adapter stops following.
+       * Droid stops them with its process, and a replaced session is never read again, so nothing
+       * would clear them later.
        */
       const retireBackground = Effect.fnUntraced(function* (
         state: DroidThreadState,
         status: DroidSubagentOutcome["status"],
       ) {
+        state.backgroundCommands.clear();
         yield* settleSubagents(state, backgroundSubagentsOf(state), { status, result: null });
       });
 
@@ -1463,6 +1471,8 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         const turn = state.activeTurn;
         if (notification.type === "create_message") {
+          const endedCommand = droidBackgroundCommandEnded(notification);
+          if (endedCommand !== undefined) state.backgroundCommands.delete(endedCommand);
           // Droid reports a finished background task as a message of its own, and does so while
           // idle as well: the task ended whether or not a turn is open to take the report.
           const completion = droidTaskCompletionOf(notification);
@@ -1501,12 +1511,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         }
         if (yield* handleSubagentFrame(state, turn, notification)) return;
         if (notification.type === "create_message") noteQueuedSteerStarted(turn, notification);
-        const mapped = mapDroidNotification(
-          turn.mapper,
-          eventContext(state, turn),
-          notification,
-          yield* DateTime.now,
-        );
+        const ctx = eventContext(state, turn);
+        const startedCommand = droidBackgroundCommandStarted(turn.mapper, ctx, notification);
+        if (startedCommand !== undefined) state.backgroundCommands.add(startedCommand);
+        const mapped = mapDroidNotification(turn.mapper, ctx, notification, yield* DateTime.now);
         if (mapped.unknownType !== undefined) {
           yield* logDebug(
             `Dropping a Droid notification of an unknown type: ${mapped.unknownType}`,
@@ -1876,6 +1884,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           latestPlan: undefined,
           latestTodoList: undefined,
           subagents: new Map(),
+          backgroundCommands: new Set(),
         };
         noteStartedSession(settings, result);
         yield* measureContextLimits();
@@ -1914,6 +1923,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           latestPlan: undefined,
           latestTodoList: undefined,
           subagents: new Map(),
+          backgroundCommands: new Set(),
         };
         noteLoadedSession(result);
         yield* measureContextLimits();
@@ -2874,6 +2884,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             latestPlan: undefined,
             latestTodoList: undefined,
             subagents: new Map(),
+            backgroundCommands: new Set(),
           };
           return providerThread;
         }).pipe(permit.withPermits(1));
@@ -2895,16 +2906,14 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         handoffsIgnoreAutoCompact: true,
         // A wake counts: Droid has work of its own under way for the thread that no turn owns yet.
         hasPendingBackgroundWork: Effect.sync(
-          () =>
-            pendingWake !== null ||
-            (threadState !== null && backgroundSubagentsOf(threadState).length > 0),
+          () => pendingWake !== null || (threadState !== null && hasBackgroundWork(threadState)),
         ),
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(
             () =>
               threadState !== null &&
               threadState.providerThread.id === providerThread.id &&
-              (pendingWake !== null || backgroundSubagentsOf(threadState).length > 0),
+              (pendingWake !== null || hasBackgroundWork(threadState)),
           ),
         ensureThread: (threadInput) =>
           ensureThread(threadInput).pipe(
