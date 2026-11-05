@@ -19,7 +19,7 @@ it.effect.each([
       at("2026-09-04T12:02:30Z"),
       at("2026-09-04T12:05:00Z"),
     ]),
-    sent: "[09-04 05:02 PDT +2m]\nhello",
+    sent: "[09-04 05:02 PDT Δ2m]\nhello",
   },
   {
     label: "without a gap first",

@@ -2222,7 +2222,7 @@ describe("parseAgentSessionTranscript", () => {
           timestamp: "2026-08-24T10:00:00.000Z",
           message: {
             role: "user",
-            content: [{ type: "text", text: "[08-24 03:00 PDT +5m]\nFix authentication" }],
+            content: [{ type: "text", text: "[08-24 03:00 PDT Δ5m]\nFix authentication" }],
           },
         }),
         JSON.stringify({

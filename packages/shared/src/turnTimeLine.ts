@@ -1,5 +1,6 @@
+// `+` is the gap marker stamps used before Δ; providers keep those in their own session files.
 const STAMP_LINE =
-  /^\[\d{2}-\d{2} \d{2}:\d{2} [^\s\]]+(?: \+\d+(?:s|m|h(?:\d+m)?|d(?:\d+h)?))?\]\n/u;
+  /^\[\d{2}-\d{2} \d{2}:\d{2} [^\s\]]+(?: [Δ+]\d+(?:s|m|h(?:\d+m)?|d(?:\d+h)?))?\]\n/u;
 
 const formatGap = (milliseconds: number): string => {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -12,7 +13,7 @@ const formatGap = (milliseconds: number): string => {
   return hours % 24 === 0 ? `${days}d` : `${days}d${hours % 24}h`;
 };
 
-/** `[MM-DD HH:mm ZONE +gap]` for when a message was sent; times are epoch milliseconds. */
+/** `[MM-DD HH:mm ZONE Δgap]` for when a message was sent; times are epoch milliseconds. */
 export function formatTurnTimeLine(input: {
   readonly sentAt: number;
   readonly previousAt?: number | undefined;
@@ -30,7 +31,7 @@ export function formatTurnTimeLine(input: {
   const part = (type: Intl.DateTimeFormatPartTypes) =>
     parts.find((candidate) => candidate.type === type)?.value ?? "";
   const gap =
-    input.previousAt === undefined ? "" : ` +${formatGap(input.sentAt - input.previousAt)}`;
+    input.previousAt === undefined ? "" : ` Δ${formatGap(input.sentAt - input.previousAt)}`;
   return `[${part("month")}-${part("day")} ${part("hour")}:${part("minute")} ${part("timeZoneName")}${gap}]`;
 }
 

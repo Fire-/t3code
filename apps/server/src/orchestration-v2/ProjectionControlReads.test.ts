@@ -335,7 +335,7 @@ it.effect.each(storageCases)(
         yield* reply.respond({ threadId, providerSessionId, requestId, decision: "accept" });
         assert.deepEqual(calls, [
           "interrupt",
-          "[01-01 00:00 UTC +2m]\nUse the smaller fix.",
+          "[01-01 00:00 UTC Δ2m]\nUse the smaller fix.",
           "reply",
         ]);
         const wrongSession = ProviderSessionId.make("session:wrong");
@@ -373,7 +373,7 @@ it.effect.each(storageCases)(
         yield* control.interrupt({ threadId, providerThreadId, providerTurnId, providerSessionId });
         assert.deepEqual(calls, [
           "interrupt",
-          "[01-01 00:00 UTC +2m]\nUse the smaller fix.",
+          "[01-01 00:00 UTC Δ2m]\nUse the smaller fix.",
           "reply",
           "interrupt",
         ]);

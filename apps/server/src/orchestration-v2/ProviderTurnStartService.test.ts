@@ -1360,13 +1360,13 @@ effectIt.effect.each([
     label: "since the previous run finished",
     text: "Continue",
     previousUserMessageAt: "2026-09-04T11:50:00Z",
-    sent: "[09-04 05:02 PDT +2m]\nContinue",
+    sent: "[09-04 05:02 PDT Δ2m]\nContinue",
   },
   {
     label: "since a later user message",
     text: "Continue",
     previousUserMessageAt: "2026-09-04T12:01:00Z",
-    sent: "[09-04 05:02 PDT +1m]\nContinue",
+    sent: "[09-04 05:02 PDT Δ1m]\nContinue",
   },
 ])("tells the provider when the user sent the message $label", (row) =>
   Effect.gen(function* () {
