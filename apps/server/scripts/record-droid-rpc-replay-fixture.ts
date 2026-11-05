@@ -3,6 +3,7 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { ProviderReplayEntry, ProviderReplayTranscript } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
 import * as Console from "effect/Console";
 import * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
@@ -81,6 +82,10 @@ const RECORDER_NAME = "live-droid-recorder";
 const DROID_BINARY = "droid";
 const CLOCK_TICK = Duration.millis(20);
 const PREVIOUS_EXIT_TIMEOUT = Duration.seconds(20);
+const FactoryApiKey = Config.String("FACTORY_API_KEY").pipe(
+  Config.option,
+  Config.map(Option.getOrUndefined),
+);
 /** Droid reads these files for the user's own settings; a recording must leave them untouched. */
 const SETTINGS_FILES = ["settings.json", "settings.local.json"] as const;
 /** Very short host names would match inside ordinary words. */
@@ -390,7 +395,7 @@ const recordTranscript = Effect.fn("record-droid-rpc-replay-fixture.recordTransc
       machineIds,
       tempDirs: [paths.root, paths.workspace],
       instructionTexts: yield* readGlobalInstructionTexts(home),
-      apiKey: process.env.FACTORY_API_KEY,
+      apiKey: yield* FactoryApiKey,
     });
     const leaks = findTranscriptLeaks(transcript.entries, checks);
     if (leaks.length > 0) {

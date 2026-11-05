@@ -1,7 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
-import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -54,7 +53,9 @@ const asString = (value: unknown): string =>
 const asNumber = (value: unknown): number =>
   Predicate.isNumber(value) ? value : assert.fail(`expected a number, got ${typeof value}`);
 
-class HandlerFailure extends Data.TaggedError("HandlerFailure")<{ readonly message: string }> {}
+class HandlerFailure extends Schema.TaggedError<HandlerFailure>()("HandlerFailure", {
+  message: Schema.String,
+}) {}
 
 /** Outside the valid PID range, so cleanup of a fake process can never signal a real one. */
 const FAKE_PID = 999_999_999;
