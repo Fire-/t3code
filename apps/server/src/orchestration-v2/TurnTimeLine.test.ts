@@ -39,7 +39,25 @@ it.effect.each([
     previousTimes: unread,
     sent: "hello",
   },
-  { label: "never without a zone", timeZone: null, previousTimes: unread, sent: "hello" },
+  {
+    label: "in the zone the message was sent from",
+    message: { timeZone: "Asia/Tokyo" },
+    previousTimes: Effect.succeed([]),
+    sent: "[09-04 21:02 GMT+9]\nhello",
+  },
+  {
+    label: "in the machine zone when the message zone is not a zone",
+    message: { timeZone: "Mars/Olympus" },
+    previousTimes: Effect.succeed([]),
+    sent: "[09-04 05:02 PDT]\nhello",
+  },
+  {
+    label: "never without a machine zone, even with a message zone",
+    timeZone: null,
+    message: { timeZone: "Asia/Tokyo" },
+    previousTimes: unread,
+    sent: "hello",
+  },
 ])("stamps the provider text $label", (row) =>
   Effect.gen(function* () {
     const sent = yield* TurnTimeLine.stampProviderText({

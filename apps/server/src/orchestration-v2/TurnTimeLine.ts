@@ -43,7 +43,7 @@ export const layerMachineTimeZone = Layer.effect(
 
 type StampedMessage = Pick<
   OrchestrationV2ConversationMessage,
-  "text" | "createdBy" | "scheduledTaskId" | "createdAt"
+  "text" | "createdBy" | "scheduledTaskId" | "createdAt" | "timeZone"
 >;
 
 const stampsMessage = (message: StampedMessage) =>
@@ -51,7 +51,7 @@ const stampsMessage = (message: StampedMessage) =>
   message.scheduledTaskId === undefined &&
   !message.text.trimStart().startsWith("/");
 
-/** Prefixes when a person sent the message and how long after the latest earlier time. */
+/** Prefixes when a person sent the message, in their device's zone, and how long after the latest earlier time. */
 export const stampProviderText = Effect.fn("TurnTimeLine.stampProviderText")(function* <E>(input: {
   readonly timeZone: Effect.Effect<string> | undefined;
   readonly message: StampedMessage;
@@ -68,7 +68,7 @@ export const stampProviderText = Effect.fn("TurnTimeLine.stampProviderText")(fun
   const line = formatTurnTimeLine({
     sentAt,
     previousAt: earlier.length === 0 ? undefined : Math.max(...earlier),
-    timeZone: yield* input.timeZone,
+    timeZone: validTimeZone(input.message.timeZone) ?? (yield* input.timeZone),
   });
   return prefixTurnTimeLine(input.text, line);
 });
