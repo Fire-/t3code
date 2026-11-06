@@ -130,7 +130,11 @@ const create = (config: Partial<DroidSettings> = {}, enabled = true) =>
     instanceId: ProviderInstanceId.make("droid-test"),
     displayName: "My Droid",
     accentColor: "#abcdef",
-    environment: [{ name: "T3_DROID_TEST", value: "instance-value", sensitive: false }],
+    environment: [
+      { name: "T3_DROID_TEST", value: "instance-value", sensitive: false },
+      // Shadows a host FACTORY_API_KEY, which would send the usage probe to the HTTP stub.
+      { name: "FACTORY_API_KEY", value: "", sensitive: false },
+    ],
     enabled,
     config: { ...DroidDriver.defaultConfig(), binaryPath: "custom-droid", ...config },
   });
