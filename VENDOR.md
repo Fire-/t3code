@@ -10,12 +10,12 @@ upstream `main` while carrying our own infra config.
 
 ```
 origin/main               ← upstream (never commit here)
-├── overlay/dev-infra     ← .mise.toml, VENDOR.md, UPGRADING.md
-└── main                  ← local integration branch (merge commits ONLY)
+├── overlay/*             ← one topic each; overlay/dev-infra holds .mise.toml, VENDOR.md, UPGRADING.md
+└── local                 ← integration branch: origin/main + every overlay (merge commits ONLY)
 ```
 
-**Rule #1: Never commit directly to `main`.** It must remain merge-commits-only.
-All real work lives on `overlay/*` branches; `main` is rebuilt from them, which
+**Rule #1: Never commit directly to `local`.** It must remain merge-commits-only.
+All real work lives on `overlay/*` branches; `local` is rebuilt from them, which
 is what makes `git reset --hard origin/main` safe _inside the mise tasks_.
 
 **Rule #2: One concern per overlay.** Don't mix unrelated changes.
@@ -83,9 +83,8 @@ which races the git operations. Don't convert these to `depends`.
 `git reset --hard` is only permitted inside `mise run rebuild-local` — it is
 safe there because `local` is rebuilt from scratch and overlays carry all
 unique work. Never run it manually. `rebuild-local` deliberately ends on
-`local`: after a rebuild you are always where integration commits belong,
-and direct `main` commits become structurally impossible to stumble into.
-Topic commits go on their `overlay/*` branch, never on `local`.
+`local`, where merge commits belong. Topic commits go on their `overlay/*`
+branch, never on `local`.
 
 After each deploy, push to the `fork` remote (`fire-/t3code`): `overlay/*`
 branches normally (they only fast-forward), and `local` with
@@ -116,7 +115,7 @@ what actually serves.
 
 - `bin/t3` is a generated script (by `scripts/generate-runtime.sh`) that
   exports `T3CODE_HOME=~/.t3/code` and execs the first tier containing a
-  `bin.mjs`. It uses a baked absolute node 24 path (the server needs
+  `bin.mjs`. It uses a baked absolute path to the mise-pinned node (the server needs
   `node:sqlite`); re-run `mise run generate-runtime` after toolchain changes.
 - Each tier's `node_modules/` holds the packages the bundle keeps external:
   the same server dependencies upstream's release archive installs
@@ -195,7 +194,7 @@ default), `~/.t3/code` (this runtime), `<repo>/dev` (vendor dev runs).
 
 ```bash
 mise trust          # once, mise prompts on untrusted configs
-mise install        # node 24 + pnpm 11.10.0 from .mise.toml
+mise install        # node 26.12.1 + pnpm 12.14.0 from .mise.toml
 pnpm install        # deps + upstream's patchedDependencies in patches/
 mise run build
 ```
@@ -261,12 +260,12 @@ this worktree.
 
 These destroy work or violate the overlay model:
 
-- `git commit` on `main` — merge-commits-only
+- `git commit` on `local` — merge-commits-only
 - `git add -A` / `git add .` — stages files from other overlays or agents
 - `git checkout .` / `git clean -fd` — destroys uncommitted changes
 - `git stash` without checking what's stashed — may capture other agents' work
 - `git commit --no-verify` — bypasses required checks; never allowed
-- `git pull` on `main` — use `mise run upgrade` instead; a plain pull stacks
+- `git pull` on `local` — use `mise run upgrade` instead; a plain pull stacks
   local merge commits awkwardly on top of upstream
 
 ### Safe Workflow
@@ -276,7 +275,7 @@ These destroy work or violate the overlay model:
 git status
 
 # 2. Make sure you're on the right overlay branch
-git branch --show-current   # should be overlay/*, NOT main
+git branch --show-current   # should be overlay/*, NOT local
 
 # 3. Add ONLY files you changed
 git add .mise.toml
@@ -288,7 +287,7 @@ git commit -m "chore(infra): description"
 mise run update
 ```
 
-### If You Accidentally Edit on `main`
+### If You Accidentally Edit on `local`
 
 ```bash
 git stash                       # note what you stashed
