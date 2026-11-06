@@ -1353,16 +1353,48 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
       });
 
       /**
-       * Stops the pending wake, if there is one, and returns once the session has published that
-       * it stopped. The next turn opens a new session on a new process.
+       * Stops the pending wake, if it is still this one, and returns once the session has
+       * published that it stopped. The next turn opens a new session on a new process.
        */
-      const stopPendingWake = Effect.fnUntraced(function* (only?: DroidWake) {
+      const stopPendingWake = Effect.fnUntraced(function* (wake: DroidWake) {
+        const killed = yield* permit.withPermits(1)(killWake(wake));
+        if (killed) yield* Deferred.await(eventsEnded);
+      });
+
+      /**
+       * Stops the background Task subagents a Stop must stop: Droid offers no way to end a Task
+       * it has launched, so only the death of its process does. A turn still open is settled
+       * first so the process end cannot report it as a crash; otherwise that end retires the
+       * tasks. Runs under the event permit, like every kill here. Returns whether it killed.
+       */
+      const stopBackgroundTasks = Effect.fnUntraced(function* (state: DroidThreadState) {
+        if (ended || closing || backgroundSubagentsOf(state).length === 0) return false;
+        const turn = state.activeTurn;
+        stopRequested = true;
+        // Nothing more is sent to a process on its way out, and a turn still open must read as
+        // stopped by the stop rather than as a crash when the exit arrives.
+        ended = true;
+        // The kill is a process exit: a wake held for the process goes with it.
+        pendingWake = null;
+        if (turn !== null) {
+          yield* finishTurn(state, turn, { kind: "interrupted", disposition: "reusable" });
+        }
+        yield* Effect.uninterruptible(rpc.kill);
+        return true;
+      });
+
+      /**
+       * A Stop with no turn to interrupt stops what runs on its own: a wake nobody will take,
+       * and the background tasks that outlive their turns, each with its process. Returns once
+       * the session has published how it stopped; the next turn opens a new process.
+       */
+      const stopUnownedWork = Effect.fnUntraced(function* () {
         const killed = yield* permit.withPermits(1)(
           Effect.suspend(() => {
             const wake = pendingWake;
-            return wake === null || (only !== undefined && wake !== only)
-              ? Effect.succeed(false)
-              : killWake(wake);
+            if (wake !== null) return killWake(wake);
+            const state = threadState;
+            return state === null ? Effect.succeed(false) : stopBackgroundTasks(state);
           }),
         );
         if (killed) yield* Deferred.await(eventsEnded);
@@ -2302,9 +2334,10 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         const turn = state?.activeTurn ?? null;
         // Every user Stop asks for a runtime restart, and may arrive after the turn it names has
         // settled. If Droid is meanwhile running a wake nobody owns, the Stop is meant for that
-        // too: the process dies with it, as Pi's does. Otherwise it has nothing left to stop.
+        // too: the process dies with it, as Pi's does, and so do the background tasks that
+        // outlive their turns. Otherwise it has nothing left to stop.
         if (turn === null && interruptInput.requestRuntimeRestart === true) {
-          return yield* stopPendingWake();
+          return yield* stopUnownedWork();
         }
         if (
           state === null ||
@@ -2327,19 +2360,31 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         yield* request("droid.interrupt_session", {}).pipe(
           Effect.tapError(() => markInterruptRequested(false)),
         );
-        yield* permit.withPermits(1)(
+        // A Stop stops the background tasks too, and only the death of the process running them
+        // does that. The turn is settled under the same permit first, so the exit the kill brings
+        // cannot report it as a crash; a turn Droid ended itself leaves the retiring to the
+        // process end.
+        const stopped = yield* permit.withPermits(1)(
           Effect.gen(function* () {
-            if (state.activeTurn !== turn) return;
-            // A stopped turn takes no answers, and Droid hears one for each request it sent.
-            yield* cancelOpenRequests(true);
-            // With no native turn running, only a queued steer holds the t3 turn open, and
-            // Droid sends no completion for a turn it never started.
-            if (turn.nativeSettled && turn.awaitingNative.size === 0) {
-              yield* finishTurn(state, turn, { kind: "interrupted", disposition: "reusable" });
-              yield* updateProviderSession("ready", null);
+            if (state.activeTurn === turn) {
+              // A stopped turn takes no answers, and Droid hears one for each request it sent.
+              yield* cancelOpenRequests(true);
+              // With no native turn running, only a queued steer holds the t3 turn open, and
+              // Droid sends no completion for a turn it never started.
+              if (turn.nativeSettled && turn.awaitingNative.size === 0) {
+                yield* finishTurn(state, turn, { kind: "interrupted", disposition: "reusable" });
+                yield* updateProviderSession("ready", null);
+              }
             }
+            // A turn that took over in the meantime is not this Stop's to stop.
+            return interruptInput.requestRuntimeRestart === true &&
+              (state.activeTurn === turn || state.activeTurn === null)
+              ? yield* stopBackgroundTasks(state)
+              : false;
           }),
         );
+        // The next turn opens a new session once this one has published that it stopped.
+        if (stopped) yield* Deferred.await(eventsEnded);
       });
 
       const steerTurn = Effect.fnUntraced(function* (

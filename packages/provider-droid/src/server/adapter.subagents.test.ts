@@ -659,6 +659,38 @@ describe("Pending background tasks are set on start and cleared on completion, f
   );
 
   it.effect(
+    "[VAL-SUB-008] a Stop while no turn runs kills the process so a pending background Task ends interrupted",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        yield* fake.deliverGroupSignals;
+        const begun = yield* beginTurn(fake, { runtimeMode: "auto" });
+        yield* launchTask(begun.process, { await: false });
+        yield* begun.process.emit(taskResult(LAUNCH_ACKNOWLEDGEMENT));
+        yield* begun.process.emit(completed(1));
+        yield* begun.opened.takeEvent(isTerminal);
+
+        yield* begun.opened.runtime.interruptTurn({
+          providerThread: begun.providerThread,
+          providerTurnId: begun.providerTurn.id,
+          requestRuntimeRestart: true,
+        });
+        assert.deepStrictEqual(begun.process.signals(), ["SIGTERM"], "the stop killed the process");
+        yield* Deferred.await(begun.opened.streamEnded);
+
+        assert.deepStrictEqual(rosters(begun.opened.all).at(-1), []);
+        assert.strictEqual(subagentUpdates(begun.opened.all).at(-1)?.status, "interrupted");
+        assert.strictEqual(sessionStatuses(begun.opened.all).at(-1), "stopped");
+        assert.strictEqual(terminals(begun.opened.all).length, 1, "no turn was open to end");
+        assert.deepStrictEqual(yield* probes(begun), {
+          session: false,
+          thread: false,
+          otherThread: false,
+        });
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
     "[VAL-SUB-008] process exit: closing the session clears the entry and ends the subagent interrupted",
     () =>
       Effect.gen(function* () {
@@ -778,6 +810,47 @@ describe("Pending background tasks are set on start and cleared on completion, f
           ],
           [false, false],
         );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-SUB-008] a Stop while the turn still runs kills the process, ends the turn and the background Task interrupted, and stops the session",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid();
+        yield* fake.deliverGroupSignals;
+        const begun = yield* beginTurn(fake, { runtimeMode: "auto" });
+        yield* launchTask(begun.process, { await: false });
+        yield* begun.process.emit(taskResult(LAUNCH_ACKNOWLEDGEMENT));
+        yield* begun.opened.takeEvent(isSubagentWith("running"));
+
+        yield* begun.opened.runtime.interruptTurn({
+          providerThread: begun.providerThread,
+          providerTurnId: begun.providerTurn.id,
+          requestRuntimeRestart: true,
+        });
+        assert.deepStrictEqual(begun.process.signals(), ["SIGTERM"], "the stop killed the process");
+        yield* Deferred.await(begun.opened.streamEnded);
+
+        assert.deepStrictEqual(
+          terminals(begun.opened.all).map((terminal) => terminal.status),
+          ["interrupted"],
+        );
+        assert.strictEqual(subagentUpdates(begun.opened.all).at(-1)?.status, "interrupted");
+        assert.isBelow(
+          indexOfEvent(begun.opened.all, isSubagentWith("interrupted")),
+          indexOfEvent(begun.opened.all, isTerminal),
+          "the subagent ends before the turn's terminal",
+        );
+        assert.isBelow(clearedAt(begun.opened.all), indexOfEvent(begun.opened.all, isTerminal));
+        assert.deepStrictEqual(rosters(begun.opened.all).at(-1), []);
+        assert.strictEqual(sessionStatuses(begun.opened.all).at(-1), "stopped");
+        assert.deepStrictEqual(openItems(begun.opened.all), [], "nothing stays running");
+        assert.deepStrictEqual(yield* probes(begun), {
+          session: false,
+          thread: false,
+          otherThread: false,
+        });
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
