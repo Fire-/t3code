@@ -24,6 +24,7 @@ import {
   withDroidAuthFailure,
 } from "./status.ts";
 import { makeDroidTextGeneration } from "./textGeneration.ts";
+import { readDroidUsageLimits } from "./usageLimits.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   defaultProviderContinuationIdentity,
@@ -155,6 +156,14 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
           Ref.get(authFailed).pipe(
             Effect.map((failed) => (failed ? withDroidAuthFailure(draft) : draft)),
           ),
+        ),
+        Effect.filterOrElse(
+          (draft) => !(draft.enabled && draft.installed),
+          (draft) =>
+            readDroidUsageLimits(processEnv).pipe(
+              Effect.provideService(HttpClient.HttpClient, httpClient),
+              Effect.map((usageLimits) => ({ ...draft, usageLimits })),
+            ),
         ),
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
