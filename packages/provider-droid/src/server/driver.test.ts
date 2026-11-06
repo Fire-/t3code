@@ -432,6 +432,7 @@ it.layer(layerTest)("DroidDriver", (it) => {
           "generateBranchName",
           "generateThreadTitle",
           "generateReviewGuide",
+          "generateTranscriptionPostProcessing",
         ]);
         yield* instance.textGeneration.generateThreadTitle({
           cwd: "/machine/project",

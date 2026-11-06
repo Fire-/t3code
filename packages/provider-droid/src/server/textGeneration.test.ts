@@ -378,6 +378,7 @@ it.layer(NodeServices.layer)("DroidTextGeneration", (it) => {
           "generateBranchName",
           "generateThreadTitle",
           "generateReviewGuide",
+          "generateTranscriptionPostProcessing",
         ]);
         const spawnsBefore = (yield* mock.readLog).length;
         const error = yield* Effect.flip(
