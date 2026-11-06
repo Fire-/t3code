@@ -94,12 +94,15 @@ Sessions you started in Droid's terminal app can be imported with their projects
 wizard's **Import your projects** step, and continue in T3 Code.
 
 Rolling back a thread and forking it, from the latest turn or an earlier one, use Droid's own
-session, so Droid remembers the conversation up to that turn. Send `/compact` or use the context
-meter to compact a conversation. Droid cannot stop a compaction partway, so **Stop** during one
+session, so Droid remembers the conversation up to that turn. The context meter shows how full the
+model's context window is and marks where Droid compacts on its own. Send `/compact` or use the
+context meter to compact sooner. Droid cannot stop a compaction partway, so **Stop** during one
 restarts Droid and keeps the conversation as it was.
 
-Droid's Task subagents appear in the thread with their progress and results. You cannot open them as
-threads. A background subagent ends if Droid stops, such as when T3 Code restarts. When one finishes
+Droid's Task subagents appear in the thread with their progress and results, and each opens as a
+read-only thread. Droid does not stream a subagent's work, so its thread fills with the messages and
+tool calls when the subagent ends. A background subagent ends if Droid stops, such as when T3 Code
+restarts. When one finishes
 while the thread is idle, Droid's follow-up appears as a new turn. Droid's questions appear in the
 composer like those of other providers.
 
@@ -108,12 +111,12 @@ do not appear in T3 Code's slash or `$` menus.
 
 ## Limits
 
-- Droid missions and Droid usage limits are not supported. **Usage** does not include Droid. Check
-  your Factory usage in the Factory app or with `/limits` in Droid.
+- Droid missions are not supported.
+- **Usage** shows Factory's 5-hour, weekly, and monthly limits only when Droid's environment has
+  `FACTORY_API_KEY`. Without a key, check your Factory usage in the Factory app or with `/limits` in
+  Droid.
 - T3 Code starts Droid with hooks turned off, so hooks from your Droid settings do not run in T3
   Code threads.
-- The context meter shows tokens used without a percentage, because Droid does not report a context
-  size.
 
 ## Troubleshooting
 
