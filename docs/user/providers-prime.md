@@ -50,8 +50,8 @@ Prime loads its normal user and project extensions. Blocking `select`, `confirm`
 The agent can create schedules and heartbeats. While T3 Code keeps the thread's Prime session open,
 each one that fires continues the thread as a new turn, and an active schedule keeps an idle session
 open for up to four hours. Prime ends a session's schedules when the session stops. They therefore
-end when T3 Code restarts, when it releases an idle session, and when you change the permission
-mode. Resuming the thread does not bring them back, so ask Prime to create them again.
+end when T3 Code restarts and when it releases an idle session. Resuming the thread does not bring
+them back, so ask Prime to create them again.
 
 Threads use Prime's native session files for resume, rollback, and forks within the same Prime
 instance. Switching providers uses portable conversation context. Turns that start with your
@@ -81,7 +81,7 @@ is treated as a command. Its approval prompt shows the code Prime wants to run.
 
 The **Auto** option is not shown for Prime. Threads that already stored Auto behave as Supervised.
 
-Changing the mode restarts the Prime provider session and resumes the same native conversation. The
+A mode change reaches a running Prime session right away, even mid-turn, without restarting it. The
 policy covers Prime tool calls. It is not an operating-system sandbox, and it does not cover code
 that a Prime extension runs outside a tool call.
 
