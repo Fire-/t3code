@@ -75,6 +75,7 @@ export interface ThreadLaunchInitialMessage {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
+  readonly timeZone?: string;
 }
 
 export interface ThreadLaunchInput {
@@ -993,6 +994,9 @@ const make = Effect.gen(function* () {
                 : { senderThreadId: input.initialMessage.senderThreadId }),
               attachments: input.initialMessage.attachments,
               ...(input.initialMessage.context ? { context: input.initialMessage.context } : {}),
+              ...(input.initialMessage.timeZone === undefined
+                ? {}
+                : { timeZone: input.initialMessage.timeZone }),
               ...(input.generateTitle === true ? { titleSeed: input.title } : {}),
               modelSelection: input.modelSelection,
               dispatchMode: { type: "defer_start", workspaceStrategy },

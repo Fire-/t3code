@@ -542,6 +542,10 @@
     "./speech": {
       "types": "./src/speech.ts",
       "import": "./src/speech.ts"
+    },
+    "./turnTimeLine": {
+      "types": "./src/turnTimeLine.ts",
+      "import": "./src/turnTimeLine.ts"
     }
   },
   "scripts": {
