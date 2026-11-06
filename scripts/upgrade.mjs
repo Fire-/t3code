@@ -330,6 +330,11 @@ function ensureWorktree() {
 function checkoutForCheck(state, ref) {
   ensureWorktree();
   gitOk(WORKTREE, "checkout", "-q", "--detach", ref);
+  const failure = installWorktree(state);
+  if (failure) die(failure);
+}
+
+function installWorktree(state) {
   const marker = NodePath.join(WORKTREE, "node_modules/.upgrade-lock-sha");
   const lockSha = sha256(NodePath.join(WORKTREE, "pnpm-lock.yaml"));
   if (NodeFS.existsSync(marker) && NodeFS.readFileSync(marker, "utf8").trim() === lockSha) return;
@@ -341,7 +346,7 @@ function checkoutForCheck(state, ref) {
     ["install", "--frozen-lockfile"],
     worktreeEnv(),
   );
-  if (r.code !== 0) die(`pnpm install failed in ${WORKTREE}; see ${r.log}\n${tail(r.log, 30)}`);
+  if (r.code !== 0) return `pnpm install failed in ${WORKTREE}; see ${r.log}\n${tail(r.log, 30)}`;
   NodeFS.writeFileSync(marker, `${lockSha}\n`);
 }
 
@@ -685,9 +690,15 @@ function fix([b]) {
   const state = requireRun("running");
   if (!state.overlays[b]) die(`Unknown overlay '${b}'.`);
   if (!isAncestor("origin/main", b)) die(`${b} does not contain origin/main yet; use resolve.`);
-  checkoutForCheck(state, b);
+  ensureWorktree();
   borrow(state, b);
   gitOk(WORKTREE, "switch", "-q", b);
+  // The overlay's own lockfile may be what broke, so a failed install still hands over the branch.
+  const installFailure = installWorktree(state);
+  if (installFailure)
+    console.log(
+      `WARNING: ${installFailure}\nIf the lockfile is the problem, regenerate it first, then run pnpm install --frozen-lockfile in ${WORKTREE} before committing (the commit hook needs it).\n`,
+    );
   console.log(
     `${b} is checked out in ${WORKTREE}.\nCommit the fix there, then: fixed ${b} --note "<what broke and how you fixed it>"`,
   );
