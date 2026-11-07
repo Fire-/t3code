@@ -45,6 +45,7 @@ import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { completeOnboarding } from "../../onboarding/firstRun";
 import {
   groupOnboardingProjects,
+  isOutsideImportWindow,
   partitionOnboardingProjects,
   onboardingProjectKey,
   resolveOnboardingLandingProject,
@@ -1449,6 +1450,9 @@ function ImportStep({
       title="Import your projects"
       description="Import projects and conversations from Claude Code, Codex, and Droid on your selected computers."
     >
+      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+        Only conversations from the last 30 days are imported.
+      </p>
       {candidates.length > 0 ? (
         <div className="mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
           <span role="status">
@@ -1574,7 +1578,7 @@ function ImportCandidateList({
   const otherSelected = other.filter((candidate) => selectedKeys.has(candidate.key)).length;
 
   return (
-    <>
+    <div className="@container/import-list space-y-0.5">
       {repositories.map((group) => (
         <ImportRepositoryGroup
           key={group.key}
@@ -1618,7 +1622,7 @@ function ImportCandidateList({
           </CollapsiblePanel>
         </Collapsible>
       ) : null}
-    </>
+    </div>
   );
 }
 
@@ -1648,16 +1652,19 @@ function ImportRepositoryGroup({
   }
   return (
     <Collapsible defaultOpen>
-      <div className="flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40">
+      <div className="flex items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40 @lg/import-list:items-center">
         <Checkbox
           checked={selectedCount === keys.length}
           indeterminate={selectedCount > 0 && selectedCount < keys.length}
           onCheckedChange={(checked) => onToggle(keys, checked === true)}
         />
-        <CollapsibleTrigger className="group flex min-w-0 flex-1 items-center gap-1.5 text-left">
+        <CollapsibleTrigger className="group grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-1.5 gap-y-0.5 text-left @lg/import-list:flex">
           <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-panel-open:rotate-90" />
-          <span className="truncate text-sm font-medium">{group.label}</span>
+          <span className="min-w-0 text-sm font-medium wrap-break-word @lg/import-list:truncate">
+            {group.label}
+          </span>
           <ImportRowMeta
+            className="col-start-2"
             sources={[...new Set(group.candidates.flatMap((c) => c.sources))]}
             threadCount={group.threadCount}
             lastActiveAt={group.lastActiveAt}
@@ -1689,9 +1696,16 @@ function ProjectPathText({
 }) {
   const { name, parent } = splitOnboardingProjectPath(path);
   return (
-    <span className={cn("flex min-w-0 items-baseline font-mono", className)}>
-      {parent.length > 0 ? <span className="truncate">{parent}</span> : null}
-      <span className="max-w-full shrink-0 truncate">{name}</span>
+    <span
+      className={cn(
+        "min-w-0 font-mono wrap-anywhere @lg/import-list:flex @lg/import-list:items-baseline",
+        className,
+      )}
+    >
+      {parent.length > 0 ? <span className="@lg/import-list:truncate">{parent}</span> : null}
+      <span className="@lg/import-list:max-w-full @lg/import-list:shrink-0 @lg/import-list:truncate">
+        {name}
+      </span>
     </span>
   );
 }
@@ -1714,17 +1728,21 @@ function ImportCandidateRow({
   return (
     <label
       className={cn(
-        "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40 has-disabled:cursor-default",
+        "grid cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2.5 gap-y-0.5 rounded-md px-2 py-1.5 hover:bg-muted/40 has-disabled:cursor-default @lg/import-list:flex @lg/import-list:items-center",
         nested && "pl-8",
       )}
     >
       <Checkbox checked={checked} onCheckedChange={(value) => onCheckedChange(value === true)} />
       <Tooltip>
         <TooltipTrigger
-          render={<span className="flex min-w-0 flex-1 items-baseline gap-2 truncate" />}
+          render={
+            <span className="flex min-w-0 flex-1 flex-col @lg/import-list:flex-row @lg/import-list:items-baseline @lg/import-list:gap-2 @lg/import-list:truncate" />
+          }
         >
           {label !== undefined ? (
-            <span className="truncate text-sm font-medium">{label}</span>
+            <span className="text-sm font-medium wrap-break-word @lg/import-list:truncate">
+              {label}
+            </span>
           ) : null}
           {path !== undefined ? (
             <ProjectPathText
@@ -1735,7 +1753,13 @@ function ImportCandidateRow({
         </TooltipTrigger>
         <TooltipPopup variant="code">{candidate.path}</TooltipPopup>
       </Tooltip>
+      {isOutsideImportWindow(candidate.lastActiveAt) ? (
+        <span className="col-start-2 shrink-0 text-2xs text-muted-foreground">
+          No recent conversations
+        </span>
+      ) : null}
       <ImportRowMeta
+        className="col-start-2"
         sources={nested ? null : candidate.sources}
         threadCount={candidate.threadCount}
         lastActiveAt={candidate.lastActiveAt}
@@ -1755,15 +1779,22 @@ function ImportRowMeta({
   sources,
   threadCount,
   lastActiveAt,
+  className,
 }: {
   readonly sources: ReadonlyArray<AgentSessionSource> | null;
   readonly threadCount: number;
   readonly lastActiveAt: string | null;
+  readonly className?: string;
 }) {
   const relative = lastActiveAt === null ? null : formatRelativeTime(lastActiveAt);
   const age = relative === null ? "" : relative.suffix === null ? "now" : relative.value;
   return (
-    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
+    <span
+      className={cn(
+        "ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums",
+        className,
+      )}
+    >
       {AgentSessionSource.literals.map((source) => (
         <span key={source} className="flex size-4 items-center justify-center">
           {sources?.includes(source) ? (
