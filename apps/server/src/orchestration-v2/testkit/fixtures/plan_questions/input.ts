@@ -11,6 +11,7 @@ export function planQuestionsInput(): OrchestratorFixtureInput {
           schema_vs_ui_flexibility: "Strict schemas (Recommended)",
           schema_preference: "Strict schemas (Recommended)",
           "question-0-schema-vs-flexibility": "Strict schemas",
+          "question-1": "Strict schemas",
         },
       },
     ],
