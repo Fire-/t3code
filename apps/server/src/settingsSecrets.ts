@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
 import { cursorClient } from "@t3tools/provider-cursor/client";
+import { droidClient } from "@t3tools/provider-droid/client";
 import { grokClient } from "@t3tools/provider-grok/client";
 import { kiroClient } from "@t3tools/provider-kiro/client";
 import { museClient } from "@t3tools/provider-muse/client";
@@ -39,6 +40,7 @@ const providerSecretFields = new Map([
     museClient,
     openCodeClient,
     piClient,
+    droidClient,
     acpRegistryClient,
   ].map(
     (definition) =>
