@@ -987,6 +987,7 @@ function ThreadRouteContent(
           isCompacting={composer.isCompacting}
           runlessWorkActive={composer.runlessWorkActive}
           extensionStatuses={composer.extensionStatuses}
+          userWaits={composer.userWaits}
           providerSubagentStatus={composer.providerSubagentStatus}
           creationState={creationState}
           setupWorkingStartedAt={
