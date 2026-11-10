@@ -7,28 +7,31 @@ it("reissues imported context until a V2 run completes", () => {
     shouldPrepareLegacyImportHandoff({
       historyOrigin: "v1_import",
       hasCompletedRun: false,
-      legacyImportItemCount: 2,
+      resumesNativeThread: false,
     }),
   );
   assert.isFalse(
     shouldPrepareLegacyImportHandoff({
       historyOrigin: "v1_import",
       hasCompletedRun: true,
-      legacyImportItemCount: 2,
+      resumesNativeThread: false,
     }),
   );
   assert.isFalse(
     shouldPrepareLegacyImportHandoff({
       historyOrigin: undefined,
       hasCompletedRun: false,
-      legacyImportItemCount: 2,
+      resumesNativeThread: false,
     }),
   );
+});
+
+it("sends no imported context to an agent session that resumes its own history", () => {
   assert.isFalse(
     shouldPrepareLegacyImportHandoff({
       historyOrigin: "v1_import",
       hasCompletedRun: false,
-      legacyImportItemCount: 0,
+      resumesNativeThread: true,
     }),
   );
 });
