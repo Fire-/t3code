@@ -9,7 +9,10 @@ import {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
+  OrchestrationV2Command,
+  OrchestrationV2ConversationMessageJson,
   OrchestrationV2Subagent,
+  OrchestrationV2ThreadLaunchInput,
   OrchestrationV2ThreadShellJson,
   OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
@@ -444,6 +447,63 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+  });
+
+  it("keeps the zone a message was sent from, and reads messages from before zones", () => {
+    const decodeMessage = Schema.decodeUnknownSync(OrchestrationV2ConversationMessageJson);
+    const encodeMessage = Schema.encodeSync(OrchestrationV2ConversationMessageJson);
+    const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+    const decodeLaunch = Schema.decodeUnknownSync(OrchestrationV2ThreadLaunchInput);
+    const stored = {
+      createdBy: "user",
+      creationSource: "web",
+      id: "message-1",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      role: "user",
+      text: "hello",
+      attachments: [],
+      streaming: false,
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+    };
+    const send = {
+      type: "message.dispatch",
+      commandId: "command-1",
+      threadId: "thread-1",
+      messageId: "message-1",
+      text: "hello",
+      attachments: [],
+      createdBy: "user",
+      creationSource: "web",
+      dispatchMode: { type: "start_immediately" },
+    };
+    const launch = {
+      commandId: "command-1",
+      projectId: "project-1",
+      title: "Thread",
+      modelSelection: { instanceId: "codex", model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      workspaceStrategy: { type: "root" },
+      initialMessage: { text: "hello", attachments: [] },
+    };
+
+    expect(decodeMessage(stored)).not.toHaveProperty("timeZone");
+    expect(decodeCommand(send)).not.toHaveProperty("timeZone");
+    expect(decodeLaunch(launch).initialMessage).not.toHaveProperty("timeZone");
+    const zoned = { ...stored, timeZone: "Asia/Tokyo" };
+    expect(encodeMessage(decodeMessage(zoned))).toEqual(zoned);
+    expect(decodeCommand({ ...send, timeZone: "Asia/Tokyo" })).toMatchObject({
+      timeZone: "Asia/Tokyo",
+    });
+    expect(
+      decodeLaunch({
+        ...launch,
+        initialMessage: { ...launch.initialMessage, timeZone: "Asia/Tokyo" },
+      }).initialMessage,
+    ).toMatchObject({ timeZone: "Asia/Tokyo" });
   });
 });
 
