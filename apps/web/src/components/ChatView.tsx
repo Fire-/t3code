@@ -92,6 +92,7 @@ import {
   getUserQueuedThreadRuns,
   threadSteersDuringCompaction,
   threadSupportsProviderHandoff,
+  threadSwitchesRuntimeModeLive,
 } from "@t3tools/client-runtime/state/thread-workflows";
 import { compactionBlocksSteering } from "@t3tools/client-runtime/state/composer-dispatch";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
@@ -2846,6 +2847,14 @@ export default function ChatView(props: ChatViewProps) {
     setPendingServerThreadEnvModeEntry,
     setPendingServerThreadStartFromOriginByThreadId,
     scheduleComposerFocus,
+    applyRuntimeModeLive:
+      serverThread && threadSwitchesRuntimeModeLive(serverProjection)
+        ? (mode) =>
+            void setThreadRuntimeMode({
+              environmentId,
+              input: { threadId: serverThread.id, runtimeMode: mode },
+            })
+        : null,
   });
   const { onResume, isResuming } = useComposerResume({
     environmentId,
