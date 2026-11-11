@@ -3509,6 +3509,33 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           (row) => row.item.deferredWork?.itemCount === 151,
         ),
       );
+      // A window read mid-run names a row that completion folds into the work group, with a
+      // position counted from the window's own start.
+      yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'running',
+        payload_json = json_set(payload_json, '$.status', 'running') WHERE run_id = ${sharedRunId}`;
+      const activeWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+        rowLimit: sqlPageLimit,
+        userTurnLimit: 10,
+        deferWork: true,
+      });
+      yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'completed',
+        payload_json = json_set(payload_json, '$.status', 'completed') WHERE run_id = ${sharedRunId}`;
+      const staleCursor = buildBoundedThreadProjection({
+        projection: activeWindow.projection,
+        snapshotSequence: activeWindow.snapshotSequence,
+      }).historyCursor!;
+      const staleOrdinal = Number(decodeThreadHistoryCursor(staleCursor).si.split(":").at(-1));
+      const resumed = yield* projectionStore.getThreadHistoryPage(
+        threadId,
+        staleCursor,
+        undefined,
+        false,
+        "deferred",
+      );
+      assert.strictEqual(
+        resumed.items.at(-1)?.sourceItemId,
+        TurnItemId.make(`turn-item:bounded-sql-history:${staleOrdinal - 1}`),
+      );
       yield* sql`UPDATE orchestration_v2_projection_turn_items
         SET run_id = 'run:bounded-sql-history:1',
           payload_json = json_set(payload_json, '$.runId', 'run:bounded-sql-history:1')
