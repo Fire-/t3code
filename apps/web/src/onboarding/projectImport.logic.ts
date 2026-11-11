@@ -26,6 +26,14 @@ export function partitionOnboardingProjects<T extends AgentSessionProjectCandida
   };
 }
 
+/**
+ * The server imports only conversations from the same 30-day window, so importing such a folder
+ * adds an empty project. An unknown or future time is not treated as stale.
+ */
+export function isOutsideImportWindow(lastActiveAt: string | null, now = Date.now()): boolean {
+  return lastActiveAt !== null && Date.parse(lastActiveAt) < now - RECENT_PROJECT_WINDOW_MS;
+}
+
 export interface OnboardingProjectGroup<T> {
   readonly key: string;
   readonly label: string;
