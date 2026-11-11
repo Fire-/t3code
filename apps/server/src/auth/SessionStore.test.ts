@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
+import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -591,6 +592,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
         expect(revokedClientWebSocket.sessionId).toBe(client.sessionId);
         expect(revokedClientWebSocket.revokedAt.epochMilliseconds).toBeGreaterThanOrEqual(0);
       }
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect("extends the default session TTL from T3CODE_SESSION_TTL", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      vi.stubEnv("T3CODE_SESSION_TTL", "90");
+      yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
+      const issued = yield* sessions.issue({ subject: "env-ttl-probe" });
+      expect(issued.expiresAt.epochMilliseconds).toBe(Duration.toMillis(Duration.days(90)));
     }).pipe(Effect.provide(layerSessionStore())),
   );
 });
