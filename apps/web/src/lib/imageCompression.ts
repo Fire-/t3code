@@ -543,7 +543,20 @@ export async function prepareImageForAttachment(
   file: File,
   maxBytes: number,
 ): Promise<CompressImageFileResult> {
-  if (!isHeicImageFile(file)) return compressImageToByteLimit(file, maxBytes);
+  if (!isHeicImageFile(file)) {
+    const result = await compressImageToByteLimit(file, maxBytes);
+    // Android Chrome re-checks a picked file's source when uploading it, and some sources
+    // (Samsung's cropped screenshots, Drive) report a new modification time, so the upload
+    // fails with ERR_UPLOAD_FILE_CHANGED (crbug.com/40123366). A copy in memory has no source.
+    if (!result.ok || result.file !== file) return result;
+    return {
+      ...result,
+      file: new File([await file.arrayBuffer()], file.name, {
+        type: file.type,
+        lastModified: file.lastModified,
+      }),
+    };
+  }
   const prepared = await prepareHeicImage(file).image;
   if (!prepared.ok || prepared.file.size <= maxBytes) return prepared;
   const result = await compressImageToByteLimit(prepared.file, maxBytes, {
