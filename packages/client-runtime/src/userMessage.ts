@@ -29,15 +29,21 @@ export const IDLE_COMPACTION_TITLES = {
   onReturn: "Context compacted before sending",
 } satisfies Record<OrchestrationV2IdleCompaction, string>;
 
+export type SteerMarkerState = "delivered" | "waiting" | "undelivered";
+
 export interface SteerMarker {
-  readonly label: "Steer" | "Not delivered";
-  readonly delivered: boolean;
+  readonly label: "Steer" | "Steer · waiting to be read" | "Not delivered";
+  readonly state: SteerMarkerState;
   readonly description: string;
 }
 
-/** `undelivered` is a steer the provider dropped before the agent read it, usually on Stop. */
+/**
+ * `pending` is a steer the provider queued, which the agent reads at a step boundary.
+ * `undelivered` is one the provider dropped before the agent read it, usually on Stop.
+ */
 export function resolveSteerMarker(message: {
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
+  readonly pending?: boolean | undefined;
   readonly undelivered?: boolean | undefined;
 }): SteerMarker | null {
   if (message.inputIntent !== "steer" && message.inputIntent !== "promoted_queued_to_steer") {
@@ -46,13 +52,21 @@ export function resolveSteerMarker(message: {
   if (message.undelivered === true) {
     return {
       label: "Not delivered",
-      delivered: false,
+      state: "undelivered",
       description: "The agent never received this message",
+    };
+  }
+  if (message.pending === true) {
+    return {
+      label: "Steer · waiting to be read",
+      state: "waiting",
+      description:
+        "Waiting for the agent to read this. It reads steers between steps, after a running command finishes.",
     };
   }
   return {
     label: "Steer",
-    delivered: true,
+    state: "delivered",
     description:
       message.inputIntent === "promoted_queued_to_steer"
         ? "Originally queued, then promoted to steer the active turn"
@@ -60,7 +74,7 @@ export function resolveSteerMarker(message: {
   };
 }
 
-/** A delivered steer after a dropped one needs its own label, or it reads as dropped. */
+/** A steer whose state differs from the one above it needs its own label, or it reads as that one. */
 export function continuesSteerMarker(
   message: Parameters<typeof resolveSteerMarker>[0] | undefined,
   previous: Parameters<typeof resolveSteerMarker>[0] | undefined,
@@ -68,7 +82,7 @@ export function continuesSteerMarker(
   if (message === undefined || previous === undefined) return false;
   const current = resolveSteerMarker(message);
   const before = resolveSteerMarker(previous);
-  return current !== null && before !== null && current.delivered === before.delivered;
+  return current !== null && before !== null && current.state === before.state;
 }
 
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
