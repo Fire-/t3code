@@ -5924,12 +5924,13 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       for (const lookup of stopRequestLookups) {
         assert.include(lookup, "orchestration_v2_projection_turn_items_stop_request_idx");
       }
-      // The active, activity, and pending-secret lookups; walking the ordinal index instead
-      // reads every run of an idle thread.
+      // The active, activity, and pending-secret lookups, plus the work-clock pause requests this
+      // fork reads for the same activity run. Walking the ordinal index instead reads every run of
+      // an idle thread.
       const activeRunLookups = plan.filter(
         (detail) => detail.startsWith("SEARCH r ") && detail.includes("(thread_id=?"),
       );
-      assert.lengthOf(activeRunLookups, 4);
+      assert.lengthOf(activeRunLookups, 5);
       for (const lookup of activeRunLookups) {
         assert.include(lookup, "orchestration_v2_projection_runs_thread_status_idx");
       }

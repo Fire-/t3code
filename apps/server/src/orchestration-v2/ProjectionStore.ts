@@ -6901,6 +6901,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE activity.run_id = (
                   SELECT r.run_id
                   FROM orchestration_v2_projection_runs r
+                    INDEXED BY orchestration_v2_projection_runs_thread_status_idx
                   WHERE r.thread_id = t.thread_id
                     AND r.status IN ('preparing', 'starting', 'running', 'waiting')
                     AND NOT ${isSilentShellRun("r")}
