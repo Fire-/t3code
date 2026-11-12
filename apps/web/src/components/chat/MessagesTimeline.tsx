@@ -7,7 +7,7 @@ import { MarkdownFindContext } from "./markdownFindContext";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock } from "./WorkLog";
 import { TimelinePendingApprovalRow } from "./TimelinePendingApprovalRow";
-import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
+import type { OrchestrationV2UserWait, WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { deriveTimelineMinimapItems } from "./timelineMinimapItems";
 import {
   type AssistantCitation,
@@ -202,6 +202,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END = {
 } as const satisfies MaintainScrollAtEndOptions;
 const EMPTY_RUN_IDS: ReadonlySet<RunId> = new Set();
 const EMPTY_TIMELINE_ENTRIES: ReadonlyArray<TimelineEntry> = [];
+const EMPTY_USER_WAITS: ReadonlyArray<OrchestrationV2UserWait> = [];
 const TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH = {
   ...TIMELINE_MAINTAIN_SCROLL_AT_END,
   animated: true,
@@ -234,6 +235,9 @@ interface MessagesTimelineProps {
   activeTurnStartedAt?: string | null;
   /** Replaces "Thinking" while the active run's provider has not started a turn. */
   providerStartingLabel?: string | null;
+  activeTurnPausedAt?: string | null;
+  /** Time spent waiting on the user, left out of "Worked for" durations. */
+  userWaits?: ReadonlyArray<OrchestrationV2UserWait>;
   worktreeSetup?: WorktreeSetupSnapshot | null;
   onCancelWorktreeSetup?: () => void;
   retryableWorkspacePreparationRunIds?: ReadonlySet<RunId>;
@@ -352,6 +356,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   runlessWorkActive = false,
   activeTurnStartedAt = null,
   providerStartingLabel = null,
+  activeTurnPausedAt = null,
+  userWaits = EMPTY_USER_WAITS,
   worktreeSetup = null,
   footer = null,
   onCancelWorktreeSetup,
@@ -743,6 +749,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     isWorking,
     runlessWorkActive,
     activeTurnStartedAt,
+    activeTurnPausedAt,
+    userWaits,
     turnDiffSummaries,
     supportsConversationRollback,
     threadStartCheckpointAvailable,

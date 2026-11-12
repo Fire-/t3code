@@ -15,6 +15,6 @@ function formatWorkingTimer(startIso: string, endIso: string): string | null {
   return formatDuration(elapsedSeconds * 1_000);
 }
 
-export function formatWorkingTimerNow(startIso: string): string {
-  return formatWorkingTimer(startIso, new Date().toISOString()) ?? "0s";
+export function formatWorkingTimerNow(startIso: string, pausedIso?: string): string {
+  return formatWorkingTimer(startIso, pausedIso ?? new Date().toISOString()) ?? "0s";
 }
