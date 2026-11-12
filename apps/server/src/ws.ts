@@ -2192,6 +2192,9 @@ export const layerWsRpc = (
                                   ...(input.initialMessage.context === undefined
                                     ? {}
                                     : { context: input.initialMessage.context }),
+                                  ...(input.initialMessage.timeZone === undefined
+                                    ? {}
+                                    : { timeZone: input.initialMessage.timeZone }),
                                 },
                               }),
                           createdBy: "user",
