@@ -412,16 +412,18 @@ describe("handoff budget", () => {
         }),
         0,
       );
+      const compacting = {
+        ...input,
+        modelContextWindow: 1_000_000,
+        providerThread: {
+          ...providerThread,
+          contextUsage: { usedTokens: 0, maxTokens: 1_000_000, autoCompactThreshold: 20_000 },
+        },
+      };
+      assert.equal(handoffBudget(compacting), 0);
       assert.equal(
-        handoffBudget({
-          ...input,
-          modelContextWindow: 1_000_000,
-          providerThread: {
-            ...providerThread,
-            contextUsage: { usedTokens: 0, maxTokens: 1_000_000, autoCompactThreshold: 20_000 },
-          },
-        }),
-        0,
+        handoffBudget({ ...compacting, ignoreAutoCompactThreshold: true }),
+        handoffBudget({ ...input, modelContextWindow: 1_000_000 }),
       );
     }
   });
