@@ -4318,13 +4318,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         snapshotSequence: activeWindow.snapshotSequence,
       }).historyCursor!;
       const staleOrdinal = Number(decodeThreadHistoryCursor(staleCursor).si.split(":").at(-1));
-      const resumed = yield* projectionStore.getThreadHistoryPage(
-        threadId,
-        staleCursor,
-        undefined,
-        false,
-        "deferred",
-      );
+      const resumed = yield* historyPage(threadId, staleCursor, undefined, false, "deferred");
       assert.strictEqual(
         resumed.items.at(-1)?.sourceItemId,
         TurnItemId.make(`turn-item:bounded-sql-history:${staleOrdinal - 1}`),
