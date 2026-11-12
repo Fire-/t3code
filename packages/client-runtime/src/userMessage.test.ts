@@ -4,6 +4,7 @@ import { ComposerContextId, GuestMessageId, ScheduledTaskId } from "@t3tools/con
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 
 import {
+  resolveSteerMarker,
   resolveUserMessageFileCards,
   resolveUserMessageGrouping,
   resolveUserMessagePresentation,
@@ -150,6 +151,52 @@ describe("resolveUserMessageFileCards", () => {
       expect(resolveUserMessageFileCards({ text: "", attachments: [attachment] })).toBeNull();
       expect(resolveUserMessageFileCards({ text: "", attachments: [file, attachment] })).toBeNull();
     }
+  });
+});
+
+describe("resolveSteerMarker", () => {
+  it("marks a steer the provider dropped as not delivered, whatever its origin", () => {
+    for (const inputIntent of ["steer", "promoted_queued_to_steer"] as const) {
+      expect(resolveSteerMarker({ inputIntent, undelivered: true })).toMatchObject({
+        label: "Not delivered",
+        state: "undelivered",
+      });
+    }
+  });
+
+  it("marks a steer the provider queued but has not read as waiting", () => {
+    for (const inputIntent of ["steer", "promoted_queued_to_steer"] as const) {
+      expect(resolveSteerMarker({ inputIntent, pending: true })).toMatchObject({
+        label: "Steer · waiting to be read",
+        state: "waiting",
+      });
+    }
+    expect(
+      resolveSteerMarker({ inputIntent: "steer", pending: true, undelivered: true }),
+    ).toMatchObject({ label: "Not delivered", state: "undelivered" });
+  });
+
+  it("keeps the steer marker for a delivered steer and none for other messages", () => {
+    expect(resolveSteerMarker({ inputIntent: "steer" })).toMatchObject({
+      label: "Steer",
+      state: "delivered",
+    });
+    for (const inputIntent of ["turn_start", "queued_turn", undefined] as const) {
+      expect(resolveSteerMarker({ inputIntent, undelivered: true })).toBeNull();
+      expect(resolveSteerMarker({ inputIntent, pending: true })).toBeNull();
+    }
+  });
+
+  it("starts a new steer label where the state changes in a burst", () => {
+    const delivered = { role: "user", text: "hello", inputIntent: "steer" as const };
+    const dropped = { ...delivered, undelivered: true };
+    const waiting = { ...delivered, pending: true };
+    expect(resolveUserMessageGrouping(dropped, delivered, undefined).continuesSteer).toBe(false);
+    expect(resolveUserMessageGrouping(delivered, dropped, undefined).continuesSteer).toBe(false);
+    expect(resolveUserMessageGrouping(waiting, delivered, undefined).continuesSteer).toBe(false);
+    expect(resolveUserMessageGrouping(dropped, waiting, undefined).continuesSteer).toBe(false);
+    expect(resolveUserMessageGrouping(dropped, dropped, undefined).continuesSteer).toBe(true);
+    expect(resolveUserMessageGrouping(waiting, waiting, undefined).continuesSteer).toBe(true);
   });
 });
 

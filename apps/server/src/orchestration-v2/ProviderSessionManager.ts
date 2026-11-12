@@ -327,6 +327,9 @@ function sessionScopedArtifactThreadId(
       return event.sessionScoped === true
         ? (event.providerThread.appThreadId ?? undefined)
         : undefined;
+    // A stop usually discards steers after the run settled and its subscriber left.
+    case "steer.discarded":
+      return event.threadId;
     case "runtime_request.updated":
       return event.runtimeRequest.providerTurnId === null ? event.threadId : undefined;
     case "node.updated":
