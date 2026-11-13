@@ -1289,11 +1289,12 @@ function deriveThreadFeedRunFolds(
       },
       ...group.steerSegments.map(({ startIndex, steer }, index) => {
         const entries = group.entries.slice(startIndex, group.steerSegments[index + 1]?.startIndex);
-        const segmentMs = computeElapsedMs(
+        const segmentMs = workedMsBetween(
           steer.createdAt,
           entries
             .map((entry) => (entry.type === "message" ? entry.message.updatedAt : entry.createdAt))
             .reduce<string | null>(maxIsoTimestamp, null) ?? steer.createdAt,
+          userWaits,
         );
         return {
           runId: steerFoldRunId(runId, steer.id),
