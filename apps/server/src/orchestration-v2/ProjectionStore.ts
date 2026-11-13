@@ -506,6 +506,11 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     limit: number,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
+  /** When the thread's latest user message created before `before` was created. */
+  readonly getLatestUserMessageAt: (
+    threadId: ThreadId,
+    before: DateTime.Utc,
+  ) => Effect.Effect<DateTime.Utc | undefined, ProjectionStoreV2Error>;
   readonly getSubagentCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   /** Child threads of the thread's app-owned tasks, in task order, without decoding the tasks. */
   readonly listAppOwnedChildThreadIds: (
@@ -6132,6 +6137,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.bytes ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+    const getLatestUserMessageAt: ProjectionStoreV2Shape["getLatestUserMessageAt"] = (
+      threadId,
+      before,
+    ) =>
+      sql<{ created_at: string }>`SELECT created_at FROM orchestration_v2_projection_messages
+        WHERE thread_id = ${threadId} AND role = 'user' AND created_at < ${DateTime.formatIso(before)}
+        ORDER BY created_at DESC LIMIT 1`.pipe(
+        Effect.map((rows) =>
+          rows[0] === undefined ? undefined : DateTime.makeUnsafe(rows[0].created_at),
+        ),
+        Effect.mapError(controlReadError(threadId)),
+      );
     const getSubagentCount: ProjectionStoreV2Shape["getSubagentCount"] = (threadId) =>
       sql<{
         count: number;
@@ -8994,6 +9011,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       isNodeStored: readOnReader(isNodeStored),
       getMessageCount: readOnReader(getMessageCount),
       getTranscriptByteFloor: readOnReader(getTranscriptByteFloor),
+      getLatestUserMessageAt: readOnReader(getLatestUserMessageAt),
       getSubagentCount: readOnReader(getSubagentCount),
       listAppOwnedChildThreadIds: readOnReader(listAppOwnedChildThreadIds),
       hasPendingDelegatedCompletion: readOnReader(hasPendingDelegatedCompletion),

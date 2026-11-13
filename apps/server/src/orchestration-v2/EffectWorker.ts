@@ -350,6 +350,7 @@ export const layerExecutor: Layer.Layer<
                         ...(message.linkedSender === undefined
                           ? {}
                           : { linkedSender: message.linkedSender }),
+                        ...(message.timeZone === undefined ? {} : { timeZone: message.timeZone }),
                       })
                       .pipe(
                         // A disabled instance cannot retry this completed turn; its result stands.

@@ -19,7 +19,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type ProjectMutation,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it, vi } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
@@ -54,6 +54,13 @@ const layerTestRandom = Layer.succeed(
   SecureRandom.SecureRandom,
   SecureRandom.make((size) => new Uint8Array(size)),
 );
+
+const sendFromTokyo = () => {
+  const resolved = new Intl.DateTimeFormat().resolvedOptions();
+  return vi
+    .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+    .mockReturnValue({ ...resolved, timeZone: "Asia/Tokyo" });
+};
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -226,8 +233,9 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
-  it.effect("preserves an existing worktree and branch during first-message launch", () =>
-    Effect.gen(function* () {
+  it.effect("preserves an existing worktree and branch during first-message launch", () => {
+    const deviceZone = sendFromTokyo();
+    return Effect.gen(function* () {
       const launches: OrchestrationV2ThreadLaunchInput[] = [];
       const supervisor = yield* makeSupervisor({ commands: [], projects: [], launches });
 
@@ -266,12 +274,17 @@ describe("V2 environment commands", () => {
           worktreePath: "/workspace/project-worktrees/feature",
           branch: "feature",
         },
+        initialMessage: { timeZone: "Asia/Tokyo" },
       });
-    }).pipe(Effect.provide(layerTestRandom)),
-  );
+    }).pipe(
+      Effect.provide(layerTestRandom),
+      Effect.ensuring(Effect.sync(() => deviceZone.mockRestore())),
+    );
+  });
 
-  it.effect("uses server-resolved delivery intent without fetching the full projection", () =>
-    Effect.gen(function* () {
+  it.effect("uses server-resolved delivery intent without fetching the full projection", () => {
+    const deviceZone = sendFromTokyo();
+    return Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
       const projectionRequests: ThreadId[] = [];
       const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
@@ -300,11 +313,15 @@ describe("V2 environment commands", () => {
           type: "message.dispatch",
           dispatchMode: { type: expectedType },
           ...(mode === "queue" ? {} : { deliveryIntent: mode }),
+          timeZone: "Asia/Tokyo",
         });
       }
       expect(projectionRequests).toEqual([]);
-    }).pipe(Effect.provide(layerTestRandom)),
-  );
+    }).pipe(
+      Effect.provide(layerTestRandom),
+      Effect.ensuring(Effect.sync(() => deviceZone.mockRestore())),
+    );
+  });
 
   // A dead socket reaches the caller as a protocol error, or as an interrupt when
   // the supervisor closes the session before the protocol reports the error.

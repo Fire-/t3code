@@ -29,6 +29,7 @@ import * as Stream from "effect/Stream";
 import { isBareGitConfig, parseOriginUrlFromGitConfig } from "@t3tools/shared/git";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
+import { stripTurnTimeLine } from "@t3tools/shared/turnTimeLine";
 import { repositoryPathFromRemoteUrl } from "@t3tools/source-control-core/server/SourceControlProvider";
 
 import * as ServerConfig from "../config.ts";
@@ -523,8 +524,10 @@ function parseAgentSessionRecords(
 
   let conversationMessageCount = 0;
   const retainMessage = (
-    message: AgentSessionThreadMessage & { readonly codexResponseUser: boolean },
+    retained: AgentSessionThreadMessage & { readonly codexResponseUser: boolean },
   ) => {
+    const message =
+      retained.role === "user" ? { ...retained, text: stripTurnTimeLine(retained.text) } : retained;
     if (firstUserMessage === undefined && message.role === "user") {
       firstUserMessage = message;
     }
@@ -537,7 +540,7 @@ function parseAgentSessionRecords(
   };
 
   const hasMatchingCodexEventInTurn = (text: string) => {
-    const comparisonText = text.trim();
+    const comparisonText = stripTurnTimeLine(text).trim();
     for (let index = messages.length - 1; index >= 0; index--) {
       const message = messages[index];
       if (message?.role === "assistant") return false;
@@ -600,7 +603,10 @@ function parseAgentSessionRecords(
       for (let index = messages.length - 1; index >= 0; index--) {
         const message = messages[index];
         if (message?.role === "assistant") break;
-        if (message?.codexResponseUser === true && message.text.trim() === text.trim()) {
+        if (
+          message?.codexResponseUser === true &&
+          message.text.trim() === stripTurnTimeLine(text).trim()
+        ) {
           if (firstUserMessage === message) firstUserMessage = undefined;
           messages.splice(index, 1);
           conversationMessageCount -= 1;
