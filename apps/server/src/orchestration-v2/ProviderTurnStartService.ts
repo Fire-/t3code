@@ -929,6 +929,7 @@ export const layer: Layer.Layer<
             return handoffBudget({
               tokenCap,
               modelContextWindow,
+              ignoreAutoCompactThreshold: session.handoffsIgnoreAutoCompact,
               userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
               attachments: message.attachments,
               providerThread: budgetProviderThread,
