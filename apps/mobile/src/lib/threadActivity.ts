@@ -5,6 +5,7 @@ import type {
 import { linkRequestTargetName } from "@t3tools/client-runtime/link-request";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { workedMsBetween } from "@t3tools/client-runtime/state/models";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
@@ -52,6 +53,7 @@ import type {
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItem,
   OrchestrationV2UserMessageInputIntent,
+  OrchestrationV2UserWait,
   RunAttemptId,
   ScheduledTaskId,
   TurnItemId,
@@ -983,12 +985,6 @@ function groupAdjacentActivities(
   return grouped;
 }
 
-function computeElapsedMs(startIso: string, endIso: string): number | null {
-  const start = Date.parse(startIso);
-  const end = Date.parse(endIso);
-  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
-}
-
 function maxIsoTimestamp(left: string | null, right: string | null): string | null {
   if (left === null) return right;
   if (right === null) return left;
@@ -1123,6 +1119,7 @@ function deriveThreadFeedRunFolds(
   latestRun: ThreadFeedLatestRun | null,
   runlessWorkActive: boolean,
   feedFailedRunIds: ReadonlySet<RunId>,
+  userWaits: ReadonlyArray<OrchestrationV2UserWait>,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
   const terminalAssistantMessageIdByRun = new Map<RunId, string>();
   const retainedAnswerIds = finalAnswerIds(feed);
@@ -1263,13 +1260,14 @@ function deriveThreadFeedRunFolds(
       lastEntry.type === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
     const elapsedMs =
       latestRunMatches && latestRun.startedAt && latestRun.completedAt
-        ? computeElapsedMs(latestRun.startedAt, latestRun.completedAt)
-        : computeElapsedMs(
+        ? workedMsBetween(latestRun.startedAt, latestRun.completedAt, userWaits)
+        : workedMsBetween(
             group.startBoundary ?? firstEntry.createdAt,
             maxIsoTimestamp(
               terminalEntry?.type === "message" ? terminalEntry.message.updatedAt : null,
               lastEntryEnd,
             ) ?? lastEntryEnd,
+            userWaits,
           );
     const duration = elapsedMs === null ? null : formatDuration(elapsedMs);
     const interrupted =
@@ -1388,6 +1386,7 @@ interface ThreadFeedPresentationBuild {
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive: boolean;
   readonly display: ThreadFeedDisplay;
+  readonly userWaits: ReadonlyArray<OrchestrationV2UserWait>;
   readonly rows: ReadonlyArray<ThreadFeedEntry>;
   /** Feed entry `entry` is a user message whose rows start at `rowsLength`. */
   readonly restarts: ReadonlyArray<{ readonly entry: number; readonly rowsLength: number }>;
@@ -1406,6 +1405,23 @@ function latestRunsEqual(left: ThreadFeedLatestRun | null, right: ThreadFeedLate
       left.completedAt === right.completedAt &&
       left.turnEnded === right.turnEnded &&
       left.providerStartingLabel === right.providerStartingLabel)
+  );
+}
+
+function userWaitsEqual(
+  left: ReadonlyArray<OrchestrationV2UserWait>,
+  right: ReadonlyArray<OrchestrationV2UserWait>,
+) {
+  const sameInstant = (a: DateTime.Utc | null, b: DateTime.Utc | null) =>
+    a === null || b === null ? a === b : DateTime.Equivalence(a, b);
+  return (
+    left === right ||
+    (left.length === right.length &&
+      left.every(
+        (wait, index) =>
+          sameInstant(wait.startedAt, right[index]!.startedAt) &&
+          sameInstant(wait.endedAt, right[index]!.endedAt),
+      ))
   );
 }
 
@@ -1432,6 +1448,7 @@ function presentationRestart(
   activeWorkStartedAt: string | null,
   runlessWorkActive: boolean,
   display: ThreadFeedDisplay,
+  userWaits: ReadonlyArray<OrchestrationV2UserWait>,
 ): { readonly entry: number; readonly rowsLength: number; readonly index: number } | null {
   if (
     previous === null ||
@@ -1440,6 +1457,7 @@ function presentationRestart(
     previous.runlessWorkActive !== runlessWorkActive ||
     previous.display.toolCallVisibility !== display.toolCallVisibility ||
     previous.display.revealedMessageId !== display.revealedMessageId ||
+    !userWaitsEqual(previous.userWaits, userWaits) ||
     !setsEqual(previous.expandedRunIds, expandedRunIds) ||
     !setsEqual(previous.expandedWorkGroupIds, expandedWorkGroupIds)
   ) {
@@ -1604,6 +1622,7 @@ export function deriveThreadFeedPresentation(
   runlessWorkActive = false,
   cache?: ThreadFeedCache,
   display: ThreadFeedDisplay = DEFAULT_THREAD_FEED_DISPLAY,
+  userWaits: ReadonlyArray<OrchestrationV2UserWait> = [],
 ): ThreadFeedEntry[] {
   const previous = cache?.presentation ?? null;
   const restart = presentationRestart(
@@ -1615,6 +1634,7 @@ export function deriveThreadFeedPresentation(
     activeWorkStartedAt,
     runlessWorkActive,
     display,
+    userWaits,
   );
   const start = restart?.entry ?? 0;
   const result: ThreadFeedEntry[] =
@@ -1701,7 +1721,13 @@ export function deriveThreadFeedPresentation(
   }
   const foldsByAnchorId = zen
     ? new Map<string, ThreadFeedRunFold>()
-    : deriveThreadFeedRunFolds(sourceFeed, latestRun, isWorking && runlessWorkActive, failedRunIds);
+    : deriveThreadFeedRunFolds(
+        sourceFeed,
+        latestRun,
+        isWorking && runlessWorkActive,
+        failedRunIds,
+        userWaits,
+      );
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
     if (!expandedRunIds.has(fold.runId)) {
@@ -1887,6 +1913,7 @@ export function deriveThreadFeedPresentation(
       activeWorkStartedAt,
       runlessWorkActive,
       display,
+      userWaits,
       rows: result,
       restarts: cleanRestarts,
       firstEntryByRun,

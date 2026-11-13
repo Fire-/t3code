@@ -6623,12 +6623,13 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       for (const lookup of stopRequestLookups) {
         assert.include(lookup, "orchestration_v2_projection_turn_items_stop_request_idx");
       }
-      // The active, activity, and pending-secret lookups; walking the ordinal index instead
-      // reads every run of an idle thread.
+      // The active, activity, and pending-secret lookups, plus the work-clock pause requests this
+      // fork reads for the same activity run. Walking the ordinal index instead reads every run of
+      // an idle thread.
       const activeRunLookups = plan.filter(
         (detail) => detail.startsWith("SEARCH r ") && detail.includes("(thread_id=?"),
       );
-      assert.lengthOf(activeRunLookups, 4);
+      assert.lengthOf(activeRunLookups, 5);
       for (const lookup of activeRunLookups) {
         assert.include(lookup, "orchestration_v2_projection_runs_thread_status_idx");
       }
@@ -7835,6 +7836,59 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           wakeShell.activityRunStartedAt && DateTime.toEpochMillis(wakeShell.activityRunStartedAt),
           DateTime.toEpochMillis(now),
         );
+      }
+
+      const answeredAt = DateTime.add(now, { minutes: 20 });
+      const askedAgainAt = DateTime.add(now, { minutes: 30 });
+      const question = {
+        id: requestId,
+        nodeId: rootNodeId,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input",
+        responseCapability: {
+          type: "live",
+          providerSessionId: ProviderSessionId.make("session:question"),
+        },
+        createdAt: now,
+      } as const;
+      const millis = (value: DateTime.Utc | null | undefined) =>
+        value == null ? null : DateTime.toEpochMillis(value);
+      for (const [step, payload, pausedAt] of [
+        ["answered", { ...question, status: "resolved", resolvedAt: answeredAt }, null],
+        [
+          "asked-again",
+          {
+            ...question,
+            id: RuntimeRequestId.make("request:projection-shell-approval"),
+            kind: "command",
+            status: "pending",
+            createdAt: askedAgainAt,
+            resolvedAt: null,
+          },
+          askedAgainAt,
+        ],
+      ] as const) {
+        yield* projectionStore.apply({
+          id: EventId.make(`event:projection-shell-wait:${step}`),
+          type: "runtime-request.updated",
+          threadId,
+          nodeId: rootNodeId,
+          driver,
+          occurredAt: later,
+          payload,
+        });
+        const waitProjection = yield* projectionStore.getThreadProjection(threadId);
+        const waitSqlShell = (yield* projectionStore.getShellSnapshot()).threads.find(
+          (row) => row.id === threadId,
+        )!;
+        for (const waitShell of [
+          waitSqlShell,
+          ProjectionStore.threadShellFromProjection(waitProjection),
+        ]) {
+          assert.equal(millis(waitShell.activityRunStartedAt), DateTime.toEpochMillis(answeredAt));
+          assert.equal(millis(waitShell.activityRunPausedAt), millis(pausedAt));
+        }
       }
     }),
   );
