@@ -221,7 +221,11 @@ export function isFoldableWorkItem(item: HistoryRow["item"]): boolean {
   );
 }
 
-export function deferWorkHistoryRows<Row extends HistoryRow>(items: ReadonlyArray<Row>): Row[] {
+export function deferWorkHistoryRows<Row extends HistoryRow>(
+  items: ReadonlyArray<Row>,
+  end = items.length,
+): Row[] {
+  // An interrupt past `end` still keeps its whole run inline.
   const blocked = new Set(
     items.flatMap(({ item }) =>
       item.runId != null &&
@@ -232,9 +236,10 @@ export function deferWorkHistoryRows<Row extends HistoryRow>(items: ReadonlyArra
         : [],
     ),
   );
+  const kept = items.slice(0, end);
   const segments = new Map<string, number>();
   const groups = new Map<string, Row[]>();
-  for (const row of items) {
+  for (const row of kept) {
     const item = row.item;
     if (item.runId == null) continue;
     if (item.type === "user_message") segments.set(item.runId, (segments.get(item.runId) ?? 0) + 1);
@@ -269,7 +274,7 @@ export function deferWorkHistoryRows<Row extends HistoryRow>(items: ReadonlyArra
       },
     });
   }
-  return items.flatMap((row) => (omitted.has(row) ? [] : [anchors.get(row) ?? row]));
+  return kept.flatMap((row) => (omitted.has(row) ? [] : [anchors.get(row) ?? row]));
 }
 
 export function selectDeferredWorkPage<Row extends HistoryRow>(input: {
@@ -489,11 +494,19 @@ export function selectHistoryPageFromCursor<Row extends HistoryRow>(input: {
   readonly exclusiveEndIndex?: number | undefined;
   /** Set when `items` holds only the newest part of the history. */
   readonly prefix?: ThreadHistoryPrefix | undefined;
+  readonly deferWork?: boolean | undefined;
 }): SelectTimelinePageResult<Row> {
-  const decoded = decodeThreadHistoryCursor(input.cursor);
+  // Resolve the cursor before folding work: a window read mid-run can name a row that folds
+  // once the run completes, and its position counts from that window, not from `items`.
+  const end = findCursorEndIndex(input.items, decodeThreadHistoryCursor(input.cursor));
+  const items = input.deferWork === true ? deferWorkHistoryRows(input.items, end) : input.items;
   return selectOlderTimelinePage({
-    items: input.items,
-    exclusiveEndIndex: input.exclusiveEndIndex ?? findCursorEndIndex(input.items, decoded),
+    items,
+    // A folded page ends at the cursor's own position in the unfolded items, which a
+    // `deferWork` caller's shortened array can no longer name.
+    exclusiveEndIndex:
+      input.exclusiveEndIndex ??
+      findCursorEndIndex(input.items, decodeThreadHistoryCursor(input.cursor)),
     snapshotSequence: input.snapshotSequence,
     ...(input.rowEncodedBytes === undefined ? {} : { rowEncodedBytes: input.rowEncodedBytes }),
     policy: olderHistoryPagePolicy(input),
