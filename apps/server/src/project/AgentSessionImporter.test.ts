@@ -522,7 +522,11 @@ it.effect("does not certify new native history after a partial import retry", ()
     const threadId = importId(original);
     const importer = yield* makeImporter([original]);
     yield* sql`CREATE TEMP TRIGGER fail_runtime BEFORE INSERT ON provider_session_runtime BEGIN SELECT RAISE(ABORT, 'test runtime failure'); END`;
-    expect(yield* importer.run).toEqual({ importedCount: 0, skippedCount: 1 });
+    expect(yield* importer.run).toEqual({
+      importedCount: 0,
+      skippedCount: 1,
+      skippedReasons: [{ reason: "failed", count: 1 }],
+    });
     yield* sql`DROP TRIGGER fail_runtime`;
     expect(yield* runtimes.list()).toEqual([]);
     const continued = candidate(CODEX_MODEL_SELECTION, original.source.providerSessionId);
@@ -536,6 +540,7 @@ it.effect("does not certify new native history after a partial import retry", ()
     expect(yield* (yield* makeImporter([continued])).run).toEqual({
       importedCount: 0,
       skippedCount: 1,
+      skippedReasons: [{ reason: "failed", count: 1 }],
     });
     expect(yield* runtimes.list()).toEqual([]);
     expect(

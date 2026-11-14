@@ -533,33 +533,18 @@ const make = Effect.gen(function* () {
                 ),
               });
             } else {
-              // Other recorded transcripts mean this one changed after the import, and the
-              // thread does not hold its new messages, so it must stay unrecorded.
-              const recorded = Option.flatMap(yield* runtimes.getByThreadId({ threadId }), (row) =>
-                AgentSessionScanner.decodeImportedTranscriptPayload(row.runtimePayload),
-              ).pipe(Option.flatMapNullishOr((payload) => payload.importedTranscripts));
+              // A transcript can change after the import, so record it only when the
+              // thread already holds exactly its messages.
+              const stored = existing.value.messages;
               if (
-                Option.isSome(recorded) &&
-                recorded.value.length > 0 &&
-                !recorded.value.some((imported) =>
-                  AgentSessionScanner.sameTranscriptIdentity(imported, source),
+                stored.length !== thread.messages.length ||
+                stored.some(
+                  (message, index) =>
+                    message.role !== thread.messages[index]?.role ||
+                    message.text !== thread.messages[index]?.text,
                 )
               ) {
                 return false;
-
-                // A transcript can change after the import, so record it only when the
-                // thread already holds exactly its messages.
-                const stored = existing.value.messages;
-                if (
-                  stored.length !== thread.messages.length ||
-                  stored.some(
-                    (message, index) =>
-                      message.role !== thread.messages[index]?.role ||
-                      message.text !== thread.messages[index]?.text,
-                  )
-                ) {
-                  return false;
-                }
               }
             }
             yield* persistRuntime;
@@ -591,8 +576,8 @@ const make = Effect.gen(function* () {
             },
             runtimeMode,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            branch: thread.worktree?.branch ?? null,
-            worktreePath: thread.worktree?.path ?? null,
+            branch: (thread.worktree ?? outcome.worktree)?.branch ?? null,
+            worktreePath: (thread.worktree ?? outcome.worktree)?.path ?? null,
             linkedPullRequest: null,
             branchPullRequest: null,
             activeProviderThreadId: providerThreadId,

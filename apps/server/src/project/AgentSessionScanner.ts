@@ -1193,6 +1193,7 @@ export const make = Effect.gen(function* () {
           /** The checkout the worktree was added from, when its repository sits in `<checkout>/.git`. */
           readonly mainCheckout: string | null;
           readonly branch: string | null;
+          readonly git: AgentSessionProjectGit | null;
         }
       | { readonly _tag: "NotGit" };
     const identities = new Map<string, GitIdentity>();
@@ -2548,7 +2549,7 @@ export const make = Effect.gen(function* () {
               ...placement,
             },
             source,
-            worktree: placement.worktree ?? null,
+            worktree: worktreePlacements.get(path.resolve(expandedCwd))?.worktree ?? null,
             refreshHistory: previous.length > 0 && !previous.some(hasCurrentHistory),
             ...(continuations.length > 0 ? { continuedIn: continuations } : {}),
           });
