@@ -79,6 +79,7 @@ export interface ThreadLaunchInitialMessage {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
+  readonly timeZone?: string;
 }
 
 export interface ThreadLaunchInput {
