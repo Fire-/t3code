@@ -582,6 +582,10 @@
     "./pinOrderKey": {
       "types": "./src/pinOrderKey.ts",
       "import": "./src/pinOrderKey.ts"
+    },
+    "./turnTimeLine": {
+      "types": "./src/turnTimeLine.ts",
+      "import": "./src/turnTimeLine.ts"
     }
   },
   "scripts": {
