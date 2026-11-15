@@ -2,7 +2,7 @@
 
 T3 Code shows a Welcome page when you open a new installation. Existing
 workspaces skip it. It shows what T3 Code found on the computer you are using,
-on one page: your agents, projects from your Claude Code, Codex, and Pi history,
+on one page: your agents, projects from your Claude Code, Codex, Pi, and Droid history,
 and the phone app. Only an agent is needed to start chatting.
 
 To see the page again, go to **Settings → About → Welcome page** and select
@@ -64,7 +64,8 @@ app with a code from **Settings → Sharing & access**.
 
 ## Projects
 
-T3 Code finds directories that Claude Code, Codex or Pi has used. Git repositories
+T3 Code finds directories that Claude Code, Codex, Pi or Droid has used. Droid is
+only checked when it is enabled in Settings. Git repositories
 are listed first, newest activity on top. When the remote is on GitHub, the
 group shows the repository as `owner/name`. Clones with the same remote share
 one group. Directories that are not git repositories sit under "Other folders".
@@ -82,13 +83,15 @@ anything under `Downloads` are not offered.
 A large or malformed history can reach the scan limit. T3 Code keeps the
 projects it found and warns when projects or conversations may be missing.
 
-Imported projects include Claude, Codex and Pi conversations active within the last
+Imported projects include Claude, Codex, Pi and Droid conversations active within the last
 30 days. You can continue those conversations in T3 Code. Pi is off by default:
 open **Add more agents** and select **Turn on** next to Pi, and the page looks for
 its sessions too. Pi sessions
 are read from each enabled Pi provider's session directory, which follows
 `PI_CODING_AGENT_SESSION_DIR` and `PI_CODING_AGENT_DIR` in its environment. A
-Pi conversation imports its active branch, the one Pi reopens.
+Pi conversation imports its active branch, the one Pi reopens. Droid subagent
+sessions are not imported; their parent conversation keeps the task and its
+report.
 
 Conversation import is best effort. T3 Code keeps the first user prompt and the
 newest remaining visible user and assistant messages, with 200 messages total.
