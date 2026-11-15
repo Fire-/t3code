@@ -40,6 +40,7 @@ interface RecordedBatchRequest {
         readonly serverAppVersion?: string;
         readonly serverMode?: string;
         readonly t3CodeVersion?: string;
+        readonly fork?: string;
       };
     }>;
   } | null;
@@ -56,6 +57,7 @@ interface RecordedBatchBody {
       readonly serverAppVersion?: string;
       readonly serverMode?: string;
       readonly t3CodeVersion?: string;
+      readonly fork?: string;
     };
   }>;
 }
@@ -389,6 +391,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
               event.properties.serverAppVersion === event.properties.t3CodeVersion &&
               event.properties.serverMode === "web",
           ),
+        ),
+        true,
+      );
+      assert.equal(
+        batchRequests.every((request) =>
+          request.body.batch.every((event) => event.properties?.fork === "Fire-/t3code"),
         ),
         true,
       );
