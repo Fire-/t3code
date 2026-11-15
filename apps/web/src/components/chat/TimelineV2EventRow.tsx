@@ -43,6 +43,7 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
   return (
     <V2LifecycleRow
       environmentId={ctx.activeThreadEnvironmentId}
+      rowId={row.id}
       item={item}
       resourceSummary={row.resourceSummary}
       runs={ctx.runs}
@@ -149,6 +150,7 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
                 <V2LifecycleRow
                   environmentId={ctx.activeThreadEnvironmentId}
                   key={item.id}
+                  rowId={row.id}
                   item={item}
                   runs={ctx.runs}
                   onOpenThread={ctx.onOpenThread}
