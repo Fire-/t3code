@@ -396,7 +396,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
       );
       assert.equal(
         batchRequests.every((request) =>
-          request.body.batch.every((event) => event.properties?.fork === "Fire-/t3code"),
+          request.body.batch.every((event) => event.properties?.fork === "fire-/t3code"),
         ),
         true,
       );
