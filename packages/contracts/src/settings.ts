@@ -1523,7 +1523,8 @@ export const ServerSettings = Schema.Struct({
   guestSharingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * Beta: the HTTPS origin guest links point at instead of the T3 Connect tunnel, when the owner
-   * runs their own. Null keeps links on T3 Connect. Clearing or changing it ends existing links.
+   * runs their own. Null keeps links on T3 Connect. Clearing or changing it stops existing links;
+   * setting the same address back lets unexpired ones work again.
    */
   guestSharePublicBaseUrl: Schema.NullOr(GuestSharePublicBaseUrl).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),

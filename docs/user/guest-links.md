@@ -36,8 +36,9 @@ needs. T3 does not run or manage the tunnel — it only stores the address.
 2. In **Settings → Labs → Guest links**, set **Public link address** to that HTTPS origin, such
    as `https://t3.example.com`. An address with a path is refused: the guest page and the guest
    API use paths relative to the origin, and the guest cookie is scoped to `/api/guest`.
-3. Create guest links as usual. They point at your address. Changing or clearing the address ends
-   every link that was made for the old one.
+3. Create guest links as usual. They point at your address. Changing or clearing the address stops
+   every link that was made for the old one; setting the same address back lets links that have not
+   expired work again. To end a link for good, choose **Stop sharing**.
 
 The proxy must keep paths unchanged (no path-rewriting prefix), pass `Set-Cookie` responses
 through, stream `text/event-stream` responses unbuffered, and send `X-Forwarded-Proto: https`.

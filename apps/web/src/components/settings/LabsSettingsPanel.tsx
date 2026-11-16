@@ -169,7 +169,7 @@ function GuestLinksAddressRow() {
       {...searchableSetting("guest-links-address")}
       settingKeys={["guestSharePublicBaseUrl"]}
       title="Public link address"
-      description="Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it ends current links."
+      description="Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links."
       status={
         problemMessage === null ? undefined : (
           <p role="alert" className="text-destructive text-xs">
