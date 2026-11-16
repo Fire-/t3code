@@ -12,6 +12,7 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as SchemaIssue from "effect/SchemaIssue";
 import {
   EnvironmentId,
   ForwardCompatibleNullable,
@@ -1356,6 +1357,56 @@ export const CloudSpeechCredentials = Schema.Struct({
   openrouter: CloudSpeechCredential,
 });
 
+/**
+ * The HTTPS origin guest links point at instead of T3 Connect, or null when `value` is not one:
+ * it must parse as an HTTPS URL with no credentials, query, fragment, or path other than "/".
+ * Client settings forms validate with this; the server's schema remains the authority.
+ */
+export function guestSharePublicBaseUrlOrigin(value: string): string | null {
+  // React Native's URL has no `canParse`, so a failed constructor is the parse error.
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    // A path prefix would break the guest cookie's `/api/guest` path and the page's relative URLs.
+    url.pathname !== "/"
+  ) {
+    return null;
+  }
+  // The parser lowercases the scheme and host and drops a default port, so this is the origin.
+  return `${url.protocol}//${url.host}`;
+}
+
+/** A guest share's public link address: an HTTPS origin, normalized on decode. */
+export const GuestSharePublicBaseUrl = Schema.String.pipe(
+  Schema.decodeTo(
+    Schema.String,
+    SchemaTransformation.transformEffect<string, string>({
+      decode: (value, options) => {
+        const origin = guestSharePublicBaseUrlOrigin(value);
+        return origin === null
+          ? Effect.fail(
+              new SchemaIssue.InvalidValue(
+                { expected: "an HTTPS origin without a path, query, fragment, or credentials" },
+                value,
+                options,
+              ),
+            )
+          : Effect.succeed(origin);
+      },
+      encode: (value) => Effect.succeed(value),
+    }),
+  ),
+);
+
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1470,6 +1521,14 @@ export const ServerSettings = Schema.Struct({
   hideTaggedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /** Beta: guest links for this machine's threads. Off refuses new links and pauses existing ones. */
   guestSharingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Beta: the HTTPS origin guest links point at instead of the T3 Connect tunnel, when the owner
+   * runs their own. Null keeps links on T3 Connect. Clearing or changing it stops existing links;
+   * setting the same address back lets unexpired ones work again.
+   */
+  guestSharePublicBaseUrl: Schema.NullOr(GuestSharePublicBaseUrl).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   /**
    * Beta: links to the user's other machines, both ways. Off refuses new links, calls over links
    * and tasks on another machine; tasks already running there finish.
@@ -1905,6 +1964,7 @@ export const ServerSettingsPatch = Schema.Struct({
   hiddenThreadTags: Schema.optionalKey(Schema.Array(Schema.String)),
   hideTaggedThreads: Schema.optionalKey(Schema.Boolean),
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
+  guestSharePublicBaseUrl: Schema.optionalKey(Schema.NullOr(GuestSharePublicBaseUrl)),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
