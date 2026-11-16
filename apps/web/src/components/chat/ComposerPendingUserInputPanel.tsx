@@ -6,6 +6,8 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 import { type PendingUserInput } from "../../session-logic";
 import type { PendingUserInputDraftAnswer } from "@t3tools/client-runtime/state/pending-user-input";
 import { derivePendingUserInputProgress } from "../../pendingUserInput";
+import { useTimelineVisibleTurnItems } from "../../state/entities";
+import { questionPreamble } from "./ComposerPendingUserInputPanel.logic";
 import { CheckboxMark } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Kbd } from "../ui/kbd";
@@ -146,6 +148,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
 
   const selectOptionFromShortcut = useEffectEvent(handleOptionSelection);
   const backgroundThread = use(BackgroundThreadContext);
+  // The quiet rows ChatView reads omit reasoning text, so the preamble reads the live timeline.
+  const timelineRows = useTimelineVisibleTurnItems(threadRef);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes a document keydown listener for digit shortcuts while a question is answerable
   useEffect(() => {
@@ -192,6 +196,9 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       .join(" "),
   );
   const questionTextAlign = promptDirection === "rtl" ? "text-right" : "text-left";
+  const preamble = questionPreamble(timelineRows, prompt.requestId);
+  const preambleDirection = preamble === null ? null : markdownProseDirection(preamble);
+  const preambleTextAlign = preambleDirection === "rtl" ? "text-right" : "text-left";
 
   return (
     <Collapsible
@@ -260,6 +267,27 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       <CollapsiblePanel>
         <ComposerBanner.Scroll>
           <ComposerBanner.Body className="ps-6 pe-4 pb-1 wrap-anywhere sm:ps-5.5">
+            {preamble !== null ? (
+              // Capped so a long preamble scrolls instead of crowding out the question.
+              <div
+                className="pb-2"
+                data-testid="question-preamble"
+                dir={preambleDirection ?? undefined}
+              >
+                <p className="text-2xs font-medium text-muted-foreground">
+                  From the agent's reasoning
+                </p>
+                <div className="max-h-40 overflow-y-auto">
+                  <ChatMarkdown
+                    text={preamble}
+                    cwd={cwd}
+                    threadRef={threadRef}
+                    lineBreaks
+                    className={cn("text-muted-foreground", preambleTextAlign)}
+                  />
+                </div>
+              </div>
+            ) : null}
             <ChatMarkdown
               text={activeQuestion.question}
               cwd={cwd}

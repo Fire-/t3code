@@ -44,6 +44,7 @@ import {
   rejectPendingCommand,
   threadWithHistory,
   threadWithQuestion,
+  threadWithReasonedQuestion,
   type FakeDriver,
 } from "../../test/fakeEnvironment";
 import { act, fakeTimers, render } from "../../test/render";
@@ -219,6 +220,40 @@ it("a question that opens while a stashed file is checked keeps a machine stash"
   );
   expect(usePromptStashStore.getState().entries).toHaveLength(1);
   usePromptStashStore.getState().takeEntry("stash-late-question");
+});
+
+it("a question whose turn has only reasoning shows that reasoning above it", async () => {
+  const explaining = threadWithReasonedQuestion(
+    "thread-question-preamble",
+    "Which database?",
+    "The migration needs a target database before I can write it.",
+  );
+  const visible = threadWithQuestion("thread-question-visible", "Which cache?");
+  using _environment = installFakeEnvironment([explaining, visible]);
+  __setClientSettingsForTests({
+    ...DEFAULT_CLIENT_SETTINGS,
+    onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${explaining.id}`] }),
+  );
+  await router.load();
+  await using _app = await render(<AppRoot router={router} />, {
+    // AppRoot brings its own router.
+    router: false,
+  });
+  await expect.element(page.getByText("Which database?")).toBeVisible();
+  const preamble = page.getByTestId("question-preamble");
+  await expect.element(preamble).toBeVisible();
+  await expect
+    .element(preamble.getByText("The migration needs a target database before I can write it."))
+    .toBeVisible();
+
+  // The turn's visible assistant text explains the question, so no reasoning preamble shows.
+  await router.navigate({ to: `/${ENVIRONMENT_ID}/${visible.id}` });
+  await expect.element(page.getByText("Answer 0 for thread-question-visible.")).toBeVisible();
+  await expect.element(page.getByText("Which cache?")).toBeVisible();
+  expect(preamble.query()).toBeNull();
 });
 
 it("a new draft does not load its reserved thread before the server lists it", async () => {
