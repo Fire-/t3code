@@ -1034,6 +1034,7 @@ function ThreadRouteContent(
           compactBeforeSend={composer.compactBeforeSend}
           runlessWorkActive={composer.runlessWorkActive}
           extensionStatuses={composer.extensionStatuses}
+          userWaits={composer.userWaits}
           providerSubagentStatus={composer.providerSubagentStatus}
           creationState={creationState}
           setupWorkingStartedAt={
