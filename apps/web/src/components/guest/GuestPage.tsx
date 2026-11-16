@@ -50,7 +50,7 @@ import { GuestMessageName, guestBubbleClassName } from "../chat/guestMessageStyl
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "../chat/MessagesTimeline";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { getDisplayModelName, getTriggerDisplayModelName } from "../chat/providerIconUtils";
-import { ScrollToEndButton } from "../chat/TimelineOverlays";
+import { ComposerDock, ScrollToEndButton } from "../chat/TimelineOverlays";
 import type { TimelineRow } from "../chat/timelineRowContext";
 import { useTimelineFollow } from "../chat/useTimelineFollow";
 import { GuestHtmlRender } from "./GuestHtmlRender";
@@ -527,11 +527,9 @@ function GuestThread({
           />
         </HostImageUrlContext>
         {follow.showScrollToBottom ? (
-          <ScrollToEndButton
-            summary={null}
-            bottom={4}
-            onScrollToEnd={() => follow.scrollToEnd(true)}
-          />
+          <ComposerDock bottom={4}>
+            <ScrollToEndButton summary={null} onScrollToEnd={() => follow.scrollToEnd(true)} />
+          </ComposerDock>
         ) : null}
       </div>
       <div className={cn(LANE, "shrink-0 pb-4")}>

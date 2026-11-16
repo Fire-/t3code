@@ -11,16 +11,13 @@ export function resolveSelectionActionPosition(options: {
   selectionRect: { right: number; bottom: number } | null;
   pointer: SelectionActionPoint | null;
   viewport: { width: number; height: number };
-  belowSelection?: boolean;
 }): SelectionActionPoint {
-  const { bounds, selectionRect, pointer, viewport, belowSelection } = options;
+  const { bounds, selectionRect, pointer, viewport } = options;
   const underSelection = {
     x: selectionRect?.right ?? bounds.left + bounds.width - 140,
     y: selectionRect ? selectionRect.bottom + 4 : bounds.top + 12,
   };
-  // Android floats its own Copy/Share menu above the selection, so a touch
-  // placement stays below the text instead of following the pointer.
-  const preferred = belowSelection ? underSelection : (pointer ?? underSelection);
+  const preferred = pointer ?? underSelection;
   return {
     x: Math.max(
       8,
@@ -68,6 +65,9 @@ export function observeSelectionActions({
   let pointerDown = false;
   let gestureActive = false;
   let touchGesture = false;
+  // The consumer shows touch offers as a chip that tracks its selection, not the
+  // pointer, so a touch offer outlives taps and scrolls that leave the selection be.
+  let touchOffer = false;
   let dismissed = false;
   let restorable = false;
   let pointer: SelectionActionPoint | null = null;
@@ -84,7 +84,7 @@ export function observeSelectionActions({
   };
   const cancel = () => {
     cancelPending();
-    pointerDown = gestureActive = touchGesture = false;
+    pointerDown = gestureActive = touchGesture = touchOffer = false;
     pointer = null;
     dismissed = true;
     restorable = false;
@@ -101,6 +101,7 @@ export function observeSelectionActions({
     onDismiss("interaction");
   };
   const schedule = (delay: number, touch: boolean) => {
+    touchOffer = touch;
     restorable = true;
     cancelPending();
     timer = view.setTimeout(() => {
@@ -115,6 +116,10 @@ export function observeSelectionActions({
     if (!event.isPrimary) return;
     if (isActionTarget(event.target)) {
       cancel();
+      return;
+    }
+    if (touchOffer) {
+      pointerDown = event.button === 0;
       return;
     }
     cancelPending();
@@ -176,12 +181,13 @@ export function observeSelectionActions({
     else if (!pointerDown && getActionElement?.()) dismiss();
   };
   const onScroll = () => {
+    if (touchOffer) return;
     cancelPending();
     // Autoscroll during a drag must not cancel that gesture's eventual release.
     if (!pointerDown) {
       pointer = null;
       if (restoreAfterScroll && !dismissed && restorable)
-        schedule(SELECTION_SCROLL_SETTLE_MS, touchGesture);
+        schedule(SELECTION_SCROLL_SETTLE_MS, false);
       else dismissed = true;
     }
     onDismiss("cancel");

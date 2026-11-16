@@ -159,6 +159,38 @@ describe("observeSelectionActions", () => {
     expect(fixture.onSelection).not.toHaveBeenCalled();
   });
 
+  it("keeps a touch offer through a scroll", () => {
+    using fixture = selectionActionsFixture();
+    touchLongPress(fixture);
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledTimes(1);
+    const dismissals = fixture.onDismiss.mock.calls.length;
+    fixture.elementEvent({ type: "scroll" });
+    expect(fixture.onDismiss.mock.calls.length).toBe(dismissals);
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a touch offer through a tap inside the element", () => {
+    using fixture = selectionActionsFixture();
+    touchLongPress(fixture);
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledTimes(1);
+    const dismissals = fixture.onDismiss.mock.calls.length;
+    fixture.elementEvent({ type: "pointerdown", pointerType: "touch" });
+    expect(fixture.onDismiss.mock.calls.length).toBe(dismissals);
+    // The selection the tap collapses is what withdraws the offer, at its own change.
+    fixture.actions.selectionChanged();
+    expect(fixture.onDismiss.mock.calls.length).toBeGreaterThan(dismissals);
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledTimes(2);
+    expect(fixture.onSelection).toHaveBeenLastCalledWith(null, true);
+  });
+
   it("keeps a touch selection pending when its tap lands on the action element", () => {
     using fixture = selectionActionsFixture();
     touchLongPress(fixture);
@@ -204,6 +236,20 @@ describe("observeSelectionActions", () => {
     expect(fixture.onSelection).toHaveBeenCalledWith({ x: 30, y: 20 }, false);
   });
 
+  it("still dismisses a mouse offer on scroll and re-offers once it settles", () => {
+    using fixture = selectionActionsFixture();
+    fixture.elementEvent({ type: "pointerdown", pointerType: "mouse" });
+    fixture.elementEvent({ type: "mouseup", detail: 1, clientX: 30, clientY: 20 });
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledWith({ x: 30, y: 20 }, false);
+    fixture.elementEvent({ type: "scroll" });
+    expect(fixture.onDismiss).toHaveBeenCalledWith("cancel");
+    vi.advanceTimersByTime(150);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenLastCalledWith(null, false);
+  });
+
   it("treats a pen long-press like touch", () => {
     using fixture = selectionActionsFixture();
     fixture.elementEvent({ type: "pointerdown", pointerType: "pen" });
@@ -230,17 +276,5 @@ describe("resolveSelectionActionPosition", () => {
         viewport,
       }),
     ).toEqual({ x: 380, y: 280 });
-  });
-
-  it("places the button below the selection when asked", () => {
-    expect(
-      resolveSelectionActionPosition({
-        bounds,
-        selectionRect,
-        pointer: { x: 380, y: 280 },
-        viewport,
-        belowSelection: true,
-      }),
-    ).toEqual({ x: 400, y: 304 });
   });
 });
