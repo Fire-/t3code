@@ -226,14 +226,15 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
   const isCodex = provider.driver === ProviderDriverKind.make("codex");
   const isOpenCode = provider.driver === ProviderDriverKind.make("opencode");
-  if (!isAntigravity && !isCodex && !isOpenCode) {
+  const isDroid = provider.driver === ProviderDriverKind.make("droid");
+  if (!isAntigravity && !isCodex && !isDroid && !isOpenCode) {
     // Any other driver must report ready only after a completed model listing, or opt out above:
     // a ready list is authoritative, and warning/error probes keep the old models.
     return !(provider.installed && provider.status === "ready");
   }
 
   if (
-    (isAntigravity || isCodex) &&
+    (isAntigravity || isCodex || isDroid) &&
     (!provider.enabled || provider.auth.status === "unauthenticated")
   ) {
     return false;
@@ -248,7 +249,16 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   const isIncompleteInstalledProbe =
     provider.installed &&
     (provider.status === "error" || ((isCodex || isOpenCode) && provider.status === "warning"));
-  return isPendingAntigravityAuthentication || isPendingInitialProbe || isIncompleteInstalledProbe;
+  // Droid discovers its list live: a ready probe's list is authoritative, while a degraded
+  // probe (discovery failed or timed out) only knows the custom models.
+  const isDegradedInstalledDroidProbe =
+    isDroid && provider.installed && provider.status !== "ready";
+  return (
+    isPendingAntigravityAuthentication ||
+    isPendingInitialProbe ||
+    isIncompleteInstalledProbe ||
+    isDegradedInstalledDroidProbe
+  );
 };
 
 const shouldRetainMissingOpenCodeMetadata = (provider: ServerProvider): boolean =>

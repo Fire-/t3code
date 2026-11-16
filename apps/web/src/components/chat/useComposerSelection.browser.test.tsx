@@ -97,6 +97,7 @@ function Picker(props: {
     setPendingServerThreadEnvModeEntry: () => {},
     setPendingServerThreadStartFromOriginByThreadId: () => {},
     scheduleComposerFocus: () => {},
+    applyRuntimeModeLive: null,
   });
   return (
     <button
