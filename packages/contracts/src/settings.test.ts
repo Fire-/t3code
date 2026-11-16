@@ -544,3 +544,49 @@ describe("server model preferences", () => {
     expect(decodeServerSettingsPatch(input)).toEqual(input);
   });
 });
+
+describe("guest share public base URL", () => {
+  it("stores only an HTTPS origin, normalized", () => {
+    expect(
+      decodeServerSettings({ guestSharePublicBaseUrl: "https://example.com" })
+        .guestSharePublicBaseUrl,
+    ).toBe("https://example.com");
+    expect(
+      decodeServerSettings({ guestSharePublicBaseUrl: "https://t3.example.com:8443/" })
+        .guestSharePublicBaseUrl,
+    ).toBe("https://t3.example.com:8443");
+    // The scheme, host, and default port normalize like the URL parser does.
+    expect(
+      decodeServerSettings({ guestSharePublicBaseUrl: "HTTPS://T3.Example.COM:443" })
+        .guestSharePublicBaseUrl,
+    ).toBe("https://t3.example.com");
+    expect(
+      decodeServerSettingsPatch({ guestSharePublicBaseUrl: "https://t3.example.com:8443/" }),
+    ).toEqual({ guestSharePublicBaseUrl: "https://t3.example.com:8443" });
+  });
+
+  it("rejects anything but an HTTPS origin", () => {
+    for (const guestSharePublicBaseUrl of [
+      "http://example.com",
+      "https://example.com/guest",
+      "https://example.com/?share=x",
+      "https://example.com/#credential",
+      "https://user@example.com",
+      "https://user:password@example.com",
+      "not a url",
+      "",
+      "https://",
+    ]) {
+      expect(() => decodeServerSettings({ guestSharePublicBaseUrl })).toThrow();
+      expect(() => decodeServerSettingsPatch({ guestSharePublicBaseUrl })).toThrow();
+    }
+  });
+
+  it("is null until an address is set, and null clears it", () => {
+    expect(DEFAULT_SERVER_SETTINGS.guestSharePublicBaseUrl).toBeNull();
+    expect(decodeServerSettings({}).guestSharePublicBaseUrl).toBeNull();
+    expect(decodeServerSettingsPatch({ guestSharePublicBaseUrl: null })).toEqual({
+      guestSharePublicBaseUrl: null,
+    });
+  });
+});
