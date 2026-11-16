@@ -2,18 +2,25 @@ export type SelectionActionPoint = { x: number; y: number };
 
 export const SELECTION_MULTI_CLICK_INTERVAL_MS = 500;
 const SELECTION_SCROLL_SETTLE_MS = 150;
+// Touch selections keep changing under browser-owned drag handles, so their actions
+// wait for the selection to settle before they appear.
+const SELECTION_TOUCH_SETTLE_MS = 300;
 
 export function resolveSelectionActionPosition(options: {
   bounds: { left: number; top: number; width: number; height: number };
   selectionRect: { right: number; bottom: number } | null;
   pointer: SelectionActionPoint | null;
   viewport: { width: number; height: number };
+  belowSelection?: boolean;
 }): SelectionActionPoint {
-  const { bounds, selectionRect, pointer, viewport } = options;
-  const preferred = pointer ?? {
+  const { bounds, selectionRect, pointer, viewport, belowSelection } = options;
+  const underSelection = {
     x: selectionRect?.right ?? bounds.left + bounds.width - 140,
     y: selectionRect ? selectionRect.bottom + 4 : bounds.top + 12,
   };
+  // Android floats its own Copy/Share menu above the selection, so a touch
+  // placement stays below the text instead of following the pointer.
+  const preferred = belowSelection ? underSelection : (pointer ?? underSelection);
   return {
     x: Math.max(
       8,
@@ -53,13 +60,14 @@ export function observeSelectionActions({
   element: HTMLElement;
   getActionElement?: () => HTMLElement | null;
   restoreAfterScroll?: boolean;
-  onSelection: (pointer: SelectionActionPoint | null) => void;
+  onSelection: (pointer: SelectionActionPoint | null, touch: boolean) => void;
   onDismiss: (reason: "interaction" | "cancel") => void;
 }) {
   const document = element.ownerDocument;
   const view = document.defaultView!;
   let pointerDown = false;
   let gestureActive = false;
+  let touchGesture = false;
   let dismissed = false;
   let restorable = false;
   let pointer: SelectionActionPoint | null = null;
@@ -76,7 +84,7 @@ export function observeSelectionActions({
   };
   const cancel = () => {
     cancelPending();
-    pointerDown = gestureActive = false;
+    pointerDown = gestureActive = touchGesture = false;
     pointer = null;
     dismissed = true;
     restorable = false;
@@ -86,17 +94,20 @@ export function observeSelectionActions({
     onDismiss("cancel");
   };
   const onContextMenu = () => {
+    // A touch long-press fires contextmenu while it selects text; that is not a
+    // menu request.
+    if (touchGesture) return;
     cancel();
     onDismiss("interaction");
   };
-  const schedule = (delay: number) => {
+  const schedule = (delay: number, touch: boolean) => {
     restorable = true;
     cancelPending();
     timer = view.setTimeout(() => {
       timer = null;
       frame = view.requestAnimationFrame(() => {
         frame = null;
-        onSelection(pointer);
+        onSelection(pointer, touch);
       });
     }, delay);
   };
@@ -107,6 +118,7 @@ export function observeSelectionActions({
       return;
     }
     cancelPending();
+    touchGesture = false;
     pointerDown = event.button === 0;
     const inside = element.contains(event.target as Node);
     gestureActive = false;
@@ -121,6 +133,8 @@ export function observeSelectionActions({
     const target = event.target as Element | null;
     if (target?.closest("button, [role=button]")) return;
     gestureActive = event.button === 0 && !event.defaultPrevented;
+    // Pens drive the same long-press selection UI as fingers.
+    touchGesture = gestureActive && (event.pointerType === "touch" || event.pointerType === "pen");
     dismissed = !gestureActive;
   };
   const onPointerUp = (event: PointerEvent) => {
@@ -132,8 +146,19 @@ export function observeSelectionActions({
     pointerDown = false;
     if (!gestureActive) return;
     gestureActive = false;
+    // A touch tap's compatibility mouseup must not speak for its gesture; touch
+    // selections settle through selectionchange.
+    if (touchGesture) return;
     pointer = { x: event.clientX, y: event.clientY };
-    schedule(event.detail >= 2 ? SELECTION_MULTI_CLICK_INTERVAL_MS : 0);
+    schedule(event.detail >= 2 ? SELECTION_MULTI_CLICK_INTERVAL_MS : 0, false);
+  };
+  const onPointerCancel = () => {
+    // Android ends a long-press with pointercancel once it owns the selection.
+    if (touchGesture) {
+      pointerDown = gestureActive = false;
+      return;
+    }
+    dismiss();
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (isActionTarget(event.target) && event.key !== "Escape") return;
@@ -155,7 +180,8 @@ export function observeSelectionActions({
     // Autoscroll during a drag must not cancel that gesture's eventual release.
     if (!pointerDown) {
       pointer = null;
-      if (restoreAfterScroll && !dismissed && restorable) schedule(SELECTION_SCROLL_SETTLE_MS);
+      if (restoreAfterScroll && !dismissed && restorable)
+        schedule(SELECTION_SCROLL_SETTLE_MS, touchGesture);
       else dismissed = true;
     }
     onDismiss("cancel");
@@ -165,7 +191,7 @@ export function observeSelectionActions({
   element.addEventListener("pointerdown", onSelectionStart);
   view.addEventListener("pointerup", onPointerUp);
   view.addEventListener("mouseup", onMouseUp);
-  view.addEventListener("pointercancel", dismiss);
+  view.addEventListener("pointercancel", onPointerCancel);
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("focusin", onFocusIn);
   element.addEventListener("contextmenu", onContextMenu, true);
@@ -180,10 +206,15 @@ export function observeSelectionActions({
     cancel,
     selectionChanged() {
       if (isActionTarget(document.activeElement)) return;
-      if (pointerDown || gestureActive) {
+      if (touchGesture) {
+        // Browser-owned handles keep changing a touch selection; hide the actions
+        // while they move and offer them once it settles.
+        onDismiss("cancel");
+        schedule(SELECTION_TOUCH_SETTLE_MS, true);
+      } else if (pointerDown || gestureActive) {
         onDismiss("cancel");
       } else if (!dismissed && timer === null && frame === null) {
-        schedule(0);
+        schedule(0, false);
       }
     },
     dispose() {
@@ -192,7 +223,7 @@ export function observeSelectionActions({
       element.removeEventListener("pointerdown", onSelectionStart);
       view.removeEventListener("pointerup", onPointerUp);
       view.removeEventListener("mouseup", onMouseUp);
-      view.removeEventListener("pointercancel", dismiss);
+      view.removeEventListener("pointercancel", onPointerCancel);
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("focusin", onFocusIn);
       element.removeEventListener("contextmenu", onContextMenu, true);
