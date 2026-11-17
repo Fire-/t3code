@@ -44,6 +44,7 @@ import {
 import type {
   EnvironmentId,
   MessageId,
+  OrchestrationV2UserWait,
   RuntimeRequestId,
   ScopedThreadRef,
   ServerConfig as T3ServerConfig,
@@ -239,6 +240,7 @@ export interface ThreadDetailScreenProps {
   readonly activityRun: ThreadFeedLatestRun | null;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive?: boolean;
+  readonly userWaits?: ReadonlyArray<OrchestrationV2UserWait>;
   readonly providerSubagentStatus?: ProviderSubagentStatus | null;
   readonly extensionStatuses?: NonNullable<OrchestrationV2ProviderSession["extensionStatuses"]>;
   readonly isCompacting: boolean;
@@ -1444,6 +1446,7 @@ function ThreadDetailBody(
                   latestRun={props.activityRun}
                   activeWorkStartedAt={props.activeWorkStartedAt}
                   runlessWorkActive={props.runlessWorkActive ?? false}
+                  userWaits={props.userWaits}
                   listRef={listRef}
                   freeze={freeze}
                   anchorMessageId={anchorMessageId}
