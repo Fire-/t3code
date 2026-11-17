@@ -3398,6 +3398,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       focusComposer={focusComposer}
     />
   ) : null;
+  // One mic serves the footer and the mobile pending-answer row, which hides the footer.
+  const speechButton =
+    speechInput.available && speechInput.state.phase === "idle" ? (
+      <ComposerSpeechButton
+        state={speechInput.state}
+        shortcutLabel={dictationShortcutLabel}
+        disabled={dictationDisabled}
+        onStart={() => void speechInput.start()}
+      />
+    ) : null;
   return (
     <form
       ref={composerFormRef}
@@ -3733,6 +3743,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     data-chat-composer-mobile-pending-actions="true"
                     className="absolute bottom-0 right-0 flex items-center justify-end gap-1"
                   >
+                    {speechButton}
                     <ComposerPrimaryActions
                       compact
                       canOperateThread={canOperateThread}
@@ -3862,12 +3873,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           onCancel={() => speechInput.cancel()}
                           onSkipPostProcessing={() => speechInput.skipPostProcessing()}
                         />
-                        <ComposerSpeechButton
-                          state={speechInput.state}
-                          shortcutLabel={dictationShortcutLabel}
-                          disabled={dictationDisabled}
-                          onStart={() => void speechInput.start()}
-                        />
+                        {speechButton}
                       </>
                     ) : null}
                     <VoiceInputSetup

@@ -662,3 +662,25 @@ it("selecting a side-chat tab focuses that side chat's composer", async () => {
   await expect.element(sideEditor).toHaveFocus();
   await expect.element(mainEditor).toHaveTextContent("main draft");
 });
+
+it("answering a pending question on a phone keeps the mic beside Submit", async () => {
+  await page.viewport(390, 844);
+  const asking = threadWithQuestion("thread-mobile-answer-mic", "Which file should change?", true);
+  using _environment = installFakeEnvironment([asking]);
+  __setClientSettingsForTests({
+    ...DEFAULT_CLIENT_SETTINGS,
+    onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${asking.id}`] }),
+  );
+  await router.load();
+  await using _app = await render(<AppRoot router={router} />, {
+    // AppRoot brings its own router.
+    router: false,
+  });
+  await expect.element(page.getByText("Which file should change?")).toBeVisible();
+  // Browser tests load no stylesheets, so the footer's CSS-hidden mic stays in the DOM.
+  const actions = document.querySelector("[data-chat-composer-mobile-pending-actions]");
+  expect(actions?.querySelectorAll('button[aria-label="Start voice input"]')).toHaveLength(1);
+});
