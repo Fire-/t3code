@@ -30,6 +30,30 @@ describe("review comment context parsing", () => {
       `\`\`\`\`ts\n${contents}\n\`\`\`\``,
     );
   });
+  it("carries a rendered-text quote on a file comment", () => {
+    const contents = "one\ntwo\nthree\n";
+    const comment = buildFileReviewComment({
+      id: "comment-quoted",
+      filePath: "notes.md",
+      startLine: 2,
+      endLine: 3,
+      text: "",
+      contents,
+      quote: { exact: "two three", prefix: "one ", suffix: " four" },
+    });
+    expect(comment.quote).toEqual({ exact: "two three", prefix: "one ", suffix: " four" });
+    expect(comment.diff).toBe("two\nthree");
+    const withoutQuote = buildFileReviewComment({
+      id: "comment-plain",
+      filePath: "notes.md",
+      startLine: 2,
+      endLine: 3,
+      text: "",
+      contents,
+    });
+    expect(withoutQuote.quote).toBeUndefined();
+  });
+
   it("formats mixed diff-side selections with the mobile review-comment contract", () => {
     const [fileDiff] = parsePatchFiles(
       [

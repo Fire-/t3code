@@ -259,6 +259,42 @@ describe("provider projection", () => {
     expect(project("a\n")).toContain("3 | a\n4 | \n</context>");
   });
 
+  it("includes a review comment's quoted rendered text when it has one", () => {
+    const quoted = {
+      version: 1,
+      contextId: ctx("ctx_r"),
+      kind: "review-comment",
+      label: "Comment",
+      sectionId: "file:src/app.ts",
+      sectionTitle: "File comment",
+      filePath: "src/app.ts",
+      startIndex: 1,
+      endIndex: 2,
+      rangeLabel: "L2 to L3",
+      text: "Insert here.",
+      diff: "two\nthree",
+      fenceLanguage: "ts",
+      quote: {
+        exact: "two three",
+        prefix: "one ",
+        suffix: " four",
+      },
+    } as const;
+    const projected = projectComposerContextForProvider({
+      text: "[Comment](t3-context://v1/review-comment/ctx_r)",
+      records: [quoted],
+    });
+    expect(projected).toContain(
+      "quote:\n  two three\ncomment:\n  Insert here.\nts:\n  two\n  three",
+    );
+    const { quote: _quote, ...quotedWithoutQuote } = quoted;
+    const withoutQuote = projectComposerContextForProvider({
+      text: "[Comment](t3-context://v1/review-comment/ctx_r)",
+      records: [quotedWithoutQuote],
+    });
+    expect(withoutQuote).not.toContain("quote:");
+  });
+
   it("keeps a review excerpt's trailing blank line and whitespace", () => {
     const projected = projectComposerContextForProvider({
       text: "[Comment](t3-context://v1/review-comment/ctx_r)",

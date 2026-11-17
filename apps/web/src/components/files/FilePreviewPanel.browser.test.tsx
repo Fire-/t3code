@@ -3,8 +3,9 @@ import { EnvironmentId, ThreadId, type ProjectReadFileResult } from "@t3tools/co
 import { AsyncResult } from "effect/reactivity";
 import { StrictMode, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { act, fakeTimers, render } from "../../../test/render";
+import { useComposerDraftStore } from "~/composerDraftStore";
 import appCss from "~/index.css?inline";
 import { isMacPlatform } from "~/lib/utils";
 import {
@@ -421,5 +422,176 @@ describe("rendered Markdown select all", () => {
     // A toggled checkbox keeps focus on an input inside the preview.
     await userEvent.click(screen.getByRole("checkbox"));
     await expectFileOnlySelection();
+  });
+});
+
+describe("rendered Markdown cite", () => {
+  const citeContents = [
+    "# Cite heading",
+    "",
+    "First paragraph with selectable text.",
+    "",
+    "- list one",
+    "- list two",
+  ].join("\n");
+
+  function citePreview() {
+    state.file = {
+      relativePath: "notes.md",
+      contents: citeContents,
+      byteLength: citeContents.length,
+      truncated: false,
+    };
+    return filePreview("notes.md");
+  }
+
+  /** The mouse gesture that ends a drag selection, as the selection toolbar observes it. */
+  function mouseSelect(target: Element, start: number, end: number) {
+    const rect = target.getBoundingClientRect();
+    target.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerType: "mouse",
+        isPrimary: true,
+        clientX: rect.left + 4,
+        clientY: rect.top + 4,
+      }),
+    );
+    selectRenderedText(target, start, end);
+    target.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        detail: 1,
+        clientX: rect.left + 4,
+        clientY: rect.top + 4,
+      }),
+    );
+  }
+
+  function selectRenderedText(target: Element, start: number, end: number) {
+    window.getSelection()?.setBaseAndExtent(target.firstChild!, start, target.firstChild!, end);
+    document.dispatchEvent(new Event("selectionchange"));
+  }
+
+  /** Android's long-press: contextmenu, then pointercancel, then the selection appears. */
+  function touchLongPress(target: Element) {
+    target.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", isPrimary: true }),
+    );
+    target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    target.dispatchEvent(
+      new PointerEvent("pointercancel", { bubbles: true, pointerType: "touch", isPrimary: true }),
+    );
+  }
+
+  function draftReviewComments() {
+    return useComposerDraftStore.getState().getComposerDraft(threadRef)?.reviewComments ?? [];
+  }
+
+  it("cites a mouse selection as a file comment with lines and quote", async () => {
+    using _settings = setup();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => mouseSelect(paragraph, 21, 36));
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    await act(() => (cite.element() as HTMLElement).click());
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({
+        filePath: "notes.md",
+        sectionId: "file:notes.md",
+        startIndex: 2,
+        endIndex: 2,
+        rangeLabel: "L3",
+        text: "",
+        diff: "First paragraph with selectable text.",
+        fenceLanguage: "md",
+        quote: {
+          exact: "selectable text",
+          prefix: "te heading First paragraph with ",
+          suffix: ". list one list two ",
+        },
+      }),
+    ]);
+    // The comment form opens where the Cite button was; an empty comment is allowed.
+    const form = page.getByRole("textbox", { name: "Comment on lines L3" });
+    await expect.element(form).toBeVisible();
+    await userEvent.click(form);
+    await userEvent.keyboard("Check this wording");
+    await act(() =>
+      (page.getByRole("button", { name: "Comment" }).element() as HTMLElement).click(),
+    );
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording" }),
+    ]);
+  });
+
+  it("offers a touch selection as the chip docked in the file surface", async () => {
+    using _settings = setup();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => {
+      touchLongPress(paragraph);
+      selectRenderedText(paragraph, 21, 36);
+    });
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    expect(chip.element().closest("[data-file-cite-dock]")).not.toBeNull();
+    await act(() => {
+      chip
+        .element()
+        .dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", isPrimary: true }),
+        );
+      chip.element().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    });
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({
+        startIndex: 2,
+        endIndex: 2,
+        quote: {
+          exact: "selectable text",
+          prefix: "te heading First paragraph with ",
+          suffix: ". list one list two ",
+        },
+      }),
+    ]);
+    // Cancel takes the comment back out of the draft.
+    await act(() =>
+      (page.getByRole("button", { name: "Cancel" }).element() as HTMLElement).click(),
+    );
+    expect(draftReviewComments()).toEqual([]);
+  });
+
+  it("cites a selection across blocks as the span from first to last line", async () => {
+    using _settings = setup();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const lastItem = screen.getByText("list two").element();
+    await act(() => {
+      window.getSelection()?.setBaseAndExtent(paragraph.firstChild!, 21, lastItem.firstChild!, 8);
+      document.dispatchEvent(new Event("selectionchange"));
+      paragraph.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, detail: 1 }));
+    });
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    await act(() => (cite.element() as HTMLElement).click());
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({
+        startIndex: 2,
+        endIndex: 5,
+        rangeLabel: "L3 to L6",
+        diff: ["First paragraph with selectable text.", "", "- list one", "- list two"].join("\n"),
+      }),
+    ]);
   });
 });

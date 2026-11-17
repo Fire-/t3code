@@ -3241,6 +3241,7 @@ export default function ChatView(props: ChatViewProps) {
       environmentId={activeThread.environmentId}
       visible={rightPanelOpen}
       composerDraftTarget={composerDraftTarget}
+      citeChipAnchor={shouldUsePlanSidebarSheet || rightPanelMaximized ? null : citeChipAnchor}
       keybindings={keybindings}
       configuredPreviewUrls={configuredPreviewUrls}
       workspaceMutationId={workspaceMutationId}

@@ -3,10 +3,13 @@ import {
   sourceControlClients,
 } from "@t3tools/client-runtime/source-control-clients";
 import {
+  ASSISTANT_CITATION_CONTEXT_LENGTH,
+  ASSISTANT_CITATION_MAX_TEXT_LENGTH,
   COMPOSER_CONTEXT_PREVIEW_COMMENT_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
   COMPOSER_CONTEXT_TERMINAL_TEXT_MAX_CHARS,
+  type ReviewCommentQuote,
 } from "@t3tools/contracts";
 import type {
   ComposerContextId,
@@ -269,7 +272,22 @@ export function reviewCommentContextRecord(
     text: clampContextText(comment.text, COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS),
     diff: clampContextText(comment.diff, COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS),
     ...(comment.fenceLanguage !== undefined ? { fenceLanguage: comment.fenceLanguage } : {}),
+    ...(comment.quote !== undefined ? { quote: clampReviewCommentQuote(comment.quote) } : {}),
     ...(comment.pullRequest !== undefined ? { pullRequest: comment.pullRequest } : {}),
+  };
+}
+
+/** The quote's wire bounds match an assistant citation's, so a quote always encodes. */
+function clampReviewCommentQuote(quote: ReviewCommentQuote): ReviewCommentQuote {
+  const context = (value: string) => {
+    const clipped = value.slice(0, ASSISTANT_CITATION_CONTEXT_LENGTH);
+    const last = clipped.charCodeAt(clipped.length - 1);
+    return last >= 0xd800 && last <= 0xdbff ? clipped.slice(0, -1) : clipped;
+  };
+  return {
+    exact: clampContextText(quote.exact, ASSISTANT_CITATION_MAX_TEXT_LENGTH),
+    prefix: context(quote.prefix),
+    suffix: context(quote.suffix),
   };
 }
 
@@ -496,6 +514,7 @@ export function reviewCommentFromRecord(record: ReviewCommentContextRecord): Rev
     text: record.text,
     diff: record.diff,
     ...(record.fenceLanguage !== undefined ? { fenceLanguage: record.fenceLanguage } : {}),
+    ...(record.quote !== undefined ? { quote: record.quote } : {}),
     ...(record.pullRequest !== undefined ? { pullRequest: record.pullRequest } : {}),
   };
 }

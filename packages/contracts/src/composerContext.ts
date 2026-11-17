@@ -1,6 +1,10 @@
 import * as Schema from "effect/Schema";
 
-import { AssistantCitation } from "./assistantCitations.ts";
+import {
+  ASSISTANT_CITATION_CONTEXT_LENGTH,
+  ASSISTANT_CITATION_MAX_TEXT_LENGTH,
+  AssistantCitation,
+} from "./assistantCitations.ts";
 import {
   EnvironmentId,
   ForwardCompatibleArray,
@@ -176,6 +180,20 @@ export const PreviewAnnotationContextRecord = Schema.Struct({
 });
 export type PreviewAnnotationContextRecord = typeof PreviewAnnotationContextRecord.Type;
 
+/**
+ * The exact text a selection quoted, as it read when rendered, with a little context around it.
+ * W3C TextQuoteSelector field names; the quote locates the lines, the lines locate the source.
+ */
+export const ReviewCommentQuote = Schema.Struct({
+  exact: Schema.String.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(ASSISTANT_CITATION_MAX_TEXT_LENGTH),
+  ),
+  prefix: Schema.String.check(Schema.isMaxLength(ASSISTANT_CITATION_CONTEXT_LENGTH)),
+  suffix: Schema.String.check(Schema.isMaxLength(ASSISTANT_CITATION_CONTEXT_LENGTH)),
+});
+export type ReviewCommentQuote = typeof ReviewCommentQuote.Type;
+
 export const ReviewCommentContextRecord = Schema.Struct({
   ...recordBase,
   kind: Schema.Literal("review-comment"),
@@ -188,6 +206,7 @@ export const ReviewCommentContextRecord = Schema.Struct({
   text: BoundedString(COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS),
   diff: BoundedString(COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS),
   fenceLanguage: Schema.optionalKey(BoundedString(64)),
+  quote: Schema.optionalKey(ReviewCommentQuote),
   pullRequest: Schema.optionalKey(PullRequestContextMetadata),
 }).check(Schema.makeFilter((record) => record.endIndex >= record.startIndex));
 export type ReviewCommentContextRecord = typeof ReviewCommentContextRecord.Type;

@@ -92,6 +92,7 @@ import type {
   Options as ReactMarkdownOptions,
 } from "react-markdown";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
+import { rehypeMarkdownSourceOffsets } from "./chat/markdownSourceOffsets";
 import type { Pluggable, PluggableList } from "unified";
 import { defaultUrlTransform } from "react-markdown";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
@@ -263,6 +264,8 @@ interface ChatMarkdownProps {
   /** The change request's repository, when it can differ from the checkout at `cwd`. */
   sourceControlMediaRepository?: string | undefined;
   headingLevelOffset?: number | undefined;
+  /** Tags block elements with their source offsets, so selections can cite file lines. */
+  sourceOffsets?: boolean | undefined;
 }
 
 export interface ChatMarkdownContextReference {
@@ -417,6 +420,20 @@ const CHAT_MARKDOWN_LITERAL_HTML_REHYPE_PLUGINS = [
   rehypeTextDirection,
   rehypeChipPunctuation,
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+
+// One combined list per base list, so offset-tagged text shares one renderer and its parse cache.
+const sourceOffsetsRehypeByBase = new WeakMap<PluggableList, PluggableList>();
+
+function withSourceOffsets(rehypePlugins: PluggableList): PluggableList {
+  let combined = sourceOffsetsRehypeByBase.get(rehypePlugins);
+  if (!combined) {
+    sourceOffsetsRehypeByBase.set(
+      rehypePlugins,
+      (combined = [...rehypePlugins, rehypeMarkdownSourceOffsets]),
+    );
+  }
+  return combined;
+}
 
 function markdownUrlTransform(href: string) {
   if (parseAssistantCitationHref(href)) return href;
@@ -1685,6 +1702,15 @@ const CHAT_MARKDOWN_COMPONENTS = {
     if (!codeBlock) {
       return <pre {...props}>{children}</pre>;
     }
+    // A code block replaces the <pre>, so its source offsets ride on a wrapper instead.
+    const dataProps = props as Record<string, unknown>;
+    const sourceOffsetProps =
+      dataProps["data-source-start"] !== undefined
+        ? {
+            "data-source-start": dataProps["data-source-start"],
+            "data-source-end": dataProps["data-source-end"],
+          }
+        : null;
 
     const language = extractFenceLanguage(codeBlock.className);
     if (
@@ -1736,7 +1762,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
         </MarkdownMermaidCodeBlock>
       );
     }
-    return (
+    const codeBlockElement = (
       <MarkdownCodeBlock
         code={codeBlock.code}
         language={language}
@@ -1751,6 +1777,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
       >
         {highlightedCode}
       </MarkdownCodeBlock>
+    );
+    return sourceOffsetProps ? (
+      <div {...sourceOffsetProps}>{codeBlockElement}</div>
+    ) : (
+      codeBlockElement
     );
   },
 } satisfies Components;
@@ -1837,6 +1868,7 @@ function ChatMarkdown({
   inline = false,
   lineBreaks = false,
   parseRawHtml = true,
+  sourceOffsets = false,
   extraRemarkPlugins = EMPTY_REMARK_PLUGINS,
   renderInsights = false,
   ...props
@@ -1904,9 +1936,15 @@ function ChatMarkdown({
             text={source}
             remarkPlugins={remarkPlugins}
             rehypePlugins={
-              parseRawHtml
-                ? CHAT_MARKDOWN_RENDER_REHYPE_PLUGINS
-                : CHAT_MARKDOWN_LITERAL_HTML_REHYPE_PLUGINS
+              sourceOffsets
+                ? withSourceOffsets(
+                    parseRawHtml
+                      ? CHAT_MARKDOWN_RENDER_REHYPE_PLUGINS
+                      : CHAT_MARKDOWN_LITERAL_HTML_REHYPE_PLUGINS,
+                  )
+                : parseRawHtml
+                  ? CHAT_MARKDOWN_RENDER_REHYPE_PLUGINS
+                  : CHAT_MARKDOWN_LITERAL_HTML_REHYPE_PLUGINS
             }
             shared={!uncachedPlugins}
             // Every block before the last is finished, so its parse can be reused.
