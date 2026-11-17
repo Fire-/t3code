@@ -1115,11 +1115,15 @@ function RenderedMarkdownSurface({
 }) {
   const saveTarget = { environmentId, cwd, relativePath };
   useFileSaveSession(saveTarget, onPendingChange);
+  const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
   const [markdownElement, setMarkdownElement] = useState<HTMLDivElement | null>(null);
   const [citeDockElement, setCiteDockElement] = useState<HTMLDivElement | null>(null);
+  // The ScrollArea's viewport is the element that scrolls, so the cite observer watches it.
+  const scrollViewport =
+    surfaceElement?.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]") ?? null;
 
   return (
-    <div className="relative flex min-h-0 flex-1">
+    <div ref={setSurfaceElement} className="relative flex min-h-0 flex-1 flex-col">
       <ScrollArea className="min-h-0 flex-1" onKeyDown={selectRenderedContentOnSelectAll}>
         <div ref={setMarkdownElement}>
           <FileMarkdownPreview
@@ -1155,9 +1159,10 @@ function RenderedMarkdownSurface({
       >
         <div ref={setCiteDockElement} />
       </div>
-      {markdownElement ? (
+      {markdownElement && scrollViewport ? (
         <FileMarkdownCite
-          viewport={markdownElement}
+          viewport={scrollViewport}
+          content={markdownElement}
           anchor={citeChipAnchor ?? citeDockElement}
           filePath={relativePath}
           sourceText={contents}

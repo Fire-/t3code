@@ -41,6 +41,8 @@ interface DiffCommentAnnotationProps {
   secondaryAction?: DiffCommentSecondaryAction;
   /** Lets the primary action submit with no text, for comments that are optional. */
   allowEmpty?: boolean;
+  /** Replaces where the Escape key goes when the form owns its undo, keeping the chip. */
+  onEscape?: () => void;
   focusOnMount?: boolean;
   /** Set only for pull request comments, where `@` completes the repository's users. */
   completionScope?: PullRequestCompletionScope | null;
@@ -62,6 +64,7 @@ export function DiffCommentAnnotation({
   pending = false,
   secondaryAction,
   allowEmpty = false,
+  onEscape,
   focusOnMount = true,
   completionScope = null,
 }: DiffCommentAnnotationProps) {
@@ -149,6 +152,7 @@ export function DiffCommentAnnotation({
           if (event.key === "Escape") {
             event.preventDefault();
             if (speech && speech.state.phase !== "idle") speech.cancel();
+            else if (onEscape) onEscape();
             else onCancel();
           }
           if (

@@ -569,6 +569,134 @@ describe("rendered Markdown cite", () => {
     expect(draftReviewComments()).toEqual([]);
   });
 
+  function openCitedForm(paragraph: Element, start = 21, end = 36) {
+    return act(async () => mouseSelect(paragraph, start, end)).then(async () => {
+      const cite = page.getByRole("button", { name: "Cite selection in composer" });
+      await expect.element(cite).toBeVisible();
+      await act(() => (cite.element() as HTMLElement).click());
+      const form = page.getByRole("textbox", { name: "Comment on lines L3" });
+      await expect.element(form).toBeVisible();
+      return form;
+    });
+  }
+
+  it("saves the typed comment and offers Cite again when new text is selected mid-form", async () => {
+    using _settings = setup();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const form = await openCitedForm(paragraph);
+    await userEvent.click(form);
+    await userEvent.keyboard("Check this wording");
+    // A new long-press on other text settles the open form: typed text saved, chip kept.
+    const lastItem = screen.getByText("list two").element();
+    await act(() => {
+      touchLongPress(lastItem);
+      selectRenderedText(lastItem, 0, 8);
+    });
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording", rangeLabel: "L3" }),
+    ]);
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    await act(() => {
+      chip
+        .element()
+        .dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", isPrimary: true }),
+        );
+      chip.element().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    });
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording", rangeLabel: "L3" }),
+      expect.objectContaining({ text: "", rangeLabel: "L6" }),
+    ]);
+  });
+
+  it("saves the typed comment and keeps the chip when a press lands outside the form", async () => {
+    using _settings = setup();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const form = await openCitedForm(paragraph);
+    await userEvent.click(form);
+    await userEvent.keyboard("Check this wording");
+    await userEvent.click(screen.getByText("Cite heading"));
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording" }),
+    ]);
+    await expect.element(form).not.toBeInTheDocument();
+  });
+
+  it("keeps the chip and drops unsaved text when the form closes on Escape", async () => {
+    using _settings = setup();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const form = await openCitedForm(paragraph);
+    await userEvent.click(form);
+    await userEvent.keyboard("Unsaved note");
+    await userEvent.keyboard("{Escape}");
+    expect(draftReviewComments()).toEqual([expect.objectContaining({ text: "" })]);
+    await expect.element(form).not.toBeInTheDocument();
+  });
+
+  it("dismisses the mouse popover when the preview scrolls and re-offers once it settles", async () => {
+    using _settings = setup();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => mouseSelect(paragraph, 21, 36));
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    // The breadcrumbs strip scrolls too; the preview's own viewport is the one that scrolls.
+    const scroller = screen.container
+      .querySelector("[data-file-cite-dock]")!
+      .parentElement!.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]")!;
+    await act(() => scroller.dispatchEvent(new Event("scroll")));
+    await expect.element(cite).not.toBeInTheDocument();
+    await vi.waitFor(() => expect.element(cite).toBeVisible());
+  });
+
+  it("keeps the rendered preview filling the panel and scrolling", async () => {
+    using _settings = setup();
+    // The layout assertions need the real stylesheet, not just class names.
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    state.file = {
+      relativePath: "notes.md",
+      contents: `${citeContents}\n\n${"Filler paragraph.\n\n".repeat(40)}`,
+      byteLength: 4_000,
+      truncated: false,
+    };
+    await using screen = await render(
+      <div style={{ height: 320, display: "flex", flexDirection: "column" }}>
+        {filePreview("notes.md")}
+      </div>,
+    );
+    const dock = screen.container.querySelector("[data-file-cite-dock]")!;
+    const surface = dock.parentElement!;
+    const scroller = surface.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]")!;
+    await vi.waitFor(() => expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight));
+    expect(surface.getBoundingClientRect().height).toBeGreaterThan(250);
+    expect(scroller.getBoundingClientRect().height).toBeCloseTo(
+      surface.getBoundingClientRect().height,
+      0,
+    );
+    scroller.scrollTop = 48;
+    expect(scroller.scrollTop).toBe(48);
+  });
+
   it("cites a selection across blocks as the span from first to last line", async () => {
     using _settings = setup();
     using _draft = {

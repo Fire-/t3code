@@ -36,12 +36,14 @@ type OpenComment = {
 };
 
 /**
- * Offers Cite over text selected in rendered file markdown. Citing lands a file comment chip
- * in the composer draft, carrying the source lines and the quoted rendered text; a comment can
- * be typed right away, and an empty comment is allowed.
+ * Offers Cite over text selected in rendered file markdown; citing lands a file comment chip
+ * in the composer draft, with the source lines and the quoted rendered text.
  */
 export function FileMarkdownCite(props: {
+  /** The scrolling viewport, observed for gestures and used as the visibility clip. */
   readonly viewport: HTMLElement | null;
+  /** The rendered markdown, the only text a selection can cite. */
+  readonly content: HTMLElement | null;
   /** Where the touch chip and its comment form dock: the composer dock, or the file surface. */
   readonly anchor: HTMLElement | null;
   readonly filePath: string;
@@ -52,6 +54,7 @@ export function FileMarkdownCite(props: {
 }) {
   const [offer, setOffer] = useState<CiteOffer | null>(null);
   const [comment, setComment] = useState<OpenComment | null>(null);
+  const [draftText, setDraftText] = useState("");
   const chipRef = useRef<HTMLButtonElement>(null);
   const popoverButtonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -71,16 +74,21 @@ export function FileMarkdownCite(props: {
     popover.style.top = `${Math.max(8, Math.min(position.y, window.innerHeight - rect.height - 8))}px`;
   });
 
+  // Saves the typed text on the chip and closes the form, so a cite in progress is never lost.
+  const settleComment = useStableCallback(() => {
+    if (comment === null) return;
+    addReviewComment(props.composerDraftTarget, { ...comment.comment, text: draftText.trim() });
+    setComment(null);
+  });
+
   const update = useStableCallback((pointer: SelectionActionPoint | null, touch: boolean) => {
     const viewport = props.viewport;
-    if (!viewport) return;
-    // One comment form at a time: a new selection while it is open only dismisses the offer.
-    if (comment !== null) {
-      setOffer(null);
-      return;
-    }
+    const content = props.content;
+    if (!viewport || !content) return;
+    // A new selection settles any open form first, then offers Cite for itself.
+    settleComment();
     const sourceText = props.sourceText;
-    const captured = captureFileCiteSelection(viewport, window.getSelection(), sourceText);
+    const captured = captureFileCiteSelection(content, window.getSelection(), sourceText);
     if (
       captured === null ||
       !isSelectionRectVisible(captured.range.getBoundingClientRect(), [
@@ -111,6 +119,19 @@ export function FileMarkdownCite(props: {
     () => formRef.current ?? chipRef.current ?? popoverButtonRef.current,
   );
 
+  // A press outside the open form settles it: typed text saved, chip kept, form closed.
+  const settleOnOutsidePress = useStableCallback((event: PointerEvent) => {
+    if (event.target instanceof Node && formRef.current?.contains(event.target)) return;
+    settleComment();
+  });
+  const commentOpen = comment !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds a document pointerdown listener for the open form, so a press outside settles it
+  useEffect(() => {
+    if (!commentOpen) return;
+    document.addEventListener("pointerdown", settleOnOutsidePress, true);
+    return () => document.removeEventListener("pointerdown", settleOnOutsidePress, true);
+  }, [commentOpen, settleOnOutsidePress]);
+
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to document selectionchange and pointer gestures to track text selections in the preview
   useEffect(() => {
     const viewport = props.viewport;
@@ -131,7 +152,7 @@ export function FileMarkdownCite(props: {
     };
   }, [getActionElement, props.viewport, update]);
 
-  if (!props.viewport) return null;
+  if (!props.viewport || !props.content) return null;
 
   const cite = (open: CiteOffer) => {
     const next = buildFileReviewComment({
@@ -147,6 +168,7 @@ export function FileMarkdownCite(props: {
     window.getSelection()?.removeAllRanges();
     actionsRef.current?.cancel();
     setOffer(null);
+    setDraftText("");
     setComment({ comment: next, position: open.position });
     return true;
   };
@@ -156,6 +178,9 @@ export function FileMarkdownCite(props: {
     addReviewComment(props.composerDraftTarget, { ...comment.comment, text });
     setComment(null);
   };
+
+  // Escape keeps the chip and drops the typed text, unlike a press elsewhere, which saves it.
+  const escapeComment = () => setComment(null);
 
   const cancelComment = () => {
     if (!comment) return;
@@ -175,8 +200,10 @@ export function FileMarkdownCite(props: {
           comment.comment.startIndex + 1,
           comment.comment.endIndex + 1,
         )}
-        text=""
+        text={draftText}
+        onTextChange={setDraftText}
         onComment={finishComment}
+        onEscape={escapeComment}
         onCancel={cancelComment}
       />
     );
