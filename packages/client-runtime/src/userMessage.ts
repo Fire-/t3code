@@ -29,6 +29,62 @@ export const IDLE_COMPACTION_TITLES = {
   onReturn: "Context compacted before sending",
 } satisfies Record<OrchestrationV2IdleCompaction, string>;
 
+export type SteerMarkerState = "delivered" | "waiting" | "undelivered";
+
+export interface SteerMarker {
+  readonly label: "Steer" | "Steer · waiting to be read" | "Not delivered";
+  readonly state: SteerMarkerState;
+  readonly description: string;
+}
+
+/**
+ * `pending` is a steer the provider queued, which the agent reads at a step boundary.
+ * `undelivered` is one the provider dropped before the agent read it, usually on Stop.
+ */
+export function resolveSteerMarker(message: {
+  readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
+  readonly pending?: boolean | undefined;
+  readonly undelivered?: boolean | undefined;
+}): SteerMarker | null {
+  if (message.inputIntent !== "steer" && message.inputIntent !== "promoted_queued_to_steer") {
+    return null;
+  }
+  if (message.undelivered === true) {
+    return {
+      label: "Not delivered",
+      state: "undelivered",
+      description: "The agent never received this message",
+    };
+  }
+  if (message.pending === true) {
+    return {
+      label: "Steer · waiting to be read",
+      state: "waiting",
+      description:
+        "Waiting for the agent to read this. It reads steers between steps, after a running command finishes.",
+    };
+  }
+  return {
+    label: "Steer",
+    state: "delivered",
+    description:
+      message.inputIntent === "promoted_queued_to_steer"
+        ? "Originally queued, then promoted to steer the active turn"
+        : "Steered the active turn",
+  };
+}
+
+/** A steer whose state differs from the one above it needs its own label, or it reads as that one. */
+export function continuesSteerMarker(
+  message: Parameters<typeof resolveSteerMarker>[0] | undefined,
+  previous: Parameters<typeof resolveSteerMarker>[0] | undefined,
+): boolean {
+  if (message === undefined || previous === undefined) return false;
+  const current = resolveSteerMarker(message);
+  const before = resolveSteerMarker(previous);
+  return current !== null && before !== null && current.state === before.state;
+}
+
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
 const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
 
@@ -119,6 +175,7 @@ export function resolveUserMessagePresentation(message: {
 
 type GroupableUserMessage = Parameters<typeof resolveUserMessagePresentation>[0] & {
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
+  readonly undelivered?: boolean | undefined;
 };
 
 export function resolveUserMessageGrouping(
@@ -128,12 +185,10 @@ export function resolveUserMessageGrouping(
 ) {
   const isOwnMessage = (value: GroupableUserMessage | undefined) =>
     value?.role === "user" && resolveUserMessagePresentation(value).attribution === null;
-  const isSteer = (value: GroupableUserMessage | undefined) =>
-    value?.inputIntent === "steer" || value?.inputIntent === "promoted_queued_to_steer";
   const groupedWithPrevious = isOwnMessage(message) && isOwnMessage(previous);
   return {
     groupedWithPrevious,
     groupedWithNext: isOwnMessage(message) && isOwnMessage(next),
-    continuesSteer: groupedWithPrevious && isSteer(message) && isSteer(previous),
+    continuesSteer: groupedWithPrevious && continuesSteerMarker(message, previous),
   };
 }
