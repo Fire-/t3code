@@ -216,6 +216,7 @@ export const make = Effect.gen(function* () {
           arch: hostArchitecture,
           t3CodeVersion: packageJson.version,
           telemetryChannel: ServerConfig.telemetryChannel,
+          fork: "fire-/t3code",
           clientType,
           serverOs: serverOsFromNodePlatform(hostPlatform),
           serverArch: hostArchitecture,
