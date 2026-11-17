@@ -246,6 +246,7 @@ it.effect(
           getMessageCount: () => Effect.die("unused message count"),
           getTranscriptByteFloor: () => Effect.die("unused transcript byte floor"),
           hasPendingDelegatedCompletion: () => Effect.die("unused hasPendingDelegatedCompletion"),
+          getLatestUserMessageAt: () => Effect.die("unused getLatestUserMessageAt"),
           getSubagentCount: () => Effect.die("unused subagent count"),
           getRunCount: () => Effect.die("unused run count"),
           listAppOwnedChildThreadIds: () => Effect.die("unused listAppOwnedChildThreadIds"),
