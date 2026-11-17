@@ -1,9 +1,35 @@
 import { useState } from "react";
 import { observeResize } from "../../lib/observeResize";
 
+/**
+ * The mobile collapsed composer display: none's the body, so the editor has no layout to
+ * measure a range in. The width it would wrap at is still known from the body's laid-out
+ * parent, and the editor's own text and font say whether it fits that width.
+ */
+function hiddenEditorTextWraps(editor: HTMLElement, body: HTMLElement): boolean | null {
+  const host = body.parentElement;
+  if (host === null || host.clientWidth === 0) return null;
+  const text = editor.textContent;
+  if (text === null || text.trim().length === 0) return false;
+  const hostStyle = getComputedStyle(host);
+  const bodyStyle = getComputedStyle(body);
+  const lineWidth =
+    host.clientWidth -
+    Number.parseFloat(hostStyle.paddingLeft) -
+    Number.parseFloat(hostStyle.paddingRight) -
+    Number.parseFloat(bodyStyle.paddingLeft) -
+    Number.parseFloat(bodyStyle.paddingRight);
+  const editorStyle = getComputedStyle(editor);
+  const context = document.createElement("canvas").getContext("2d");
+  if (context === null) return null;
+  context.font = `${editorStyle.fontStyle} ${editorStyle.fontWeight} ${editorStyle.fontSize} ${editorStyle.fontFamily}`;
+  return context.measureText(text).width > lineWidth + 1;
+}
+
 function measureComposerMultilinePrompt(body: HTMLElement): boolean | null {
   const editor = body.querySelector<HTMLElement>('[data-testid="composer-editor"]');
-  if (!editor || editor.clientWidth === 0) return null;
+  if (!editor) return null;
+  if (editor.clientWidth === 0) return hiddenEditorTextWraps(editor, body);
 
   const bodyStyle = getComputedStyle(body);
   const expandedWidth =
