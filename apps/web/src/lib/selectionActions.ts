@@ -176,6 +176,13 @@ export function observeSelectionActions({
       dismissed = false;
     }
   };
+  const onResize = () => {
+    // Android resizes the page as its keyboard opens or closes, so a long-press that
+    // blurs a text field resizes it mid-gesture. A touch offer does not sit at the
+    // selection, so the resize leaves nothing stale.
+    if (touchGesture || touchOffer) return;
+    dismiss();
+  };
   const onFocusIn = (event: FocusEvent) => {
     if (isActionTarget(event.target)) cancel();
     else if (!pointerDown && getActionElement?.()) dismiss();
@@ -203,7 +210,7 @@ export function observeSelectionActions({
   element.addEventListener("contextmenu", onContextMenu, true);
   element.addEventListener("scroll", onScroll, true);
   view.addEventListener("blur", dismiss);
-  view.addEventListener("resize", dismiss);
+  view.addEventListener("resize", onResize);
 
   return {
     get pending() {
@@ -235,7 +242,7 @@ export function observeSelectionActions({
       element.removeEventListener("contextmenu", onContextMenu, true);
       element.removeEventListener("scroll", onScroll, true);
       view.removeEventListener("blur", dismiss);
-      view.removeEventListener("resize", dismiss);
+      view.removeEventListener("resize", onResize);
     },
   };
 }

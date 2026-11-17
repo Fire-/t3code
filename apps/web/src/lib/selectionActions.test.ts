@@ -86,6 +86,7 @@ function selectionActionsFixture() {
       fire("view", event);
     },
     documentEvent: (event: Record<string, unknown> & { type: string }) => fire("document", event),
+    viewEvent: (event: Record<string, unknown> & { type: string }) => fire("view", event),
     runScheduledFrames: () => {
       for (const [id, callback] of Array.from(frames)) {
         frames.delete(id);
@@ -205,6 +206,43 @@ describe("observeSelectionActions", () => {
     });
     expect(fixture.onDismiss.mock.calls.length).toBe(dismissals);
     expect(fixture.onSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a touch long-press that closes the keyboard mid-gesture", () => {
+    using fixture = selectionActionsFixture();
+    // A long-press that blurs a focused text field closes Android's keyboard, and
+    // the page resizes with it while the selection forms and settles.
+    fixture.elementEvent({ type: "pointerdown", pointerType: "touch" });
+    fixture.elementEvent({ type: "contextmenu" });
+    fixture.viewEvent({ type: "resize" });
+    fixture.elementEvent({ type: "pointercancel", pointerType: "touch" });
+    fixture.actions.selectionChanged();
+    fixture.viewEvent({ type: "resize" });
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledWith(null, true);
+  });
+
+  it("keeps a touch offer through a resize", () => {
+    using fixture = selectionActionsFixture();
+    touchLongPress(fixture);
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledTimes(1);
+    const dismissals = fixture.onDismiss.mock.calls.length;
+    fixture.viewEvent({ type: "resize" });
+    expect(fixture.onDismiss.mock.calls.length).toBe(dismissals);
+  });
+
+  it("still dismisses a mouse offer on resize", () => {
+    using fixture = selectionActionsFixture();
+    fixture.elementEvent({ type: "pointerdown", pointerType: "mouse" });
+    fixture.elementEvent({ type: "mouseup", detail: 1, clientX: 30, clientY: 20 });
+    vi.advanceTimersByTime(1000);
+    fixture.runScheduledFrames();
+    expect(fixture.onSelection).toHaveBeenCalledTimes(1);
+    fixture.viewEvent({ type: "resize" });
+    expect(fixture.onDismiss).toHaveBeenLastCalledWith("cancel");
   });
 
   it("still dismisses contextmenu for mouse gestures", () => {
