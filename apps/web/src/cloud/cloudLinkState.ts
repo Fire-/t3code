@@ -28,6 +28,16 @@ const EMPTY_CLOUD_LINK_STATE_ATOM = Atom.make(
   AsyncResult.success<EnvironmentCloudLinkStateResult | null>(null),
 ).pipe(Atom.keepAlive, Atom.withLabel("cloud-link:null"));
 
+/**
+ * The environment's T3 Connect link state for plain atoms, or null while it loads or cannot be
+ * read. Reads the same SWR cache the hook does, so an extra reader adds no requests of its own.
+ */
+export const cloudLinkStateValueAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) =>
+    AsyncResult.getOrElse(get(cloudLinkStateAtom(environmentId)), () => null),
+  ).pipe(Atom.withLabel(`cloud-link-value:${environmentId}`)),
+);
+
 function refreshCloudLinkState(target: CloudLinkTarget | null): void {
   if (target && readEnvironmentScope(target.environmentId, AuthRelayReadScope)) {
     appAtomRegistry.refresh(cloudLinkStateAtom(target.environmentId));

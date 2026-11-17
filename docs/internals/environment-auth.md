@@ -36,8 +36,10 @@ so nothing secret is stored. The share in the thread projection is the only
 state: replacing, closing, or archiving it revokes every token, and the
 orchestrator's serial commands make redeeming and sending happen once. Guest
 tokens never enter `SessionStore`, so no RPC, WebSocket, or MCP path can accept
-one. Guest routes also require T3 Connect to still serve the link's hostname;
-the request's Host header is not checked, because a LAN client can forge it.
+one. Guest routes also require the host the link points at to still be the one
+guest links arrive on — the configured public link address, or the T3 Connect
+tunnel the share was created under; the request's Host header is not checked,
+because a LAN client can forge it.
 
 ### MCP clients are a separate audience
 
