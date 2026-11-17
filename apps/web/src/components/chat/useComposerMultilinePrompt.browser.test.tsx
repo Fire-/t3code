@@ -38,3 +38,13 @@ it("notices wrapping text that lands while the body is display: none", async () 
   await screen.rerender(<Composer text="short again" collapsed />);
   await expect.element(screen.getByText("single line")).toBeVisible();
 });
+
+it("does not count trailing spaces as wrapping while the body is display: none", async () => {
+  await using screen = await render(
+    <Composer text={"a long prompt that wraps ".repeat(6)} collapsed />,
+    { router: false },
+  );
+  await expect.element(screen.getByText("multiline")).toBeVisible();
+  await screen.rerender(<Composer text={`short${" ".repeat(120)}`} collapsed />);
+  await expect.element(screen.getByText("single line")).toBeVisible();
+});

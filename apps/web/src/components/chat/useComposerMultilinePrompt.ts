@@ -9,8 +9,10 @@ import { observeResize } from "../../lib/observeResize";
 function hiddenEditorTextWraps(editor: HTMLElement, body: HTMLElement): boolean | null {
   const host = body.parentElement;
   if (host === null || host.clientWidth === 0) return null;
-  const text = editor.textContent;
-  if (text === null || text.trim().length === 0) return false;
+  // Trailing spaces hang past the line end instead of wrapping; counting them could expand the
+  // composer only for the visible measurement to collapse it again.
+  const text = (editor.textContent ?? "").trimEnd();
+  if (text.length === 0) return false;
   const hostStyle = getComputedStyle(host);
   const bodyStyle = getComputedStyle(body);
   const lineWidth =
