@@ -1566,7 +1566,7 @@ export const make = Effect.gen(function* () {
               reader = newReader();
               decoder = new TextDecoder();
               recordStarted = false;
-              return records.length <= MAX_IMPORT_RECORDS;
+              return retained.length <= MAX_IMPORT_RECORDS;
             };
 
             while (bytesRead < readBytes) {
