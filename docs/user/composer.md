@@ -333,6 +333,13 @@ its brief details. Select a terminal excerpt to open its captured output, or sel
 comment, picked element, or preview annotation to open its full details. Chips read as "Terminal
 excerpt, Terminal 1 lines 3-4" and similar to screen readers.
 
+Comment on a file from its preview. In the code view, select lines and write the comment
+beside them. In the rendered markdown view, select text and choose **Cite**; with touch, the
+Cite button docks at the bottom of the preview instead of sitting on the selection. Both put a
+file comment chip in your message that carries the file, its lines, and the quoted text, and
+you can add a short comment right after citing. An empty comment is fine when the quote says
+it all.
+
 A pull request appears as its icon and number. Its color reflects whether it was open, draft,
 merged, or closed when it was attached. Select it to inspect the captured title and branches,
 then choose **Open pull request** to visit the pull request. On web and desktop, type `#` to browse the newest

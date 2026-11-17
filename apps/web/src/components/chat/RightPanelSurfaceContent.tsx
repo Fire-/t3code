@@ -68,6 +68,8 @@ export function RightPanelSurfaceContent(props: {
   readonly environmentId: EnvironmentId;
   readonly visible: boolean;
   readonly composerDraftTarget: ScopedThreadRef | DraftId;
+  /** The composer's touch dock, when it is visible beside the panel. */
+  readonly citeChipAnchor: HTMLElement | null;
   readonly keybindings: ResolvedKeybindingsConfig;
   readonly configuredPreviewUrls: ReadonlyArray<string>;
   readonly workspaceMutationId: string | null;
@@ -254,6 +256,7 @@ export function RightPanelSurfaceContent(props: {
             projectId={files.projectId}
             threadRef={threadRef}
             composerDraftTarget={props.composerDraftTarget}
+            citeChipAnchor={props.citeChipAnchor}
             keybindings={props.keybindings}
             availableEditors={files.availableEditors}
             openInShortcutEnabled={visible}

@@ -1,4 +1,5 @@
 import { ChevronDownIcon, PaperclipIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { Button } from "../ui/button";
 
@@ -20,19 +21,28 @@ export function WorkspaceFileDropOverlay() {
 }
 
 /**
- * Sits `bottom` pixels up, clear of the composer and its attached banners. The summary names
- * what waits at the end of the timeline, which is out of view while it shows.
+ * Floats controls `bottom` pixels up, clear of the composer and its attached banners, and
+ * stacks them: the first child sits closest to the composer. The touch Cite chip and the
+ * scroll-to-end button both live here, so they never cover each other.
  */
+export function ComposerDock(props: { readonly bottom: number; readonly children: ReactNode }) {
+  return (
+    <div
+      className="chat-composer-dock pointer-events-none absolute z-30 flex flex-col-reverse items-center"
+      style={{ bottom: props.bottom }}
+    >
+      {props.children}
+    </div>
+  );
+}
+
+/** The summary names what waits at the end of the timeline, which is out of view while it shows. */
 export function ScrollToEndButton(props: {
-  readonly bottom: number;
   readonly summary: string | null;
   readonly onScrollToEnd: () => void;
 }) {
   return (
-    <div
-      className="chat-scroll-to-bottom pointer-events-none absolute z-30 flex justify-center py-1.5"
-      style={{ bottom: props.bottom }}
-    >
+    <div className="pointer-events-none flex w-full justify-center py-1.5">
       <Button
         data-scroll-to-end="true"
         onPointerDown={(event) => event.preventDefault()}

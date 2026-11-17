@@ -209,21 +209,22 @@ function selectedTextBoundary(range: Range, node: Node, last: boolean): Text | n
   return null;
 }
 
-export function captureAssistantTextSelection(
-  viewport: HTMLElement,
+/**
+ * The selected rendered text of `source` as a quote selector, with the range clamped to the
+ * text actually selected. Selections can end at the next block's offset 0 or a parent
+ * boundary, so the boundaries are validated against the selected text, not that empty
+ * endpoint. An endpoint inside a formula's glyphs takes in the whole formula.
+ */
+export function captureRenderedTextSelection(
+  source: HTMLElement,
   selection: Selection | null,
-): { source: HTMLElement; selector: AssistantTextSelector; range: Range } | null {
+): { selector: AssistantTextSelector; range: Range } | null {
   if (selection === null || selection.isCollapsed || selection.rangeCount !== 1) return null;
   const range = selection.getRangeAt(0).cloneRange();
   const first = selectedTextBoundary(range, range.commonAncestorContainer, false);
   const last = selectedTextBoundary(range, range.commonAncestorContainer, true);
   if (first === null || last === null) return null;
-  const source = first.parentElement?.closest<HTMLElement>("[data-assistant-citation-source]");
-  if (!source || !viewport.contains(source)) return null;
 
-  // Paragraph selection can end at the next block's offset 0 or a parent
-  // boundary. Validate the text actually selected, not that empty endpoint.
-  // An endpoint inside a formula's glyphs takes in the whole formula.
   const startFormula = mathWrapperOf(first.parentElement);
   const endFormula = mathWrapperOf(last.parentElement);
   if (startFormula) range.setStartBefore(startFormula);
@@ -245,7 +246,21 @@ export function captureAssistantTextSelection(
   }
   if (rawStart === null) return null;
   const selector = createAssistantTextSelector(stream.text, rawStart, rawEnd);
-  return selector === null ? null : { source, selector, range };
+  return selector === null ? null : { selector, range };
+}
+
+export function captureAssistantTextSelection(
+  viewport: HTMLElement,
+  selection: Selection | null,
+): { source: HTMLElement; selector: AssistantTextSelector; range: Range } | null {
+  if (selection === null || selection.isCollapsed || selection.rangeCount !== 1) return null;
+  const probe = selection.getRangeAt(0);
+  const first = selectedTextBoundary(probe, probe.commonAncestorContainer, false);
+  if (first === null) return null;
+  const source = first.parentElement?.closest<HTMLElement>("[data-assistant-citation-source]");
+  if (!source || !viewport.contains(source)) return null;
+  const captured = captureRenderedTextSelection(source, selection);
+  return captured === null ? null : { source, ...captured };
 }
 
 /** How much of a response a reply carries: enough to recognise it, not to resend it. */

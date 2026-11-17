@@ -1,5 +1,9 @@
 import type { FileDiffMetadata, SelectedLineRange, SelectionSide } from "@pierre/diffs";
-import { PullRequestContextMetadata, type PullRequestReviewPosition } from "@t3tools/contracts";
+import {
+  PullRequestContextMetadata,
+  type PullRequestReviewPosition,
+  type ReviewCommentQuote,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 import { isLineInFileDiff } from "./components/pullRequest/pullRequestDiff.logic";
@@ -12,6 +16,12 @@ const ReviewCommentSelectionSchema = Schema.Struct({
 });
 type ReviewCommentSelection = typeof ReviewCommentSelectionSchema.Type;
 
+const ReviewCommentQuoteSchema = Schema.Struct({
+  exact: Schema.String,
+  prefix: Schema.String,
+  suffix: Schema.String,
+});
+
 export const ReviewCommentContextSchema = Schema.Struct({
   id: Schema.String,
   sectionId: Schema.String,
@@ -23,6 +33,7 @@ export const ReviewCommentContextSchema = Schema.Struct({
   text: Schema.String,
   diff: Schema.String,
   fenceLanguage: Schema.optional(Schema.String),
+  quote: Schema.optional(ReviewCommentQuoteSchema),
   selection: Schema.optional(ReviewCommentSelectionSchema),
   pullRequest: Schema.optional(PullRequestContextMetadata),
 });
@@ -38,6 +49,7 @@ export interface ReviewCommentContext {
   readonly text: string;
   readonly diff: string;
   readonly fenceLanguage?: string | undefined;
+  readonly quote?: ReviewCommentQuote | undefined;
   readonly selection?: ReviewCommentSelection | undefined;
   readonly pullRequest?: PullRequestContextMetadata | undefined;
 }
@@ -65,6 +77,7 @@ export function buildFileReviewComment(input: {
   endLine: number;
   text: string;
   contents: string;
+  quote?: ReviewCommentQuote | undefined;
 }): ReviewCommentContext {
   const startLine = Math.max(1, Math.min(input.startLine, input.endLine));
   const endLine = Math.max(startLine, Math.max(input.startLine, input.endLine));
@@ -80,6 +93,7 @@ export function buildFileReviewComment(input: {
     text: input.text.trim(),
     diff: selectedLines.join("\n"),
     fenceLanguage: inferReviewCommentFenceLanguage(input.filePath),
+    ...(input.quote !== undefined ? { quote: input.quote } : {}),
   };
 }
 

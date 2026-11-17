@@ -895,3 +895,57 @@ describe("ChatMarkdown host media", () => {
     expect(screen.container.textContent).not.toContain("Retry video");
   });
 });
+
+describe("ChatMarkdown source offsets", () => {
+  const text = [
+    "# Title",
+    "",
+    "First paragraph.",
+    "",
+    "- one",
+    "- two",
+    "",
+    "```ts",
+    "const a = 1;",
+    "```",
+    "",
+    "| a | b |",
+    "| - | - |",
+    "| 1 | 2 |",
+  ].join("\n");
+  const offsetOf = (lineNumber: number) => {
+    const lines = text.split("\n");
+    return lines.slice(0, lineNumber - 1).reduce((length, line) => length + line.length + 1, 0);
+  };
+
+  it("tags blocks with their source offsets when asked", async () => {
+    setup();
+    await using screen = await renderText(text, { sourceOffsets: true });
+    const heading = screen.getByText("Title").element().closest("h1")!;
+    expect(heading.dataset.sourceStart).toBe(String(offsetOf(1)));
+    expect(heading.dataset.sourceEnd).toBe(String(offsetOf(1) + "# Title".length));
+    const paragraph = screen.getByText("First paragraph.").element().closest("p")!;
+    expect(paragraph.dataset.sourceStart).toBe(String(text.indexOf("First paragraph.")));
+    const items = [...screen.container.querySelectorAll("li")];
+    expect(items.map((item) => item.dataset.sourceStart)).toEqual([
+      String(text.indexOf("- one")),
+      String(text.indexOf("- two")),
+    ]);
+    const codeBlock = screen.container.querySelector("[data-language=ts]")!.parentElement!;
+    expect(codeBlock.dataset.sourceStart).toBe(String(text.indexOf("```ts")));
+    // The mdast code node ends at the closing fence, before its line break.
+    const closingFence = text.indexOf("```", text.indexOf("```ts") + "```ts".length);
+    expect(codeBlock.dataset.sourceEnd).toBe(String(closingFence + "```".length));
+    const cell = screen.getByText("2").element().closest("td")!;
+    // A GFM cell token spans from its leading pipe to the next one.
+    const rowStart = text.indexOf("| 1 | 2 |");
+    expect(cell.dataset.sourceStart).toBe(String(rowStart + 4));
+    expect(cell.dataset.sourceEnd).toBe(String(rowStart + 9));
+  });
+
+  it("leaves chat markup unchanged by default", async () => {
+    setup();
+    await using screen = await renderText(text);
+    expect(screen.container.querySelector("[data-source-start]")).toBeNull();
+  });
+});

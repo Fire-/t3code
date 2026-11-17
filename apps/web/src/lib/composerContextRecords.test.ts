@@ -1,4 +1,6 @@
 import {
+  ASSISTANT_CITATION_CONTEXT_LENGTH,
+  ASSISTANT_CITATION_MAX_TEXT_LENGTH,
   type ComposerContextId,
   EnvironmentId,
   MessageId,
@@ -27,6 +29,7 @@ import {
   resolveUserMessageContext,
   responseContextRecord,
   reviewCommentContextLabel,
+  reviewCommentFromRecord,
   selectedMessageContextFragment,
   reviewCommentContextRecord,
   terminalContextRecord,
@@ -328,6 +331,51 @@ describe("composerContextRecords", () => {
     expect(decodeMessageContext({ version: 1, records: [terminal] }).records).toMatchObject([
       { kind: "terminal", text: terminal.text },
     ]);
+  });
+
+  it("carries a review comment's quote between draft and record", () => {
+    const comment = {
+      id: "rc-quote",
+      sectionId: "file:notes.md",
+      sectionTitle: "File comment",
+      filePath: "notes.md",
+      startIndex: 1,
+      endIndex: 2,
+      rangeLabel: "L2 to L3",
+      text: "",
+      diff: "two\nthree",
+      fenceLanguage: "md",
+      quote: { exact: "two three", prefix: "one ", suffix: " four" },
+    } as const;
+    const record = reviewCommentContextRecord(comment);
+    expect(record.quote).toEqual({ exact: "two three", prefix: "one ", suffix: " four" });
+    expect(reviewCommentFromRecord(record)).toEqual({ ...comment, fenceLanguage: "md" });
+    const { quote: _quote, ...recordWithoutQuote } = record;
+    expect(reviewCommentFromRecord(recordWithoutQuote).quote).toBeUndefined();
+  });
+
+  it("clamps a review comment quote to the wire bounds", () => {
+    const record = reviewCommentContextRecord({
+      id: "rc-quote-big",
+      sectionId: "file:notes.md",
+      sectionTitle: "File comment",
+      filePath: "notes.md",
+      startIndex: 0,
+      endIndex: 0,
+      rangeLabel: "L1",
+      text: "",
+      diff: "",
+      quote: {
+        exact: `x${"y".repeat(ASSISTANT_CITATION_MAX_TEXT_LENGTH)}`,
+        prefix: "p".repeat(64),
+        suffix: "s".repeat(64),
+      },
+    });
+    expect(record.quote?.exact.endsWith("… truncated …")).toBe(true);
+    expect(record.quote?.exact.length).toBeLessThanOrEqual(ASSISTANT_CITATION_MAX_TEXT_LENGTH);
+    expect(record.quote?.prefix).toHaveLength(ASSISTANT_CITATION_CONTEXT_LENGTH);
+    expect(record.quote?.suffix).toHaveLength(ASSISTANT_CITATION_CONTEXT_LENGTH);
+    expect(() => decodeMessageContext({ version: 1, records: [record] })).not.toThrow();
   });
 
   it("finds the destination collision for different legacy terminal messages", () => {
