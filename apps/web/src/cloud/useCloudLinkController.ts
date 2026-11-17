@@ -14,6 +14,7 @@ import { useState } from "react";
 import { toastManager } from "../components/ui/toast";
 import { stackedThreadToast } from "../components/ui/toastHelpers";
 import { relayFailureReason } from "./relayFailureReason";
+import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { relayEnvironmentDiscovery } from "../state/relay";
 import { readEnvironmentScope } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -83,7 +84,9 @@ export function useCloudLinkController(environmentId: EnvironmentId | null) {
           ? {
               actionProps: {
                 children: "Copy trace ID",
-                onClick: () => void navigator.clipboard?.writeText(traceId),
+                onClick: () => {
+                  void writeTextToClipboard(traceId, "trace ID").catch(() => undefined);
+                },
               },
               actionVariant: "outline",
             }
