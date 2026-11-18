@@ -16,7 +16,8 @@ import {
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import { imageMimeType } from "@t3tools/shared/image";
 import { videoMimeType } from "@t3tools/shared/video";
-import { msg } from "gt-i18n";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 /** The working row while T3 Code's own compaction runs. */
 export const IDLE_COMPACTING_LABELS = {
@@ -29,6 +30,68 @@ export const IDLE_COMPACTION_TITLES = {
   beforeCacheExpires: msg("Auto-compacted before cache expiry"),
   onReturn: msg("Context compacted before sending"),
 } satisfies Record<OrchestrationV2IdleCompaction, string>;
+
+export type SteerMarkerState = "delivered" | "waiting" | "undelivered";
+
+export interface SteerMarker {
+  readonly label: string;
+  readonly state: SteerMarkerState;
+  readonly description: string;
+}
+
+/**
+ * `pending` is a steer the provider queued, which the agent reads at a step boundary.
+ * `undelivered` is one the provider dropped before the agent read it, usually on Stop.
+ */
+export function resolveSteerMarker(
+  message: {
+    readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
+    readonly pending?: boolean | undefined;
+    readonly undelivered?: boolean | undefined;
+  },
+  resolve: MFunctionType = mFallback,
+): SteerMarker | null {
+  if (message.inputIntent !== "steer" && message.inputIntent !== "promoted_queued_to_steer") {
+    return null;
+  }
+  if (message.undelivered === true) {
+    return {
+      label: resolve(msg("Not delivered")),
+      state: "undelivered",
+      description: resolve(msg("The agent never received this message")),
+    };
+  }
+  if (message.pending === true) {
+    return {
+      label: resolve(msg("Steer · waiting to be read")),
+      state: "waiting",
+      description: resolve(
+        msg(
+          "Waiting for the agent to read this. It reads steers between steps, after a running command finishes.",
+        ),
+      ),
+    };
+  }
+  return {
+    label: resolve(msg("Steer", { $context: "noun, a message that steers the running turn" })),
+    state: "delivered",
+    description:
+      message.inputIntent === "promoted_queued_to_steer"
+        ? resolve(msg("Originally queued, then promoted to steer the active turn"))
+        : resolve(msg("Steered the active turn")),
+  };
+}
+
+/** A steer whose state differs from the one above it needs its own label, or it reads as that one. */
+export function continuesSteerMarker(
+  message: Parameters<typeof resolveSteerMarker>[0] | undefined,
+  previous: Parameters<typeof resolveSteerMarker>[0] | undefined,
+): boolean {
+  if (message === undefined || previous === undefined) return false;
+  const current = resolveSteerMarker(message);
+  const before = resolveSteerMarker(previous);
+  return current !== null && before !== null && current.state === before.state;
+}
 
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
 const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
@@ -120,6 +183,7 @@ export function resolveUserMessagePresentation(message: {
 
 type GroupableUserMessage = Parameters<typeof resolveUserMessagePresentation>[0] & {
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
+  readonly undelivered?: boolean | undefined;
 };
 
 export function resolveUserMessageGrouping(
@@ -129,12 +193,10 @@ export function resolveUserMessageGrouping(
 ) {
   const isOwnMessage = (value: GroupableUserMessage | undefined) =>
     value?.role === "user" && resolveUserMessagePresentation(value).attribution === null;
-  const isSteer = (value: GroupableUserMessage | undefined) =>
-    value?.inputIntent === "steer" || value?.inputIntent === "promoted_queued_to_steer";
   const groupedWithPrevious = isOwnMessage(message) && isOwnMessage(previous);
   return {
     groupedWithPrevious,
     groupedWithNext: isOwnMessage(message) && isOwnMessage(next),
-    continuesSteer: groupedWithPrevious && isSteer(message) && isSteer(previous),
+    continuesSteer: groupedWithPrevious && continuesSteerMarker(message, previous),
   };
 }
