@@ -8527,23 +8527,28 @@
   "e4e91d155cb6a9b4": "Schlichte Seitenleiste (nach Projekt gruppieren)",
   "f079556d67367fe7": "Ordner-Threads zweizeilig anzeigen: den Titel, darunter Branch, Pull Request und Agent.",
   "ac1e5c94d1ad3c6a": "Zweizeilige Ordnerzeilen",
-  "9ae293971d93c819": "Teile einen Thread mit einem Gast, der ihn live im Browser verfolgt und Nachrichten sendet, die du genehmigst. Melde dich bei T3 Connect an, um Gastlinks zu nutzen.",
+  "20db32b7a7fd65e0": "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect, or set a public link address, to use guest links.",
   "0aa5406ac4d7f7c7": "Gastlinks",
+  "d4e430509402c82e": "Public link address",
+  "8d83c105855e4e5a": "Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links.",
+  "cd0e7b5cd07a0a67": "public link address",
+  "d52b3d6bf9f2a013": "Gemischt",
+  "b94233c79ed5e14a": "Enter an HTTPS address with no path, such as https://t3.example.com.",
   "f0e853acd2006d53": "Verknüpfte Umgebungen",
   "13e86eb5d8287a71": "Nach einer Claude- oder Codex-Runde eine vorhergesagte nächste Nachricht im leeren Eingabefeld anzeigen. Tab übernimmt sie. Jede ist eine zusätzliche gecachte Anfrage in deinem Tarif. Erfordert Codex 0.165+. Claude-Threads werden nach einem Neustart aktualisiert.",
   "d4b2a2ec812aafb0": "Nächsten Prompt vorschlagen",
   "298c7150a7621c80": "Simlock-Geräte-Hosts",
   "67937aa49179285e": "Auf einem Mac neue Worktrees aus einem im T3-Home-Ordner zwischengespeicherten Checkout klonen, statt jede Datei zu schreiben. Verwendet den normalen Git-Checkout, wenn das nicht geht. Beim Ausschalten wird der Cache gelöscht.",
   "f9904f78d3003f58": "Schneller Worktree-Checkout",
-  "ec7623deed751c05": [
-    "Teile einen Thread mit einem Gast, der ihn live im Browser verfolgt und Nachrichten sendet, die du genehmigst. Erfordert T3 Connect: Melde dich an und verknüpfe diesen Rechner unter",
+  "cd24900f08eb1ffc": [
+    "Share a thread with a guest who watches it live and sends messages you approve. Needs T3 Connect (link this machine in",
     " ",
     {
       "t": "Link",
       "i": 1,
-      "c": "Freigabe & Zugriff"
+      "c": "Sharing & access"
     },
-    ". Beim Ausschalten werden alle Gastlinks beendet."
+    ") or the address below. Turning it off stops every guest link."
   ],
   "bff0033ea41eb38e": [
     "Lass Agenten hier auf deinen anderen Rechnern arbeiten und deren Agenten hier. Schalte es für jeden Rechner ein und verknüpfe sie dann unter",
@@ -9773,7 +9778,6 @@
   "16bdc70b858c223f": "Proaktive Panels auf Standard zurücksetzen",
   "c5424f09d77138ff": "Wann ein inaktiver Claude-Thread über 200.000 Tokens komprimiert wird: nach deiner Rückkehr, kurz bevor sein Prompt-Cache abläuft, oder nie. Jeder Claude-Anbieter kann das überschreiben.",
   "3e99c5c14f4939c8": "Inaktive Threads komprimieren auf Standard zurücksetzen",
-  "d52b3d6bf9f2a013": "Gemischt",
   "cd72fe451ba0d6aa": "Neue Projekte",
   "394c3bd0a1782c8e": "Leer lassen, um „~/“ zu verwenden, wenn sich der Dialog „Projekt hinzufügen“ öffnet.",
   "f9b912a818bd869d": "Basisverzeichnis für neue Projekte auf Standard zurücksetzen",
@@ -11420,7 +11424,8 @@
   "8f71bc7c325e23e3": "tool-aufrufe ausblenden befehle bearbeitungen suchen arbeitsprotokoll aktivität ruhiger chat zen nur endgültige antworten",
   "5a3af411a0d5354c": "barrierefreiheit a11y screenreader nvda jaws voiceover orca sprachausgabe ansagen vorlesen nachrichten aktivität schritte",
   "d443390c4d2dcfd4": "barrierefreiheit a11y screenreader nvda jaws voiceover orca sprachausgabe fenstertitel tab-titel alt tab taskleiste thread status reihenfolge arbeitet genehmigung",
-  "6826fa9579c22035": "beta teilen gast einladen link teammitglied zuschauen t3 connect tunnel",
+  "497aa6f68531e34e": "beta share guest invite link teammate watch t3 connect tunnel public address https proxy",
+  "648028fbc96c368a": "guest links public address url https origin tunnel reverse proxy cloudflare without t3 connect",
   "f10c06cba0cdf7fe": "beta anderen rechner verknüpfen vps peer agenten dort arbeiten delegieren",
   "4a21cf825a2045b0": "beta tab autovervollständigung nächste nachricht vorhersagen claude codex ghost text",
   "fea2dc36585c4a20": "Simlock-Geräte-Hosts (Alpha)",

@@ -8483,23 +8483,28 @@
   "e4e91d155cb6a9b4": "シンプルなサイドバー(プロジェクトでグループ化)",
   "f079556d67367fe7": "フォルダー内のスレッドを 2 行で表示します。1 行目にタイトル、2 行目にブランチ、プルリクエスト、エージェントを表示します。",
   "ac1e5c94d1ad3c6a": "2 行のフォルダー行",
-  "9ae293971d93c819": "スレッドをゲストと共有します。ゲストはブラウザーでライブで閲覧し、あなたが承認したメッセージを送信できます。ゲストリンクを使うには T3 Connect にサインインしてください。",
+  "20db32b7a7fd65e0": "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect, or set a public link address, to use guest links.",
   "0aa5406ac4d7f7c7": "ゲストリンク",
+  "d4e430509402c82e": "Public link address",
+  "8d83c105855e4e5a": "Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links.",
+  "cd0e7b5cd07a0a67": "public link address",
+  "d52b3d6bf9f2a013": "混在",
+  "b94233c79ed5e14a": "Enter an HTTPS address with no path, such as https://t3.example.com.",
   "f0e853acd2006d53": "リンクされた環境",
   "13e86eb5d8287a71": "Claude または Codex のターンの後、空の入力欄に次のメッセージの予測を表示します。Tab で使用します。毎回、プランでキャッシュされたリクエストが 1 つ追加されます。Codex 0.165 以降が必要です。Claude のスレッドは再起動時に更新されます。",
   "d4b2a2ec812aafb0": "次のプロンプトを提案",
   "298c7150a7621c80": "Simlock デバイスホスト",
   "67937aa49179285e": "Mac では、すべてのファイルを書き込む代わりに、T3 ホームフォルダーにキャッシュしたチェックアウトから新しいワークツリーを複製します。できない場合は Git の通常のチェックアウトを使います。オフにするとキャッシュは削除されます。",
   "f9904f78d3003f58": "高速ワークツリーチェックアウト",
-  "ec7623deed751c05": [
-    "スレッドをゲストと共有します。ゲストはブラウザーでライブで閲覧し、あなたが承認したメッセージを送信できます。T3 Connect が必要です。サインインして、",
+  "cd24900f08eb1ffc": [
+    "Share a thread with a guest who watches it live and sends messages you approve. Needs T3 Connect (link this machine in",
     " ",
     {
       "t": "Link",
       "i": 1,
-      "c": "共有とアクセス"
+      "c": "Sharing & access"
     },
-    " でこのマシンをリンクしてください。オフにするとすべてのゲストリンクが停止します。"
+    ") or the address below. Turning it off stops every guest link."
   ],
   "bff0033ea41eb38e": [
     "ここのエージェントがあなたの他のマシンで作業し、他のマシンのエージェントがここで作業できるようにします。各マシンでオンにしてから、",
@@ -9724,7 +9729,6 @@
   "16bdc70b858c223f": "自動で開くパネルをデフォルトにリセット",
   "c5424f09d77138ff": "200,000 トークンを超えるアイドル状態の Claude スレッドを圧縮するタイミングです。戻ってきた後、プロンプトキャッシュの有効期限の直前、またはしない、から選びます。Claude プロバイダーごとに上書きできます。",
   "3e99c5c14f4939c8": "「アイドル状態のスレッドを圧縮」をデフォルトにリセット",
-  "d52b3d6bf9f2a013": "混在",
   "cd72fe451ba0d6aa": "新しいプロジェクト",
   "394c3bd0a1782c8e": "空のままにすると、「プロジェクトを追加」のブラウザーを開いたときに \"~/\" を使用します。",
   "f9b912a818bd869d": "プロジェクト追加のベースディレクトリをデフォルトにリセット",
@@ -11368,7 +11372,8 @@
   "8f71bc7c325e23e3": "非表示 ツール呼び出し コマンド 編集 検索 作業ログ アクティビティ 静か チャット zen 最終回答のみ tool calls",
   "5a3af411a0d5354c": "アクセシビリティ a11y スクリーンリーダー NVDA JAWS VoiceOver Orca ナレーター 音声 読み上げ メッセージ アクティビティ ステップ accessibility",
   "d443390c4d2dcfd4": "アクセシビリティ a11y スクリーンリーダー NVDA JAWS VoiceOver Orca ナレーター ウィンドウタイトル タブタイトル Alt+Tab タスクバー スレッド ステータス 順序 作業中 承認 accessibility",
-  "6826fa9579c22035": "ベータ 共有 ゲスト 招待 リンク チームメイト 閲覧 T3 Connect トンネル beta share guest",
+  "497aa6f68531e34e": "beta share guest invite link teammate watch t3 connect tunnel public address https proxy",
+  "648028fbc96c368a": "guest links public address url https origin tunnel reverse proxy cloudflare without t3 connect",
   "f10c06cba0cdf7fe": "ベータ リンク 別のマシン VPS ピア エージェント そこで作業 委任 beta link machine",
   "4a21cf825a2045b0": "ベータ Tab 補完 次のメッセージを予測 Claude Codex ゴーストテキスト autocomplete",
   "fea2dc36585c4a20": "Simlock デバイスホスト (アルファ版)",
