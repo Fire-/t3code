@@ -9,8 +9,13 @@ import type {
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { videoMimeType } from "@t3tools/shared/video";
 import { MessageCircleIcon, MousePointerClickIcon } from "lucide-react";
-import { createContext, type ReactElement, type ReactNode, use } from "react";
+import { createContext, type ReactElement, type ReactNode, use, useState } from "react";
+import { PencilIcon } from "lucide-react";
 import { ComposerContextActionsContext } from "./composerContextActions";
+import { composerFloatingLayerProps } from "./chat/composerEventScope";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "./ui/popover";
+import { DiffCommentAnnotation } from "./diffs/DiffCommentAnnotation";
+import { formatFileCommentRange } from "./files/fileCommentAnnotations";
 
 import type { ComposerFileAttachment, ComposerImageAttachment } from "~/composerDraftStore";
 import { composerFileNeedsReattach } from "~/composerDraftStore";
@@ -28,6 +33,7 @@ import {
   previewAnnotationContextLabel,
   reviewCommentContextId,
   reviewCommentContextLabel,
+  reviewCommentQuoteAccessibleName,
   terminalContextReference,
   uploadedAttachmentContextRecord,
 } from "~/lib/composerContextRecords";
@@ -41,7 +47,12 @@ import {
   createContextPresentationRegistry,
   type ContextPresentationCapability,
 } from "./contextPresentationRegistry";
-import type { ContextChipKind } from "./ContextChip";
+import {
+  ContextChip as BaseContextChip,
+  ContextChipAction,
+  ContextChipLabel,
+  type ContextChipKind,
+} from "./ContextChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   ContextChipPopover,
@@ -285,6 +296,82 @@ function previewAnnotationTooltip(annotation: PreviewAnnotationPayload): string 
   return lines.join("\n");
 }
 
+/**
+ * The composer's chip for a rendered-view cite: the quote labels it so sibling cites read apart,
+ * the details popover keeps the file and its lines, and the pencil edits the comment in place.
+ */
+function ComposerFileCommentChip(props: { record: ReviewCommentContext }) {
+  const actions = use(ComposerContextActionsContext);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(props.record.text);
+  const label = reviewCommentContextLabel(props.record);
+  const accessibleName = reviewCommentQuoteAccessibleName(props.record);
+  return (
+    <BaseContextChip kind="review-comment" contentEditable={false}>
+      <Popover>
+        <PopoverTrigger
+          render={
+            <BaseContextChip
+              render={<button type="button" />}
+              aria-label={`${accessibleName}. Show details`}
+            >
+              <MessageCircleIcon aria-hidden="true" />
+              <ContextChipLabel className="max-w-[16em]">{label}</ContextChipLabel>
+            </BaseContextChip>
+          }
+        />
+        <PopoverPopup side="top" width="lg" padding="compact">
+          <PopoverTitle className="sr-only">{accessibleName}</PopoverTitle>
+          <ComposerReviewCommentDetails comment={props.record} />
+        </PopoverPopup>
+      </Popover>
+      <Popover
+        open={editing}
+        onOpenChange={(open) => {
+          setEditing(open);
+          if (open) setDraft(props.record.text);
+        }}
+      >
+        <PopoverTrigger
+          aria-label={props.record.text ? "Edit file comment" : "Add file comment"}
+          render={<ContextChipAction />}
+        >
+          <PencilIcon aria-hidden="true" className="size-3" />
+        </PopoverTrigger>
+        {editing ? (
+          <PopoverPopup
+            {...composerFloatingLayerProps}
+            side="top"
+            align="end"
+            width="md"
+            padding="compact"
+          >
+            <DiffCommentAnnotation
+              {...(actions.environmentId ? { environmentId: actions.environmentId } : {})}
+              projectId={actions.projectId}
+              ownerKey={JSON.stringify(["file-comment-edit", props.record.id])}
+              kind="draft"
+              allowEmpty
+              submitLabel="Save"
+              rangeLabel={formatFileCommentRange(
+                props.record.startIndex + 1,
+                props.record.endIndex + 1,
+              )}
+              text={draft}
+              onTextChange={setDraft}
+              onComment={(text) => {
+                actions.editReviewComment(props.record, text);
+                setEditing(false);
+              }}
+              onCancel={() => setEditing(false)}
+            />
+          </PopoverPopup>
+        ) : null}
+      </Popover>
+    </BaseContextChip>
+  );
+}
+
 function ComposerReviewCommentDetails({ comment }: { comment: ReviewCommentContext }) {
   return (
     <div className="space-y-2 overflow-hidden rounded-lg border border-border/70 bg-background/70 p-3">
@@ -425,6 +512,9 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
               kind={PULL_REQUEST_CHIP_KINDS[pullRequestState]}
             />
           );
+        }
+        if (entry.record.quote !== undefined) {
+          return <ComposerFileCommentChip record={entry.record} />;
         }
         return (
           <ContextChip

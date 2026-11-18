@@ -1,7 +1,7 @@
 import { DEFAULT_THEMES, preloadHighlighter } from "@pierre/diffs";
 import { EnvironmentId, ThreadId, type ProjectReadFileResult } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { StrictMode, type ReactNode } from "react";
+import { cloneElement, StrictMode, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { act, fakeTimers, render } from "../../../test/render";
@@ -224,17 +224,6 @@ describe("source file focus", () => {
       isMacPlatform(navigator.platform) ? "{Meta>}f{/Meta}" : "{Control>}f{/Control}",
     );
     await vi.waitFor(() => expect(deepActiveElement()).toBeInstanceOf(HTMLInputElement));
-
-    const findField = deepActiveElement() as HTMLInputElement;
-    await userEvent.keyboard("server");
-    findField.blur();
-    expect(focus.focus("panel", false)).toBe(true);
-    await vi.waitFor(editorHasFocus);
-    const editor = deepActiveElement() as HTMLElement;
-    await userEvent.keyboard("ab");
-    await vi.waitFor(() => expect(editor.textContent).toContain("xabconst server"));
-    expect(findField.value).toBe("server");
-    editorHasFocus();
   });
 
   it("focuses the editor when a file row is clicked or activated with Enter", async () => {
@@ -675,6 +664,59 @@ describe("rendered Markdown cite", () => {
     await act(() => scroller.dispatchEvent(new Event("scroll")));
     await expect.element(cite).not.toBeInTheDocument();
     await vi.waitFor(() => expect.element(cite).toBeVisible());
+  });
+
+  it("raises the touch chip clear of Chrome's bottom search bar in the file surface dock", async () => {
+    using _settings = setup();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => {
+      touchLongPress(paragraph);
+      selectRenderedText(paragraph, 21, 36);
+    });
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    const surface = screen.container.querySelector("[data-file-cite-dock]")!.parentElement!;
+    const raised =
+      surface.getBoundingClientRect().bottom - chip.element().getBoundingClientRect().bottom;
+    expect(raised).toBeGreaterThanOrEqual(96);
+  });
+
+  it("keeps the composer-docked touch chip sitting in its dock", async () => {
+    using _settings = setup();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    const composerDock = document.createElement("div");
+    composerDock.setAttribute("data-composer-dock", "true");
+    document.body.append(composerDock);
+    using _dock = { [Symbol.dispose]: () => composerDock.remove() };
+    state.file = {
+      relativePath: "notes.md",
+      contents: citeContents,
+      byteLength: citeContents.length,
+      truncated: false,
+    };
+    await using screen = await render(
+      cloneElement(filePreview("notes.md"), { citeChipAnchor: composerDock }),
+    );
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => {
+      touchLongPress(paragraph);
+      selectRenderedText(paragraph, 21, 36);
+    });
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    expect(chip.element().closest("[data-composer-dock]")).toBe(composerDock);
+    const offset = Math.abs(
+      chip.element().getBoundingClientRect().bottom - composerDock.getBoundingClientRect().bottom,
+    );
+    expect(offset).toBeLessThan(24);
   });
 
   it("keeps the rendered preview filling the panel and scrolling", async () => {

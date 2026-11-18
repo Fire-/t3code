@@ -11,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
+import type { ReviewCommentContext } from "~/reviewCommentContext";
 
 import {
   formatInlineContextReference,
@@ -30,6 +31,7 @@ import {
   responseContextRecord,
   reviewCommentContextLabel,
   reviewCommentFromRecord,
+  reviewCommentQuoteAccessibleName,
   selectedMessageContextFragment,
   reviewCommentContextRecord,
   terminalContextRecord,
@@ -443,6 +445,71 @@ describe("composerContextRecords", () => {
     });
     expect(legacy.text).toBe("hi\n\n[T line 1](t3-context://v1/terminal/legacy_terminal_1)");
     expect(legacy.recordsById.get("legacy_terminal_1")?.kind).toBe("terminal");
+  });
+});
+
+describe("review comment labels", () => {
+  const fileComment = (quote?: { exact: string; prefix: string; suffix: string }) => ({
+    id: "rc-quote",
+    sectionId: "file:notes.md",
+    sectionTitle: "File comment",
+    filePath: "notes.md",
+    startIndex: 2,
+    endIndex: 2,
+    rangeLabel: "L3",
+    text: "",
+    diff: "First paragraph with selectable text.",
+    fenceLanguage: "md",
+    ...(quote ? { quote } : {}),
+  });
+
+  it("labels a quoted file comment by its quote, trim as reply Cite trims", () => {
+    expect(
+      reviewCommentContextLabel(
+        fileComment({ exact: "selectable  text\n", prefix: "", suffix: "" }),
+      ),
+    ).toBe("selectable text");
+    const long = {
+      exact: "x".repeat(63) + "😀" + "y".repeat(40),
+      prefix: "",
+      suffix: "",
+    };
+    expect(reviewCommentContextLabel(fileComment(long))).toBe(`${"x".repeat(63)}…`);
+    // A pull request summary keeps its number label; quotes belong to file comments.
+    expect(
+      reviewCommentContextLabel({
+        ...fileComment({ exact: "quoted line", prefix: "", suffix: "" }),
+        pullRequest: {
+          number: 7,
+          title: "Title",
+          url: "https://github.com/acme/app/pull/7",
+          headBranch: "feature",
+          baseBranch: "main",
+          state: "open" as const,
+          isDraft: false,
+        },
+      }),
+    ).toBe("#7");
+  });
+
+  it("keeps the file and lines in a quoted comment's accessible name", () => {
+    expect(
+      reviewCommentQuoteAccessibleName(
+        fileComment({ exact: "selectable text", prefix: "", suffix: "" }),
+      ),
+    ).toBe("File comment, notes.md L3: selectable text");
+    const long = { exact: `${"q".repeat(70)} tail`, prefix: "", suffix: "" };
+    expect(reviewCommentQuoteAccessibleName(fileComment(long))).toBe(
+      `File comment, notes.md L3: ${"q".repeat(64)}…`,
+    );
+  });
+
+  it("records the quote label for the wire-bound marker", () => {
+    const record = reviewCommentContextRecord(
+      fileComment({ exact: "selectable text", prefix: "", suffix: "" }) as ReviewCommentContext,
+    );
+    expect(record.label).toBe("selectable text");
+    expect(() => decodeMessageContext({ version: 1, records: [record] })).not.toThrow();
   });
 });
 

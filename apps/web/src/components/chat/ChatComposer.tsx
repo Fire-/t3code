@@ -754,6 +754,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     openPullRequest: (event: React.MouseEvent<HTMLElement>, url: string) => {
       openPrLink(event, url);
     },
+    editReviewComment: (comment: ReviewCommentContext, text: string) => {
+      addComposerDraftReviewComment(
+        composerDraftTarget,
+        { ...comment, text },
+        { appendReference: false },
+      );
+    },
   };
   const composerContextRecords = composerContextRecordsFromDraft({
     terminalContexts: composerTerminalContexts,

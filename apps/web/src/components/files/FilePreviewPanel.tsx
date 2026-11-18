@@ -1164,6 +1164,7 @@ function RenderedMarkdownSurface({
           viewport={scrollViewport}
           content={markdownElement}
           anchor={citeChipAnchor ?? citeDockElement}
+          raiseTouchChip={citeChipAnchor == null}
           filePath={relativePath}
           sourceText={contents}
           composerDraftTarget={composerDraftTarget}

@@ -46,6 +46,7 @@ import {
   pullRequestContextDisplayState,
   pullRequestContextKindLabel,
   reviewCommentContextLabel,
+  reviewCommentQuoteAccessibleName,
 } from "~/lib/composerContextRecords";
 import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
 import { ContextChip, ContextChipLabel, type ContextChipKind } from "../ContextChip";
@@ -482,7 +483,11 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
         return (
           <UserMessageContextPopover
             copyMarkdown={context.copyMarkdown}
-            accessibleLabel={`${kindLabel}, ${label}${record.pullRequest ? `, ${record.pullRequest.title}` : ""}`}
+            accessibleLabel={
+              record.quote !== undefined
+                ? reviewCommentQuoteAccessibleName(record)
+                : `${kindLabel}, ${label}${record.pullRequest ? `, ${record.pullRequest.title}` : ""}`
+            }
             kind={isPullRequest ? PULL_REQUEST_CHIP_KINDS[pullRequestState] : "review-comment"}
             icon={isPullRequest ? <PullRequestGlyph.pullRequest /> : <MessageCircleIcon />}
             label={label}

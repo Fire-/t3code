@@ -72,11 +72,32 @@ function basename(filePath: string): string {
   return filePath.split(/[\\/]/).at(-1) ?? filePath;
 }
 
+/** How much of a quote a chip shows, the same budget reply Cite gives its quotes. */
+const REVIEW_QUOTE_LABEL_CHARS = 64;
+
+/** A quote's first words, so cited passages read apart when one file has several chips. */
+function reviewCommentQuoteLabel(quote: ReviewCommentQuote): string {
+  const preview = quote.exact.replace(/\s+/g, " ").trim();
+  if (preview.length <= REVIEW_QUOTE_LABEL_CHARS) return preview;
+  let end = REVIEW_QUOTE_LABEL_CHARS;
+  const previous = preview.charCodeAt(end - 1);
+  const next = preview.charCodeAt(end);
+  if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  return `${preview.slice(0, end)}…`;
+}
+
+/** The rendered-view cite's accessible name keeps the file and its lines beside the quote. */
+export function reviewCommentQuoteAccessibleName(comment: ReviewCommentPresentation): string {
+  return `File comment, ${basename(comment.filePath)} ${comment.rangeLabel}: ${reviewCommentQuoteLabel(comment.quote!)}`;
+}
+
 export function reviewCommentContextLabel(comment: ReviewCommentPresentation): string {
   const pullRequestNumber = pullRequestContextNumber(comment);
   if (isPullRequestSummaryContext(comment) && pullRequestNumber !== null) {
     return `#${pullRequestNumber}`;
   }
+  // Sibling cites from one file label alike; a quote is what reads them apart.
+  if (comment.quote !== undefined) return reviewCommentQuoteLabel(comment.quote);
   const diffRange = /^([+-])(\d+)(?: to \1(\d+))?$/u.exec(comment.rangeLabel);
   const rangeLabel = diffRange
     ? `L${diffRange[2]}${diffRange[3] ? ` to L${diffRange[3]}` : ""}${diffRange[1] === "-" ? " (before)" : ""}`

@@ -1,5 +1,6 @@
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { createContext, type MouseEvent } from "react";
+import type { ReviewCommentContext } from "~/reviewCommentContext";
 
 export interface ComposerContextActions {
   environmentId: EnvironmentId | null;
@@ -10,6 +11,8 @@ export interface ComposerContextActions {
   openFile: (fileId: string) => void;
   openMention: (path: string) => void;
   openPullRequest: (event: MouseEvent<HTMLElement>, url: string) => void;
+  /** Upserts a draft review comment's text, keeping its chip where it is. */
+  editReviewComment: (comment: ReviewCommentContext, text: string) => void;
 }
 
 export const ComposerContextActionsContext = createContext<ComposerContextActions>({
@@ -19,4 +22,5 @@ export const ComposerContextActionsContext = createContext<ComposerContextAction
   openFile: () => {},
   openMention: () => {},
   openPullRequest: () => {},
+  editReviewComment: () => {},
 });

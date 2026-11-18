@@ -17,6 +17,7 @@ import {
   type SelectionActionPoint,
 } from "~/lib/selectionActions";
 import { buildFileReviewComment, type ReviewCommentContext } from "~/reviewCommentContext";
+import { cn } from "~/lib/utils";
 import { DiffCommentAnnotation } from "../diffs/DiffCommentAnnotation";
 import { Button } from "../ui/button";
 import { captureFileCiteSelection, type FileCiteSelection } from "./fileMarkdownCiteSelection";
@@ -46,6 +47,11 @@ export function FileMarkdownCite(props: {
   readonly content: HTMLElement | null;
   /** Where the touch chip and its comment form dock: the composer dock, or the file surface. */
   readonly anchor: HTMLElement | null;
+  /**
+   * Lifts the docked touch chip clear of Chrome's bottom Touch to Search bar, which covers a
+   * dock sitting at the viewport's bottom edge; the composer dock already sits clear of it.
+   */
+  readonly raiseTouchChip?: boolean | undefined;
   readonly filePath: string;
   readonly sourceText: string;
   readonly composerDraftTarget: ScopedThreadRef | DraftId;
@@ -263,7 +269,12 @@ export function FileMarkdownCite(props: {
     return props.anchor === null
       ? null
       : createPortal(
-          <div className="flex w-full justify-center py-1.5">
+          <div
+            className={cn(
+              "flex w-full justify-center py-1.5",
+              props.raiseTouchChip && "-translate-y-28",
+            )}
+          >
             {citeButton({
               ref: chipRef,
               "aria-label": tooLong ? "Selection is too long to cite" : "Cite selection",
