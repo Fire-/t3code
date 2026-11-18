@@ -4,6 +4,7 @@ import {
   type ProjectId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
+import { useGT } from "gt-react";
 import { QuoteIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { createPortal } from "react-dom";
@@ -68,6 +69,7 @@ export function FileMarkdownCite(props: {
   const actionsRef = useRef<ReturnType<typeof observeSelectionActions> | null>(null);
   const addReviewComment = useComposerDraftStore((store) => store.addReviewComment);
   const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
+  const gt = useGT();
 
   // The Cite button clamps at the window edge; the comment form opens where the button was.
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the popover and clamps its position inside the window before paint
@@ -261,7 +263,9 @@ export function FileMarkdownCite(props: {
       {...extraProps}
     >
       <QuoteIcon aria-hidden="true" className="size-3.5" />
-      {tooLong ? "Shorten selection" : "Cite"}
+      {tooLong
+        ? gt("Shorten selection")
+        : gt("Cite", { $context: "verb, button that quotes the selected text" })}
     </Button>
   );
 
@@ -277,7 +281,7 @@ export function FileMarkdownCite(props: {
           >
             {citeButton({
               ref: chipRef,
-              "aria-label": tooLong ? "Selection is too long to cite" : "Cite selection",
+              "aria-label": tooLong ? gt("Selection is too long to cite") : gt("Cite selection"),
               className: "pointer-events-auto",
             })}
           </div>,
@@ -288,7 +292,9 @@ export function FileMarkdownCite(props: {
     <div ref={popoverRef} className="fixed z-50 max-w-[calc(100vw-1rem)]">
       {citeButton({
         ref: popoverButtonRef,
-        "aria-label": tooLong ? "Selection is too long to cite" : "Cite selection in composer",
+        "aria-label": tooLong
+          ? gt("Selection is too long to cite")
+          : gt("Cite selection in composer"),
       })}
     </div>,
     document.body,
