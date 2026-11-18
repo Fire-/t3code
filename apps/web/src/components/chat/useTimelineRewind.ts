@@ -138,8 +138,14 @@ export function useTimelineRewind(input: TimelineRewindInput) {
       );
       return;
     }
+    const checkpoint = findRevertCheckpoint(serverProjection?.checkpoints ?? [], turnCount);
     if (restoreFiles === undefined) {
-      openRevertConfirm(routeThreadKey, { turnCount, messageId });
+      openRevertConfirm(routeThreadKey, {
+        turnCount,
+        messageId,
+        // Outside the loaded window the server resolves the target, so keep both choices.
+        canRestoreFiles: checkpoint === undefined || checkpoint.status === "ready",
+      });
       return;
     }
 
@@ -155,7 +161,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
       turnCount,
       restoreFiles,
       // Keep the live checkpoint identity when command context refetches a bounded window.
-      checkpoint: findRevertCheckpoint(serverProjection?.checkpoints ?? [], turnCount),
+      checkpoint,
       draftTarget: composerDraftTarget,
       composerHasPendingAttachments: composerRef.current?.hasPendingAttachments() === true,
       createAssetUrl: createAttachmentAssetUrl,

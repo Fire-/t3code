@@ -3249,6 +3249,7 @@
   "2ce5b965862599cc": "你有未提交的改动。它们会带到另一个分支；如果有冲突，则无法切换。",
   "c4280e2f9ff0e319": "切换分支",
   "2369e92930d2d529": "从这里开始编辑？",
+  "d38f82c71b555bc6": "Rewind chat to before this message. Your prompt and attachments return to the composer. Files stay as they are: there is no file snapshot for this point.",
   "2028c02df18f2ccd": "对话将回退到这条消息之前，你的提示词和附件会回到输入框。选择“同时还原文件”还会撤销你自己做的修改。",
   "95021203628e2378": "同时还原文件",
   "c1c9ebabaa960f8c": "回退并保留改动",

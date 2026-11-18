@@ -3244,6 +3244,7 @@
   "2ce5b965862599cc": "Você tem alterações sem commit. Elas vão junto para o outro branch ou bloqueiam a troca se houver conflito.",
   "c4280e2f9ff0e319": "Trocar de branch",
   "2369e92930d2d529": "Editar a partir daqui?",
+  "d38f82c71b555bc6": "Rewind chat to before this message. Your prompt and attachments return to the composer. Files stay as they are: there is no file snapshot for this point.",
   "2028c02df18f2ccd": "Volta o chat para antes desta mensagem. Seu prompt e seus anexos voltam para o editor de mensagens. “Reverter arquivos também” desfaz também suas próprias edições.",
   "95021203628e2378": "Reverter arquivos também",
   "c1c9ebabaa960f8c": "Reverter e manter as alterações",

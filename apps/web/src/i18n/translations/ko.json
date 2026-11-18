@@ -3240,6 +3240,7 @@
   "2ce5b965862599cc": "커밋되지 않은 변경 사항이 있습니다. 다른 브랜치로 옮겨지거나, 충돌하면 전환이 차단됩니다.",
   "c4280e2f9ff0e319": "브랜치 전환",
   "2369e92930d2d529": "여기서부터 편집할까요?",
+  "d38f82c71b555bc6": "Rewind chat to before this message. Your prompt and attachments return to the composer. Files stay as they are: there is no file snapshot for this point.",
   "2028c02df18f2ccd": "이 메시지 이전으로 채팅을 되감습니다. 프롬프트와 첨부 파일은 입력창으로 돌아갑니다. “파일도 되돌리기”를 선택하면 직접 수정한 내용도 취소됩니다.",
   "95021203628e2378": "파일도 되돌리기",
   "c1c9ebabaa960f8c": "되돌리고 변경 사항 유지",

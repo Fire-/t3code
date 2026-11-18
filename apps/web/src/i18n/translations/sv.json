@@ -3244,6 +3244,7 @@
   "2ce5b965862599cc": "Du har ändringar som inte är committade. De följer med till den andra grenen eller blockerar bytet om de är i konflikt.",
   "c4280e2f9ff0e319": "Byt gren",
   "2369e92930d2d529": "Redigera härifrån?",
+  "d38f82c71b555bc6": "Rewind chat to before this message. Your prompt and attachments return to the composer. Files stay as they are: there is no file snapshot for this point.",
   "2028c02df18f2ccd": "Spola tillbaka chatten till före det här meddelandet. Din prompt och dina bilagor kommer tillbaka till inmatningsfältet. ”Återställ även filer” ångrar också dina egna ändringar.",
   "95021203628e2378": "Återställ även filer",
   "c1c9ebabaa960f8c": "Återställ och behåll ändringar",
