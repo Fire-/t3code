@@ -202,7 +202,7 @@ function GuestLinksAddressRow() {
       resetAction={
         mixed || committed !== null ? (
           <SettingResetButton
-            label={gt("public link address")}
+            ariaLabel={gt("public link address")}
             onClick={() => {
               setProblem(null);
               updateSettings({ guestSharePublicBaseUrl: null });
