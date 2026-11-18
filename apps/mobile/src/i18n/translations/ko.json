@@ -744,6 +744,7 @@
   "25bca212561d8ba3": "토큰 {used} / {budget}",
   "2dc1d7193b9ba1ae": "{count, plural, other {검사 {count}개}}",
   "d1e4cc873f510a86": "목표 설정됨",
+  "d037b283771d583c": "Tasks {done}/{total}",
   "a37fc08ee9b0a937": "OpenAI에 피드백을 보내는 중...",
   "66ebdd79f5bbcacd": "OpenAI에 피드백을 보냈습니다",
   "f60f20f2831735fb": "스레드 ID: {feedbackId}",
