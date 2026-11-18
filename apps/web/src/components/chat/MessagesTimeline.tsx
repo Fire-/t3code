@@ -557,6 +557,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // Turn and attempt folds reveal later rows rather than growing their own row.
   const onToggleTurnFold = (runId: RunId) => {
     preserveDisclosurePosition(`turn-fold:${runId}`);
+    if (readingHold?.runIds.has(runId)) {
+      const runIds = new Set(readingHold.runIds);
+      runIds.delete(runId);
+      setReadingHold(runIds.size > 0 ? { ...readingHold, runIds } : null);
+    }
     setExpandedRunIds((existing) => {
       const next = new Set(existing);
       if (next.has(runId)) {
@@ -595,6 +600,26 @@ const ConversationTimeline = memo(function ConversationTimeline({
     });
   };
 
+  // A turn that completes while the reader is scrolled away from the end stays open, so the
+  // work they are reading does not fold away under them. Returning to the end, folding it by
+  // hand, or the next turn starting ends the hold.
+  const [readingHold, setReadingHold] = useState<{
+    identity: string;
+    runIds: ReadonlySet<RunId>;
+  } | null>(null);
+  const releaseReadingHold = () => {
+    if (readingHold === null) return;
+    setReadingHold(null);
+    if (readingHold.identity !== listIdentityKey) return;
+    setExpandedRunIds((existing) => {
+      if (![...readingHold.runIds].some((runId) => existing.has(runId))) return existing;
+      const next = new Set(existing);
+      for (const runId of readingHold.runIds) next.delete(runId);
+      return next;
+    });
+  };
+  let completedRunId: RunId | null = null;
+
   // An interrupted run opens its fold; a newer run closes the previous run's.
   const [observedLatestRun, setObservedLatestRun] = useState({
     identity: listIdentityKey,
@@ -620,8 +645,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
       if (latestRun.runId === previousRunId) {
         if (observedLatestRun.status === "running" && latestRun.status === "interrupted") {
           setExpandedRunIds((existing) => new Set(existing).add(latestRun.runId));
+        } else if (observedLatestRun.status === "running" && latestRun.status === "completed") {
+          completedRunId = latestRun.runId;
         }
       } else {
+        releaseReadingHold();
         setExpandedRunIds((existing) => {
           if (!existing.has(previousRunId)) return existing;
           const next = new Set(existing);
@@ -639,6 +667,33 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const toolCallVisibility =
     findActive && preferredToolCallVisibility === "zen" ? "hideAll" : preferredToolCallVisibility;
   const revealedMessageId = citationRequest?.citation.messageId ?? null;
+  if (completedRunId !== null && !liveFollowEnabled) {
+    const heldRunId = completedRunId;
+    // Work after a steer folds under its own key, so hold every fold the settled turn will have.
+    const settledFoldRunIds = new Set(
+      [
+        ...timelineTurnFoldRunIdsByEntryId({
+          timelineEntries,
+          latestRun,
+          runningRunId: null,
+          isWorking: false,
+          runlessWorkActive: false,
+          toolCallVisibility,
+          revealedMessageId,
+        }).values(),
+      ].filter((runId) => runId === heldRunId || runId.startsWith(`${heldRunId}:steer:`)),
+    );
+    const runIds = [...settledFoldRunIds].filter((runId) => !expandedRunIds.has(runId));
+    if (runIds.length > 0) {
+      setReadingHold({ identity: listIdentityKey, runIds: new Set(runIds) });
+      setExpandedRunIds((existing) => new Set([...existing, ...runIds]));
+    }
+  } else if (
+    readingHold !== null &&
+    (readingHold.identity !== listIdentityKey || liveFollowEnabled)
+  ) {
+    releaseReadingHold();
+  }
   // Imported turns and post-steer work fold under synthetic keys, not the entries' run ids.
   const findFoldRunIds = findActive
     ? timelineTurnFoldRunIdsByEntryId({
