@@ -76,8 +76,64 @@ describe("composer file comment chip", () => {
     expect(quoted.textContent).not.toContain("notes.md");
     const pencil = elementByLabel("Add file comment");
     expect(pencil).not.toBeNull();
-    const details = elementByLabel("File comment, notes.md L3: selectable text. Show details");
-    expect(details).not.toBeNull();
+    const chip = elementByLabel("File comment, notes.md L3: selectable text. Edit comment");
+    expect(chip).not.toBeNull();
+  });
+
+  it("opens the comment editor from a tap on the chip, showing the file, lines, and quote", async () => {
+    const onEdit = vi.fn();
+    await using _screen = await render(
+      <Harness comment={fileComment(true, "First note")} onEdit={onEdit} />,
+    );
+    await act(() =>
+      (
+        elementByLabel("File comment, notes.md L3: selectable text. Edit comment") as HTMLElement
+      ).click(),
+    );
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Comment on lines L3"]',
+    );
+    expect(editor).not.toBeNull();
+    expect(editor!.value).toBe("First note");
+    const header = document.querySelector("[data-file-comment-editor-source]");
+    expect(header?.textContent).toContain("notes.md");
+    expect(header?.textContent).toContain("L3");
+    expect(header?.textContent).toContain("selectable text");
+  });
+
+  it("keeps typed text when the pencil is pressed while the chip opened the editor", async () => {
+    const onEdit = vi.fn();
+    await using _screen = await render(
+      <Harness comment={fileComment(true, "First note")} onEdit={onEdit} />,
+    );
+    await act(() =>
+      (
+        elementByLabel("File comment, notes.md L3: selectable text. Edit comment") as HTMLElement
+      ).click(),
+    );
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Comment on lines L3"]',
+    )!;
+    await act(async () => {
+      editor.focus();
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+        editor,
+        "Half typed",
+      );
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await userEvent.click(elementByLabel("Edit file comment") as HTMLElement);
+    const after = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Comment on lines L3"]',
+    );
+    if (after) {
+      expect(after.value).toBe("Half typed");
+    } else {
+      expect(onEdit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: "rc-1" }),
+        "Half typed",
+      );
+    }
   });
 
   it("keeps the plain file label and no pencil for a code-view comment chip", async () => {

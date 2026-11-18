@@ -686,6 +686,45 @@ describe("rendered Markdown cite", () => {
     expect(raised).toBeGreaterThanOrEqual(96);
   });
 
+  function spaceUnderLastLine(screen: { container: HTMLElement }) {
+    const scroller = screen.container
+      .querySelector("[data-file-cite-dock]")!
+      .parentElement!.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]")!;
+    const lastLine = page.getByText("list two").element();
+    return (
+      scroller.getBoundingClientRect().top +
+      scroller.scrollHeight -
+      scroller.scrollTop -
+      lastLine.getBoundingClientRect().bottom
+    );
+  }
+
+  it("leaves room under the last line for Chrome's bottom search bar on touch screens", async () => {
+    using _settings = setup();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    const realMatchMedia = window.matchMedia.bind(window);
+    using _touch = vi
+      .spyOn(window, "matchMedia")
+      .mockImplementation((query) => realMatchMedia(query === "(pointer: coarse)" ? "all" : query));
+    await using screen = await render(citePreview());
+    await expect.element(page.getByText("list two")).toBeVisible();
+    expect(spaceUnderLastLine(screen)).toBeGreaterThanOrEqual(96);
+  });
+
+  it("adds no room under the last line with a mouse", async () => {
+    using _settings = setup();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    await using screen = await render(citePreview());
+    await expect.element(page.getByText("list two")).toBeVisible();
+    expect(spaceUnderLastLine(screen)).toBeLessThan(48);
+  });
+
   it("keeps the composer-docked touch chip sitting in its dock", async () => {
     using _settings = setup();
     const style = document.createElement("style");

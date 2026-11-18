@@ -297,8 +297,9 @@ function previewAnnotationTooltip(annotation: PreviewAnnotationPayload): string 
 }
 
 /**
- * The composer's chip for a rendered-view cite: the quote labels it so sibling cites read apart,
- * the details popover keeps the file and its lines, and the pencil edits the comment in place.
+ * The composer's chip for a rendered-view cite: the quote labels it so sibling cites read apart.
+ * The chip and its pencil both open one editor that shows the file, lines, and full quote above
+ * the comment, since the small pencil alone is a hard touch target.
  */
 function ComposerFileCommentChip(props: { record: ReviewCommentContext }) {
   const actions = use(ComposerContextActionsContext);
@@ -308,23 +309,6 @@ function ComposerFileCommentChip(props: { record: ReviewCommentContext }) {
   const accessibleName = reviewCommentQuoteAccessibleName(props.record);
   return (
     <BaseContextChip kind="review-comment" contentEditable={false}>
-      <Popover>
-        <PopoverTrigger
-          render={
-            <BaseContextChip
-              render={<button type="button" />}
-              aria-label={`${accessibleName}. Show details`}
-            >
-              <MessageCircleIcon aria-hidden="true" />
-              <ContextChipLabel className="max-w-[16em]">{label}</ContextChipLabel>
-            </BaseContextChip>
-          }
-        />
-        <PopoverPopup side="top" width="lg" padding="compact">
-          <PopoverTitle className="sr-only">{accessibleName}</PopoverTitle>
-          <ComposerReviewCommentDetails comment={props.record} />
-        </PopoverPopup>
-      </Popover>
       <Popover
         open={editing}
         onOpenChange={(open, eventDetails) => {
@@ -336,10 +320,22 @@ function ComposerFileCommentChip(props: { record: ReviewCommentContext }) {
           ) {
             actions.editReviewComment(props.record, draft);
           }
+          // Moving between the chip and pencil triggers reopens an open popover; keep the draft.
+          if (open && !editing) setDraft(props.record.text);
           setEditing(open);
-          if (open) setDraft(props.record.text);
         }}
       >
+        <PopoverTrigger
+          render={
+            <BaseContextChip
+              render={<button type="button" />}
+              aria-label={`${accessibleName}. Edit comment`}
+            >
+              <MessageCircleIcon aria-hidden="true" />
+              <ContextChipLabel className="max-w-[16em]">{label}</ContextChipLabel>
+            </BaseContextChip>
+          }
+        />
         <PopoverTrigger
           aria-label={props.record.text ? "Edit file comment" : "Add file comment"}
           render={<ContextChipAction />}
@@ -354,6 +350,22 @@ function ComposerFileCommentChip(props: { record: ReviewCommentContext }) {
             width="md"
             padding="compact"
           >
+            <PopoverTitle className="sr-only">{accessibleName}</PopoverTitle>
+            <div data-file-comment-editor-source className="space-y-1 px-3 pt-2">
+              <div className="flex min-w-0 items-baseline gap-1.5">
+                <span className="truncate text-xs font-medium text-foreground">
+                  {props.record.filePath}
+                </span>
+                <span className="shrink-0 text-secondary-label text-2xs">
+                  {props.record.rangeLabel}
+                </span>
+              </div>
+              {props.record.quote ? (
+                <blockquote className="line-clamp-4 whitespace-pre-wrap border-s-2 border-border ps-2 text-muted-foreground text-xs">
+                  {props.record.quote.exact}
+                </blockquote>
+              ) : null}
+            </div>
             <DiffCommentAnnotation
               {...(actions.environmentId ? { environmentId: actions.environmentId } : {})}
               projectId={actions.projectId}

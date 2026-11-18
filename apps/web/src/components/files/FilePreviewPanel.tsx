@@ -64,6 +64,7 @@ import { MediaActions, type MediaActionSource } from "~/components/media/MediaAc
 import { useRemoteOpenState } from "~/remoteOpen";
 import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
@@ -1121,11 +1122,15 @@ function RenderedMarkdownSurface({
   // The ScrollArea's viewport is the element that scrolls, so the cite observer watches it.
   const scrollViewport =
     surfaceElement?.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]") ?? null;
+  const coarsePointer = useMediaQuery({ pointer: "coarse" });
+  // Chrome's Touch to Search bar covers the bottom of the screen while text is selected, so the
+  // last lines need room to scroll above it when the file surface reaches the screen's bottom.
+  const roomForSearchBar = coarsePointer && citeChipAnchor == null;
 
   return (
     <div ref={setSurfaceElement} className="relative flex min-h-0 flex-1 flex-col">
       <ScrollArea className="min-h-0 flex-1" onKeyDown={selectRenderedContentOnSelectAll}>
-        <div ref={setMarkdownElement}>
+        <div ref={setMarkdownElement} className={cn(roomForSearchBar && "pb-28")}>
           <FileMarkdownPreview
             text={contents}
             cwd={cwd}
