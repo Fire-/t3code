@@ -1,6 +1,6 @@
 import { type RuntimeRequestId, type ScopedThreadRef } from "@t3tools/contracts";
 import { markdownProseDirection, textDirection } from "~/textDirection";
-import { useGT } from "gt-react";
+import { T, useGT } from "gt-react";
 import { memo, use, useEffect, useEffectEvent, useRef, useState } from "react";
 import { BackgroundThreadContext } from "./backgroundThread";
 import { useStableCallback } from "~/hooks/useStableCallback";
@@ -279,7 +279,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                 dir={preambleDirection ?? undefined}
               >
                 <p className="text-2xs font-medium text-muted-foreground">
-                  From the agent's reasoning
+                  <T>From the agent's reasoning</T>
                 </p>
                 <div className="max-h-40 overflow-y-auto">
                   <ChatMarkdown
