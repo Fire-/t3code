@@ -130,7 +130,8 @@ Leaving reasoning level or service tier unset uses the provider's own configurat
 
 On web and desktop, select text within one assistant response and choose
 **Cite in composer**. You can add a comment about the quote and write instructions
-around it.
+around it. If the quoted text leaves the timeline while you type, for example when its turn
+ends and folds, the comment box stays open and moves to the chip.
 
 Select the quote in a draft or sent message to return to its source. If the source
 is unavailable or has changed, the saved quote remains readable.

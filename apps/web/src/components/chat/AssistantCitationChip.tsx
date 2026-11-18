@@ -215,13 +215,10 @@ export function AssistantCitationChip({
     if (dismissal.kind === "commit") return commentEditor?.onSave(dismissal.comment) ?? true;
     return dismissal.kind !== "keep-open";
   };
+  // Cited text leaves the timeline while a comment is mid-typing, e.g. when its turn ends and
+  // folds; closing then would drop the typist into the composer. Re-anchor at the chip instead.
   const onSourceUnavailable = useEffectEvent(() => {
-    if (!sourceAnchor) return;
-    if (settleDraftOnClose("none")) {
-      commentEditor?.onOpenChange(false);
-    } else {
-      setUnavailableSourceAnchor(sourceAnchor);
-    }
+    if (sourceAnchor) setUnavailableSourceAnchor(sourceAnchor);
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- observes the cited DOM source while the comment editor is open and reacts when it disappears
   useEffect(() => {
