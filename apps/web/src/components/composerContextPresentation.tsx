@@ -327,7 +327,15 @@ function ComposerFileCommentChip(props: { record: ReviewCommentContext }) {
       </Popover>
       <Popover
         open={editing}
-        onOpenChange={(open) => {
+        onOpenChange={(open, eventDetails) => {
+          // Like reply Cite, only Escape and Cancel drop typed text; any other dismissal saves it.
+          if (
+            !open &&
+            eventDetails.reason !== "escape-key" &&
+            draft.trim() !== props.record.text.trim()
+          ) {
+            actions.editReviewComment(props.record, draft);
+          }
           setEditing(open);
           if (open) setDraft(props.record.text);
         }}

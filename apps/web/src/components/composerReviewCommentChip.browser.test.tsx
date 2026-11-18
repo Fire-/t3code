@@ -1,5 +1,6 @@
 import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { useState } from "react";
+import { userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import "~/index.css";
@@ -56,6 +57,7 @@ function Harness(props: {
           contextId={reviewCommentContextId(record.id)}
           label={record.filePath}
         />
+        <button type="button">Outside</button>
       </ComposerContextRecordsContext>
     </ComposerContextActionsContext>
   );
@@ -124,6 +126,48 @@ describe("composer file comment chip", () => {
       )!;
       cancel.click();
     });
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it("saves typed text when the pencil editor is dismissed by an outside press, not by Escape", async () => {
+    const onEdit = vi.fn();
+    await using _screen = await render(
+      <Harness comment={fileComment(true, "First note")} onEdit={onEdit} />,
+    );
+    const typeInEditor = async (value: string) => {
+      const editor = document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Comment on lines L3"]',
+      )!;
+      await act(async () => {
+        editor.focus();
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+          editor,
+          value,
+        );
+        editor.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+
+    await act(() => (elementByLabel("Edit file comment") as HTMLElement).click());
+    await typeInEditor("Typed then tapped away");
+    await userEvent.click(
+      [...document.querySelectorAll("button")].find((button) => button.textContent === "Outside")!,
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelector('textarea[aria-label="Comment on lines L3"]')).toBeNull(),
+    );
+    expect(onEdit).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "rc-1" }),
+      "Typed then tapped away",
+    );
+
+    onEdit.mockClear();
+    await act(() => (elementByLabel("Edit file comment") as HTMLElement).click());
+    await typeInEditor("Typed then escaped");
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() =>
+      expect(document.querySelector('textarea[aria-label="Comment on lines L3"]')).toBeNull(),
+    );
     expect(onEdit).not.toHaveBeenCalled();
   });
 });

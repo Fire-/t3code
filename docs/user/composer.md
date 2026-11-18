@@ -337,9 +337,10 @@ Comment on a file from its preview. In the code view, select lines and write the
 beside them. In the rendered markdown view, select text and choose **Cite**; with touch, the
 Cite button docks near the bottom of the preview instead of sitting on the selection. Both put
 a file comment chip in your message that carries the file, its lines, and the quoted text,
-and you can add a short comment right after citing. The chip shows the quoted text so several
-cites from one file read apart, and its pencil edits the comment later. An empty comment is
-fine when the quote says it all.
+and you can add a short comment right after citing. A rendered-view cite's chip shows the quoted
+text so several cites from one file read apart, and its pencil edits the comment later. Tapping
+away from the pencil's editor keeps what you typed; Escape or **Cancel** drops it. An empty
+comment is fine when the quote says it all.
 
 A pull request appears as its icon and number. Its color reflects whether it was open, draft,
 merged, or closed when it was attached. Select it to inspect the captured title and branches,
