@@ -328,7 +328,8 @@ its progress.
 
 Context you attach lands where your cursor is, as a chip inside your text: a terminal excerpt,
 a review comment from a diff or file, a preview annotation, or a file. You can type before and
-after a chip, move it by cutting and pasting, and delete it like a character. Hover a chip for
+after a chip, move it by cutting and pasting, and delete it like a character. New chips go in
+at the caret, or right after a chip you last tapped. Hover a chip for
 its brief details. Select a terminal excerpt to open its captured output, or select a review
 comment, picked element, or preview annotation to open its full details. Chips read as "Terminal
 excerpt, Terminal 1 lines 3-4" and similar to screen readers.
