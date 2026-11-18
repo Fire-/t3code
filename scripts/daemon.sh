@@ -10,6 +10,7 @@
 #   - falls back current -> bak -> stable if a build won't boot, skipping
 #     pre-v2 builds once the data has moved to statev2.sqlite
 #   - re-execs itself when this script changes (adopting the live server)
+#   - every ~5 min runs upgrade-watch.mjs (see UPGRADING.md, "When a run dies")
 #
 # Idle probe reads the live server's SQLite database directly (read-only,
 # WAL). Orchestration v2 servers use userdata/statev2.sqlite and persist
@@ -52,6 +53,11 @@ IDLE_THRESHOLD=3 # consecutive idle checks before restart (~90s)
 # The first v2 boot copies state.sqlite and migrates it before the listener
 # comes up, so allow minutes while the process is alive; a crash fails fast.
 HEALTH_TIMEOUT="${T3_HEALTH_TIMEOUT:-300}"
+# upgrade-watch.mjs resumes an upgrade cut off by a network drop and unsticks
+# Wi-Fi; both are opt-in in upgrades/watch.json. Every N loops (~5 min).
+UPGRADE_WATCH_EVERY=10
+UPGRADE_WATCH="$(dirname "$SELF")/upgrade-watch.mjs"
+UPGRADE_WATCH_LOG="$RUNTIME_DIR/upgrade-watch.log"
 
 # ── State ──────────────────────────────────────────────────────────────────
 server_pid=""
@@ -59,6 +65,8 @@ last_binary_mtime=0
 consecutive_idle=0
 busy_reason=""
 crash_count=0
+watch_tick=0
+watch_pid=""
 # A self-re-exec passes the baseline of the server it leaves running.
 handoff_baseline=""
 if [[ "${1:-}" == "--binary-baseline" && "${2:-}" =~ ^[0-9]+$ ]]; then
@@ -326,6 +334,15 @@ while true; do
 	# Interruptible sleep: SIGTERM lands in ~0s instead of up to 30s.
 	sleep "$BIN_CHECK_INTERVAL" &
 	wait $! || true
+
+	# In the background, so a slow network probe never delays supervision. It runs
+	# even while the server is down: unsticking Wi-Fi does not need the server.
+	watch_tick=$(((watch_tick + 1) % UPGRADE_WATCH_EVERY))
+	if [[ $watch_tick -eq 0 && -f "$UPGRADE_WATCH" ]] &&
+		! { [[ -n "$watch_pid" ]] && kill -0 "$watch_pid" 2>/dev/null; }; then
+		T3_RUNTIME_DIR="$RUNTIME_DIR" "$NODE_BIN" "$UPGRADE_WATCH" >>"$UPGRADE_WATCH_LOG" 2>&1 </dev/null &
+		watch_pid=$!
+	fi
 
 	# Crash recovery
 	if [[ -z "$server_pid" ]] || ! kill -0 "$server_pid" 2>/dev/null; then

@@ -88,6 +88,14 @@ To escalate, block first, then send one message to the thread the scheduled prom
 
 The daemon falls back on its own (current, then bak) when a build fails its health check, and `verify-deploy` then blocks the run. To go back by hand: `mise run swap-back`. The database backup from the deploy is `~/.t3/code/backups/statev2-pre-upgrade-<run>.sqlite`; restoring it loses everything since the deploy, so that is fire's call, never yours. The `ember-backup/<run>/*` tags hold every branch as it was before the run.
 
+## When a run dies
+
+A turn can die partway through a step, most often when the network drops and takes the provider connection with it. The run stays `running` in state.json, and the upgrade worktree keeps whatever was half done. The daemon runs `scripts/upgrade-watch.mjs` every five minutes. Once GitHub and Factory have answered two checks in a row, it sends this thread one message to pick the run back up: only when the thread's last turn failed within the last 12 hours, only while today's run is unfinished (or today's turn failed before preflight could start one), and at most twice a day. Treat that message like the scheduled prompt: `preflight`, then `preflight --resume` on exit 4. A conflict resolution left half done was never checked; read it before you stage it.
+
+The watcher also power-cycles Wi-Fi when nothing answers, Wi-Fi has been on with no address for ten minutes, and no other interface (ethernet) holds the default route. It does this at most every 30 minutes.
+
+Both are switched on in `~/.t3/code/upgrades/watch.json`: `{ "threadId": "<this thread>", "resume": true, "wifiRescue": true }`. With no file, or both off, the watcher does nothing. It logs what it does to `~/.t3/code/upgrade-watch.log` and keeps its counters in `~/.t3/code/upgrades/watch-state.json`.
+
 ## The reply
 
 Keep it short. fire reads it on a phone.
