@@ -22,6 +22,7 @@ import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as TurnTimeLine from "./TurnTimeLine.ts";
 
 const yieldToRuntime = Effect.yieldNow.pipe(
   Effect.andThen(
@@ -124,6 +125,7 @@ export const layer: Layer.Layer<
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
+    const turnTimeZone = yield* TurnTimeLine.TurnTimeZone;
 
     const load = Effect.fn("ProviderTurnControlService.load")(function* (input: {
       readonly threadId: ThreadId;
@@ -451,6 +453,20 @@ export const layer: Layer.Layer<
             mcpAppModelContext,
             input.threadId,
           );
+          const text = yield* TurnTimeLine.stampProviderText({
+            timeZone: turnTimeZone,
+            message,
+            text: projectComposerContextForProvider({
+              text: message.text,
+              records: message.context?.records ?? [],
+            }),
+            previousTimes: projections
+              .getLatestUserMessageAt(input.threadId, message.createdAt)
+              .pipe(
+                Effect.map((latest) => [latest]),
+                Effect.orElseSucceed(() => []),
+              ),
+          });
           yield* loaded.session.value
             .steerTurn({
               threadId: input.threadId,
@@ -463,10 +479,7 @@ export const layer: Layer.Layer<
               ...(appContext.length === 0 ? {} : { appContext }),
               message: {
                 messageId: message.id,
-                text: projectComposerContextForProvider({
-                  text: message.text,
-                  records: message.context?.records ?? [],
-                }),
+                text,
                 attachments: message.attachments,
                 createdBy: message.createdBy,
                 creationSource: message.creationSource,
