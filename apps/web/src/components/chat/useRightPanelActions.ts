@@ -6,6 +6,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import type { ThreadPreviewState } from "../../previewStateStore";
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+import { namedClipboardTarget, writeTextToClipboard } from "../../hooks/useCopyToClipboard";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { type ScopedThreadRef, type RunId } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -256,30 +257,24 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
   };
   const moveRightPanelSurfaceStable = useStableCallback(moveRightPanelSurface);
   const copyRightPanelFilePath = (relativePath: string) => {
-    if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: m(msg("Failed to copy path")),
-          description: m(msg("Clipboard API unavailable.")),
-        }),
-      );
-      return;
-    }
-
     const clipboardPath = formatFilePathForClipboard(
       relativePath,
       resolvePathLinkTarget(relativePath, gitCwd ?? activeProjectCwd ?? ""),
     );
-    void navigator.clipboard.writeText(clipboardPath).then(undefined, (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: m(msg("Failed to copy path")),
-          description: thrownErrorMessage(error, m) ?? m(msg("An error occurred.")),
-        }),
-      );
-    });
+    // writeTextToClipboard falls back to execCommand so remote pages served
+    // over plain HTTP (LAN/tailnet origins without a secure context) can copy.
+    void writeTextToClipboard(clipboardPath, namedClipboardTarget("file path")).then(
+      undefined,
+      (error) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: m(msg("Failed to copy path")),
+            description: thrownErrorMessage(error, m) ?? m(msg("An error occurred.")),
+          }),
+        );
+      },
+    );
   };
   const copyRightPanelFilePathStable = useStableCallback(copyRightPanelFilePath);
   const addPullRequestSurface = () => {
