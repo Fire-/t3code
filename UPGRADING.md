@@ -1,6 +1,6 @@
 # Upgrading the fork
 
-An agent brings every `overlay/*` branch and `local` up to upstream `origin/main`, rebuilds, rehearses the build on a copy of real data, publishes to `fork`, and deploys it. A T3 scheduled task runs this daily in the "t3code upgrades" thread; the scheduled prompt says who to escalate to. Read [VENDOR.md](VENDOR.md) first: the overlay model and its git rules apply here.
+An agent brings every `overlay/*` branch and `local` up to upstream `origin/main`, rebuilds, rehearses the build on a copy of real data, publishes to `fork`, and deploys it. A T3 scheduled task runs this daily in the "t3code upgrades" thread; the scheduled prompt says who to escalate to. Read [VENDOR.md](VENDOR.md) first: the overlay model and its git rules apply here. Then read `~/.t3/code/upgrades/standing-rules.md` before `preflight`: rules fire has set for every run, on top of this runbook.
 
 Every step is a command of `scripts/upgrade.mjs`, run from the main checkout:
 
