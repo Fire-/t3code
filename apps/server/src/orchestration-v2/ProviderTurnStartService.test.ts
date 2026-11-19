@@ -2357,6 +2357,7 @@ effectIt.effect.each([
         const contextPrefix = withInlineContext(context, "");
         expect(texts[0]?.startsWith(contextPrefix)).toBe(true);
         expect(texts[0]?.slice(contextPrefix.length).trim()).not.toBe("");
+        expect(texts[0]).toContain("[09-04 05:00 PDT]");
       }
       expect(harness.startTurn.mock.calls[0]?.[0].resume === true).toBe(
         context === "" && !resendsOriginal,
