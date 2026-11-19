@@ -6061,14 +6061,14 @@
     },
     " 历史记录中查找项目…"
   ],
-  "45194b35dc6d858a": [
-    "来自你的 ",
+  "970db7c5cadb6e0b": [
+    "From the last 30 days of your ",
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    " 历史记录"
+    " history"
   ],
   "5c6a6009aedbf1d0": "全选",
   "24c98c5086b8e76e": "全不选",
@@ -6096,6 +6096,7 @@
     "。"
   ],
   "9d9b9624c7bd95df": "其他文件夹",
+  "fcbd0f5e40a83cbd": "No recent conversations",
   "1eb8f3d4695033fb": [
     "已添加到 ",
     {

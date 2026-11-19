@@ -6052,14 +6052,14 @@
     },
     "-Verlauf…"
   ],
-  "45194b35dc6d858a": [
-    "Aus deinem ",
+  "970db7c5cadb6e0b": [
+    "From the last 30 days of your ",
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    "-Verlauf"
+    " history"
   ],
   "5c6a6009aedbf1d0": "Alles auswählen",
   "24c98c5086b8e76e": "Keine auswählen",
@@ -6087,6 +6087,7 @@
     "in diesem Terminal aus."
   ],
   "9d9b9624c7bd95df": "Andere Ordner",
+  "fcbd0f5e40a83cbd": "No recent conversations",
   "1eb8f3d4695033fb": [
     "Zu ",
     {

@@ -6055,13 +6055,14 @@
     },
     "…"
   ],
-  "45194b35dc6d858a": [
-    "Depuis votre historique ",
+  "970db7c5cadb6e0b": [
+    "From the last 30 days of your ",
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
-    }
+    },
+    " history"
   ],
   "5c6a6009aedbf1d0": "Tout sélectionner",
   "24c98c5086b8e76e": "Tout désélectionner",
@@ -6089,6 +6090,7 @@
     "dans ce terminal."
   ],
   "9d9b9624c7bd95df": "Autres dossiers",
+  "fcbd0f5e40a83cbd": "No recent conversations",
   "1eb8f3d4695033fb": [
     "Ajouté à ",
     {
