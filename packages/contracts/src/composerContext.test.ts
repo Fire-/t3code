@@ -3,12 +3,18 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import {
+  ASSISTANT_CITATION_CONTEXT_LENGTH,
+  ASSISTANT_CITATION_MAX_TEXT_LENGTH,
+} from "./assistantCitations.ts";
+import {
   COMPOSER_CONTEXT_KINDS,
   ComposerContextRecord,
   OrchestrationMessageContext,
+  ReviewCommentContextRecord,
 } from "./composerContext.ts";
 
 const decodeRecord = Schema.decodeUnknownOption(ComposerContextRecord);
+const decodeReviewComment = Schema.decodeUnknownOption(ReviewCommentContextRecord);
 const decodeContext = Schema.decodeUnknownSync(OrchestrationMessageContext);
 
 const base = { version: 1, contextId: "ctx_1" } as const;
@@ -176,6 +182,89 @@ describe("ComposerContextRecord", () => {
         ],
       }).records,
     ).toEqual([{ ...knownRecords.skill, contextId: "ctx_skill" }]);
+  });
+});
+
+describe("ReviewCommentContextRecord quote", () => {
+  const reviewComment = {
+    ...base,
+    kind: "review-comment",
+    label: "notes.md L3",
+    sectionId: "file:notes.md",
+    sectionTitle: "File comment",
+    filePath: "notes.md",
+    startIndex: 2,
+    endIndex: 2,
+    rangeLabel: "L3",
+    text: "",
+    diff: "quoted line",
+  } as const;
+
+  it("decodes with a quote", () => {
+    const decoded = Option.getOrThrow(
+      decodeReviewComment({
+        ...reviewComment,
+        quote: {
+          exact: "quoted line",
+          prefix: "before ",
+          suffix: " after",
+        },
+      }),
+    );
+    expect(decoded.quote).toEqual({
+      exact: "quoted line",
+      prefix: "before ",
+      suffix: " after",
+    });
+  });
+
+  it("decodes records written before quotes existed", () => {
+    const decoded = Option.getOrThrow(decodeReviewComment(reviewComment));
+    expect(decoded.quote).toBeUndefined();
+  });
+
+  it("bounds the quoted text and its context", () => {
+    expect(
+      Option.isNone(
+        decodeRecord({
+          ...reviewComment,
+          quote: {
+            exact: "x".repeat(ASSISTANT_CITATION_MAX_TEXT_LENGTH + 1),
+            prefix: "",
+            suffix: "",
+          },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      Option.isNone(
+        decodeRecord({
+          ...reviewComment,
+          quote: {
+            exact: "x",
+            prefix: "x".repeat(ASSISTANT_CITATION_CONTEXT_LENGTH + 1),
+            suffix: "",
+          },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      Option.isNone(
+        decodeRecord({
+          ...reviewComment,
+          quote: {
+            exact: "x",
+            prefix: "",
+            suffix: "x".repeat(ASSISTANT_CITATION_CONTEXT_LENGTH + 1),
+          },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      Option.isNone(
+        decodeRecord({ ...reviewComment, quote: { exact: "", prefix: "", suffix: "" } }),
+      ),
+    ).toBe(true);
   });
 });
 

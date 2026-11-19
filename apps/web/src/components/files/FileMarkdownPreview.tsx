@@ -31,6 +31,7 @@ export function FileMarkdownPreview(props: {
       threadRef={props.threadRef}
       workspaceMutationId={props.workspaceMutationId}
       className="mx-auto max-w-4xl px-6 py-5"
+      sourceOffsets
       onTaskListChange={props.onTaskListChange}
     />
   );
