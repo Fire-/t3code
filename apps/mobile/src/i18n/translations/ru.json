@@ -770,6 +770,7 @@
   "25bca212561d8ba3": "Токенов: {used} / {budget}",
   "2dc1d7193b9ba1ae": "{count, plural, one {{count} проверка} few {{count} проверки} many {{count} проверок} other {{count} проверки}}",
   "d1e4cc873f510a86": "Цель задана",
+  "d037b283771d583c": "Tasks {done}/{total}",
   "a37fc08ee9b0a937": "Отправка отзыва в OpenAI...",
   "66ebdd79f5bbcacd": "Отзыв отправлен в OpenAI",
   "f60f20f2831735fb": "ID треда: {feedbackId}",
