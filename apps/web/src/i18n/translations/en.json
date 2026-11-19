@@ -8582,23 +8582,28 @@
   "e4e91d155cb6a9b4": "Boring sidebar (group by project)",
   "f079556d67367fe7": "Show folder threads on two lines: the title, then the branch, pull request, and agent.",
   "ac1e5c94d1ad3c6a": "Two-line folder rows",
-  "9ae293971d93c819": "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect to use guest links.",
+  "20db32b7a7fd65e0": "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect, or set a public link address, to use guest links.",
   "0aa5406ac4d7f7c7": "Guest links",
+  "d4e430509402c82e": "Public link address",
+  "8d83c105855e4e5a": "Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links.",
+  "cd0e7b5cd07a0a67": "public link address",
+  "d52b3d6bf9f2a013": "Mixed",
+  "b94233c79ed5e14a": "Enter an HTTPS address with no path, such as https://t3.example.com.",
   "f0e853acd2006d53": "Linked environments",
   "13e86eb5d8287a71": "Show a predicted next message in the empty composer after a Claude or Codex turn. Tab uses it. Each is an extra cached request on your plan. Needs Codex 0.165+. Claude threads update on restart.",
   "d4b2a2ec812aafb0": "Suggest next prompt",
   "298c7150a7621c80": "Simlock device hosts",
   "67937aa49179285e": "On a Mac, clone new worktrees from a checkout cached in the T3 home folder instead of writing every file. Uses Git’s normal checkout when it can’t. Turning it off deletes the cache.",
   "f9904f78d3003f58": "Fast worktree checkout",
-  "ec7623deed751c05": [
-    "Share a thread with a guest who watches it live in a browser and sends messages you approve. Needs T3 Connect: sign in and link this machine in",
+  "cd24900f08eb1ffc": [
+    "Share a thread with a guest who watches it live and sends messages you approve. Needs T3 Connect (link this machine in",
     " ",
     {
       "t": "Link",
       "i": 1,
       "c": "Sharing & access"
     },
-    ". Turning it off stops every guest link."
+    ") or the address below. Turning it off stops every guest link."
   ],
   "bff0033ea41eb38e": [
     "Let agents here work on your other machines, and theirs here. Turn it on for each machine, then link them in",
@@ -9828,7 +9833,6 @@
   "16bdc70b858c223f": "Reset proactive panels to default",
   "c5424f09d77138ff": "When to compact an idle Claude thread over 200,000 tokens: after you return, just before its prompt cache expires, or never. Each Claude provider can override this.",
   "3e99c5c14f4939c8": "Reset compact idle threads to default",
-  "d52b3d6bf9f2a013": "Mixed",
   "cd72fe451ba0d6aa": "New projects",
   "394c3bd0a1782c8e": "Leave empty to use \"~/\" when the Add Project browser opens.",
   "f9b912a818bd869d": "Reset add project base directory to default",
@@ -11473,7 +11477,8 @@
   "8f71bc7c325e23e3": "hide tool calls commands edits searches work log activity quiet chat zen final answers only",
   "5a3af411a0d5354c": "accessibility a11y screen reader nvda jaws voiceover orca narrator speech announce read aloud messages activity steps",
   "d443390c4d2dcfd4": "accessibility a11y screen reader nvda jaws voiceover orca narrator window title tab title alt tab taskbar thread status order working approval",
-  "6826fa9579c22035": "beta share guest invite link teammate watch t3 connect tunnel",
+  "497aa6f68531e34e": "beta share guest invite link teammate watch t3 connect tunnel public address https proxy",
+  "648028fbc96c368a": "guest links public address url https origin tunnel reverse proxy cloudflare without t3 connect",
   "f10c06cba0cdf7fe": "beta link another machine vps peer agents work there delegate",
   "4a21cf825a2045b0": "beta tab autocomplete predict next message claude codex ghost text",
   "fea2dc36585c4a20": "Simlock device hosts (alpha)",
