@@ -634,6 +634,10 @@
     "./paletteSearchCopy": {
       "types": "./src/paletteSearchCopy.ts",
       "import": "./src/paletteSearchCopy.ts"
+    },
+    "./turnTimeLine": {
+      "types": "./src/turnTimeLine.ts",
+      "import": "./src/turnTimeLine.ts"
     }
   },
   "scripts": {

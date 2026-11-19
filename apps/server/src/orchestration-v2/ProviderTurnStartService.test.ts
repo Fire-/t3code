@@ -86,6 +86,7 @@ import * as RunExecutionService from "./RunExecutionService.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as TurnTimeLine from "./TurnTimeLine.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
@@ -466,6 +467,8 @@ function makeLocalCommandHarness(input: {
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
+  readonly message?: Partial<OrchestrationV2ThreadProjection["messages"][number]>;
+  readonly previousUserMessageAt?: DateTime.Utc;
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
   readonly ensureThreadFailure?: unknown;
@@ -568,6 +571,7 @@ function makeLocalCommandHarness(input: {
     creationSource: "web",
     createdAt: now,
     updatedAt: now,
+    ...input.message,
   };
   let projection: OrchestrationV2ThreadProjection = {
     thread: {
@@ -1361,6 +1365,7 @@ function makeLocalCommandHarness(input: {
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThreadRecords,
           getTurnStartContext,
+          getLatestUserMessageAt: () => Effect.succeed(input.previousUserMessageAt),
           getRuntimeRecoveryProjection,
           getRun,
           getTurnStartHistory: () =>
@@ -1399,6 +1404,7 @@ function makeLocalCommandHarness(input: {
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
           resolve: resolveRuntimePolicy,
         }),
+        Layer.succeed(TurnTimeLine.TurnTimeZone, Effect.succeed("America/Los_Angeles")),
       ),
     ),
   );
@@ -2249,7 +2255,9 @@ effectIt.effect("sends new steering text when restarting a manual continuation",
       sideChat: { contextRun: "delivered" },
     });
     yield* harness.start;
-    expect(harness.startTurn.mock.calls[0]?.[0].message.text).toBe("New steering instruction");
+    expect(harness.startTurn.mock.calls[0]?.[0].message.text).toBe(
+      "[09-04 05:00 PDT]\nNew steering instruction",
+    );
     expect(harness.startRootRun.mock.calls[0]?.[0].resume).toBe(false);
   }),
 );
@@ -2342,7 +2350,7 @@ effectIt.effect.each([
       expect(texts).toHaveLength(1);
       if (resendsOriginal || context === "") {
         expect(texts[0]).toBe(
-          withInlineContext(context, resendsOriginal ? "Original request" : ""),
+          withInlineContext(context, resendsOriginal ? "[09-04 05:00 PDT]\nOriginal request" : ""),
         );
       } else {
         // A resume that has to carry context still tells the agent to continue.
@@ -2642,6 +2650,37 @@ effectIt.effect("leaves delegated children to their own runs when the parent sta
       relatedThreadIds: [ThreadId.make("thread:provider_native")],
       relatedProviderThreadIds: [ProviderThreadId.make("provider-thread:provider_native")],
     });
+  }),
+);
+
+effectIt.effect.each([
+  {
+    label: "since the previous run finished",
+    text: "Continue",
+    previousUserMessageAt: "2026-09-04T11:50:00Z",
+    sent: "[09-04 05:02 PDT Δ2m]\nContinue",
+  },
+  {
+    label: "since a later user message",
+    text: "Continue",
+    previousUserMessageAt: "2026-09-04T12:01:00Z",
+    sent: "[09-04 05:02 PDT Δ1m]\nContinue",
+  },
+])("tells the provider when the user sent the message $label", (row) =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: row.text,
+      message: { createdAt: DateTime.makeUnsafe("2026-09-04T12:02:30Z") },
+      ...(row.previousUserMessageAt === undefined
+        ? {}
+        : { previousUserMessageAt: DateTime.makeUnsafe(row.previousUserMessageAt) }),
+      previousTurn: { runStatus: "completed", turnStatus: "completed" },
+    });
+
+    yield* harness.start;
+
+    expect(harness.startRootRun.mock.calls[0]?.[0].message.text).toBe(row.sent);
+    expect(harness.projection().messages.at(-1)?.text).toBe(row.text);
   }),
 );
 
