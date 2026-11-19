@@ -62,6 +62,8 @@ Block and escalate when:
 - A rehearsal shows broken behavior that you cannot trace to one overlay.
 - You are unsure. A day's delay costs little; a wrong merge deployed to fire's daily driver costs a lot.
 
+Before you block on a judgment call, try the option you would recommend: apply it in the upgrade worktree, then run the typecheck and the affected tests. If both pass and it keeps what the overlay does, keep it, say in the `resolved` note what you weighed, and list it for review in your reply. Block only if it fails or you are still unsure, and put what you tried in the escalation. If you can't typecheck or test yet (for example, before the lockfile is merged and installed), record what you chose and why, keep going, and check it as soon as the install is done.
+
 ### Conflicts between overlays
 
 Overlays are merged into `local` one at a time (alphabetically), so two overlays that change the same lines can conflict there even after each merged cleanly with upstream. `rebuild` then stops with the main checkout mid-merge on `local`. Resolve the files there by the same rules, keeping both overlays' behavior, `git add` them, and `git commit --no-edit`. rerere records the resolution. Then run `rebuild` again: it rebuilds `local` from scratch and rerere replays your resolution. Record it with `note local "<files and what you kept>"`. If `pnpm install --frozen-lockfile` fails because the merged lockfile is out of date, block: `local` takes merge commits only.
