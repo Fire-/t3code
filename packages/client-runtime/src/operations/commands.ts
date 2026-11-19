@@ -3,6 +3,7 @@ import { translatableMessage } from "../errors/translatable.ts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
   type ThreadLinkedPullRequest,
+  canRollbackToCheckpoint,
   CommandId,
   CheckpointId,
   CheckpointScopeId,
@@ -1040,9 +1041,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       );
     if (
       checkpoint === undefined ||
-      // Missing snapshots support conversation rewind only.
-      (checkpoint.status !== "ready" &&
-        !(input.restoreFiles === false && checkpoint.status === "missing"))
+      !canRollbackToCheckpoint(checkpoint.status, input.restoreFiles !== false)
     ) {
       const target =
         input.checkpointId === undefined
