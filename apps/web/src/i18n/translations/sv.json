@@ -8624,23 +8624,28 @@
   "e4e91d155cb6a9b4": "Enkelt sidofält (gruppera per projekt)",
   "f079556d67367fe7": "Visa trådar i mappar på två rader: titeln, sedan gren, pull request och agent.",
   "ac1e5c94d1ad3c6a": "Mapprader på två rader",
-  "9ae293971d93c819": "Dela en tråd med en gäst som följer den live i en webbläsare och skickar meddelanden som du godkänner. Logga in på T3 Connect för att använda gästlänkar.",
+  "20db32b7a7fd65e0": "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect, or set a public link address, to use guest links.",
   "0aa5406ac4d7f7c7": "Gästlänkar",
+  "d4e430509402c82e": "Public link address",
+  "8d83c105855e4e5a": "Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links.",
+  "cd0e7b5cd07a0a67": "public link address",
+  "d52b3d6bf9f2a013": "Blandat",
+  "b94233c79ed5e14a": "Enter an HTTPS address with no path, such as https://t3.example.com.",
   "f0e853acd2006d53": "Länkade miljöer",
   "13e86eb5d8287a71": "Visa ett förutsagt nästa meddelande i det tomma inmatningsfältet efter en omgång med Claude eller Codex. Tab använder det. Varje förslag är en extra cachad begäran i ditt abonnemang. Kräver Codex 0.165+. Claude-trådar uppdateras vid omstart.",
   "d4b2a2ec812aafb0": "Föreslå nästa prompt",
   "298c7150a7621c80": "Simlock-enhetsvärdar",
   "67937aa49179285e": "På en Mac klonas nya worktrees från en utcheckning som cachas i T3-hemmappen i stället för att varje fil skrivs. Använder Gits vanliga utcheckning när det inte går. Om du stänger av det tas cachen bort.",
   "f9904f78d3003f58": "Snabb utcheckning av worktree",
-  "ec7623deed751c05": [
-    "Dela en tråd med en gäst som följer den live i en webbläsare och skickar meddelanden som du godkänner. Kräver T3 Connect: logga in och länka den här datorn under",
+  "cd24900f08eb1ffc": [
+    "Share a thread with a guest who watches it live and sends messages you approve. Needs T3 Connect (link this machine in",
     " ",
     {
       "t": "Link",
       "i": 1,
-      "c": "Delning och åtkomst"
+      "c": "Sharing & access"
     },
-    ". Om du stänger av det stoppas alla gästlänkar."
+    ") or the address below. Turning it off stops every guest link."
   ],
   "bff0033ea41eb38e": [
     "Låt agenter här arbeta på dina andra datorer, och deras här. Aktivera det på varje dator och länka dem sedan under",
@@ -9882,7 +9887,6 @@
   "16bdc70b858c223f": "Återställ proaktiva paneler till standard",
   "c5424f09d77138ff": "När en inaktiv Claude-tråd på över 200 000 token ska komprimeras: när du kommer tillbaka, precis innan dess promptcache går ut, eller aldrig. Varje Claude-leverantör kan åsidosätta detta.",
   "3e99c5c14f4939c8": "Återställ komprimering av inaktiva trådar till standard",
-  "d52b3d6bf9f2a013": "Blandat",
   "cd72fe451ba0d6aa": "Nya projekt",
   "394c3bd0a1782c8e": "Lämna tomt för att använda ”~/” när bläddraren Lägg till projekt öppnas.",
   "f9b912a818bd869d": "Återställ baskatalog för nya projekt till standard",
@@ -11526,7 +11530,8 @@
   "8f71bc7c325e23e3": "dölj verktygsanrop kommandon redigeringar sökningar arbetslogg aktivitet tyst chatt zen bara slutliga svar",
   "5a3af411a0d5354c": "tillgänglighet a11y skärmläsare nvda jaws voiceover orca skärmläsaren tal meddela läs upp meddelanden aktivitet steg",
   "d443390c4d2dcfd4": "tillgänglighet a11y skärmläsare nvda jaws voiceover orca skärmläsaren fönstertitel fliktitel alt tab aktivitetsfält trådstatus ordning arbetar godkännande",
-  "6826fa9579c22035": "beta dela gäst bjud in länk kollega titta t3 connect tunnel",
+  "497aa6f68531e34e": "beta share guest invite link teammate watch t3 connect tunnel public address https proxy",
+  "648028fbc96c368a": "guest links public address url https origin tunnel reverse proxy cloudflare without t3 connect",
   "f10c06cba0cdf7fe": "beta länka en annan dator vps peer agenter arbetar där delegera",
   "4a21cf825a2045b0": "beta tabb autokomplettering förutsäg nästa meddelande claude codex spöktext",
   "fea2dc36585c4a20": "Simlock-enhetsvärdar (alfa)",

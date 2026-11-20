@@ -343,6 +343,136 @@ it.effect("closes an open guest stream when T3 Connect stops serving the link's 
   }).pipe(Effect.provide(layerTest)),
 );
 
+// A public address set in Settings > Labs, standing in for the owner's own HTTPS tunnel.
+const PUBLIC_ADDRESS = "https://guest.example.test";
+const shareThreadAtAddress = Effect.fn(function* (baseUrl: string | null) {
+  yield* Ref.set(hostname, null);
+  const settings = yield* ServerSettings.ServerSettingsService;
+  yield* settings.updateSettings({ guestSharePublicBaseUrl: baseUrl });
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make(`create:${threadId}`),
+    threadId,
+    projectId: ProjectId.make("project:guest-share-service"),
+    title: "Review me",
+    modelSelection: { instanceId, model: "gpt-5.1-codex" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdBy: "user",
+    creationSource: "web",
+  });
+  const guestShares = yield* GuestShareService.GuestShareService;
+  const { url } = yield* guestShares.create({ threadId });
+  const credential = url.slice(url.indexOf("#") + 1);
+  return { orchestrator, guestShares, url, credential };
+});
+
+it.effect("creates and serves a link at the configured public address without T3 Connect", () =>
+  Effect.gen(function* () {
+    const { guestShares, url, credential } = yield* shareThreadAtAddress(
+      "https://guest.example.test:8443",
+    );
+    assert.isTrue(url.startsWith("https://guest.example.test:8443/guest#"));
+    const { thread } = yield* Orchestrator.OrchestratorV2.use((orchestrator) =>
+      orchestrator.getThreadRecords(threadId, []),
+    );
+    assert.equal(thread.guestShare?.host, "guest.example.test:8443");
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    assert.isTrue(Exit.isSuccess(yield* Effect.exit(guestShares.check(session))));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "refuses guest requests once the public address is cleared, and the same address revives them",
+  () =>
+    Effect.gen(function* () {
+      const { guestShares, credential } = yield* shareThreadAtAddress(PUBLIC_ADDRESS);
+      const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ guestSharePublicBaseUrl: null });
+      assert.equal((yield* Effect.flip(guestShares.check(session))).reason, "inactive");
+      // Like a tunnel that comes back on the same host, the same address lets the guest back in.
+      yield* settings.updateSettings({ guestSharePublicBaseUrl: PUBLIC_ADDRESS });
+      assert.isTrue(Exit.isSuccess(yield* Effect.exit(guestShares.check(session))));
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("closes an open guest stream when the public address is cleared", () =>
+  Effect.gen(function* () {
+    const { guestShares, credential } = yield* shareThreadAtAddress(PUBLIC_ADDRESS);
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    const collecting = yield* Stream.runCollect(yield* guestShares.stream(session)).pipe(
+      Effect.forkChild,
+    );
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({ guestSharePublicBaseUrl: null });
+    yield* TestClock.adjust("30 seconds");
+    const received = Array.from(yield* Fiber.join(collecting));
+    assert.deepEqual(
+      received.map((event) => (event.type === "thread" ? event.item.kind : event.type)),
+      ["view", "snapshot"],
+    );
+    assert.equal((yield* Effect.flip(guestShares.check(session))).reason, "inactive");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("ends a link created under T3 Connect once a public address is configured", () =>
+  Effect.gen(function* () {
+    const { guestShares, credential } = yield* shareThread;
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({ guestSharePublicBaseUrl: PUBLIC_ADDRESS });
+    assert.equal((yield* Effect.flip(guestShares.check(session))).reason, "inactive");
+    // A new link points at the configured address.
+    const { url } = yield* guestShares.create({ threadId });
+    assert.isTrue(url.startsWith(`${PUBLIC_ADDRESS}/guest#`));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("ends existing links when the public address changes to another host", () =>
+  Effect.gen(function* () {
+    const { guestShares, credential } = yield* shareThreadAtAddress(PUBLIC_ADDRESS);
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({ guestSharePublicBaseUrl: "https://other.example.test" });
+    assert.equal((yield* Effect.flip(guestShares.check(session))).reason, "inactive");
+    const { url } = yield* guestShares.create({ threadId });
+    assert.isTrue(url.startsWith("https://other.example.test/guest#"));
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses new links with neither T3 Connect nor a public address", () =>
+  Effect.gen(function* () {
+    yield* Ref.set(hostname, null);
+    const guestShares = yield* GuestShareService.GuestShareService;
+    assert.equal(
+      (yield* Effect.flip(guestShares.create({ threadId }))).reason,
+      "connect_unavailable",
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("keeps the beta switch authoritative with a configured public address", () =>
+  Effect.gen(function* () {
+    const { guestShares, credential } = yield* shareThreadAtAddress(PUBLIC_ADDRESS);
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    const collecting = yield* Stream.runCollect(yield* guestShares.stream(session)).pipe(
+      Effect.forkChild,
+    );
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({ guestSharingEnabled: false });
+    yield* TestClock.adjust("30 seconds");
+    yield* Fiber.join(collecting);
+    assert.equal((yield* Effect.flip(guestShares.create({ threadId }))).reason, "disabled");
+    assert.equal((yield* Effect.flip(guestShares.check(session))).reason, "inactive");
+    yield* settings.updateSettings({ guestSharingEnabled: true });
+    assert.isTrue(Exit.isSuccess(yield* Effect.exit(guestShares.check(session))));
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("refuses new links and every guest request while the beta is off", () =>
   Effect.gen(function* () {
     const { guestShares, credential } = yield* shareThread;
