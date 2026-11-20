@@ -1,7 +1,10 @@
 import * as DateTime from "effect/DateTime";
 import { msg } from "gt-react";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
-import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import {
+  continuesSteerMarker,
+  resolveUserMessagePresentation,
+} from "@t3tools/client-runtime/user-message";
 import {
   isLiveSubagentTurnItem,
   waitingOnSubagentsLabel,
@@ -2429,7 +2432,7 @@ export function deriveMessagesTimelineRows(
     const groupedWithNext = timelineRowIsOwnUserMessage(result[index + 1]);
     const groupedWithPrevious = timelineRowIsOwnUserMessage(previous);
     const continuesSteer =
-      groupedWithPrevious && messageIsSteer(row.message) && messageIsSteer(previous.message);
+      groupedWithPrevious && continuesSteerMarker(row.message, previous.message);
     if (!groupedWithNext && !groupedWithPrevious) return row;
     return { ...row, groupedWithNext, groupedWithPrevious, continuesSteer };
   });
@@ -2443,10 +2446,6 @@ function timelineRowIsOwnUserMessage(
     row.message.role === "user" &&
     resolveUserMessagePresentation(row.message).attribution === null
   );
-}
-
-function messageIsSteer(message: ChatMessage): boolean {
-  return message.inputIntent === "steer" || message.inputIntent === "promoted_queued_to_steer";
 }
 
 function timelineRowIsWorkLog(row: MessagesTimelineRow | undefined): boolean {
