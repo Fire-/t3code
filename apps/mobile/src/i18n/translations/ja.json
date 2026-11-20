@@ -782,6 +782,7 @@
   "25bca212561d8ba3": "{used} / {budget} トークン",
   "2dc1d7193b9ba1ae": "{count, plural, other {{count} 件のチェック}}",
   "d1e4cc873f510a86": "ゴールを設定しました",
+  "d037b283771d583c": "Tasks {done}/{total}",
   "a37fc08ee9b0a937": "OpenAI にフィードバックを送信しています...",
   "66ebdd79f5bbcacd": "OpenAI にフィードバックを送信しました",
   "f60f20f2831735fb": "スレッド ID: {feedbackId}",
