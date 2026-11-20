@@ -3315,6 +3315,7 @@
   "2ce5b965862599cc": "Du hast nicht committete Änderungen. Sie werden in den anderen Branch übernommen oder blockieren den Wechsel, wenn sie kollidieren.",
   "c4280e2f9ff0e319": "Branch wechseln",
   "2369e92930d2d529": "Ab hier bearbeiten?",
+  "d38f82c71b555bc6": "Rewind chat to before this message. Your prompt and attachments return to the composer. Files stay as they are: there is no file snapshot for this point.",
   "2028c02df18f2ccd": "Chat auf den Stand vor dieser Nachricht zurückspulen. Dein Prompt und deine Anhänge kehren ins Eingabefeld zurück. „Auch Dateien zurücksetzen“ macht auch deine eigenen Änderungen rückgängig.",
   "95021203628e2378": "Auch Dateien zurücksetzen",
   "c1c9ebabaa960f8c": "Zurücksetzen und Änderungen behalten",

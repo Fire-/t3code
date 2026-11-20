@@ -196,6 +196,7 @@ export function BranchRestoreConfirmHost(props: {
 interface PendingRevert {
   readonly turnCount: number;
   readonly messageId: MessageId;
+  readonly canRestoreFiles: boolean;
 }
 
 const revertConfirmAtom = makeThreadOverlayAtom<PendingRevert>("revert-confirm");
@@ -234,23 +235,28 @@ export function RevertConfirmHost(props: {
             <T>Edit from here?</T>
           </AlertDialogTitle>
           <AlertDialogDescription>
-            <T>
-              Rewind chat to before this message. Your prompt and attachments return to the
-              composer. “Revert files too” also undoes your own edits.
-            </T>
+            {pending?.canRestoreFiles === false ? (
+              <T>
+                Rewind chat to before this message. Your prompt and attachments return to the
+                composer. Files stay as they are: there is no file snapshot for this point.
+              </T>
+            ) : (
+              <T>
+                Rewind chat to before this message. Your prompt and attachments return to the
+                composer. “Revert files too” also undoes your own edits.
+              </T>
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogClose render={<Button variant="outline" />}>
             <T>Cancel</T>
           </AlertDialogClose>
-          <Button
-            variant="destructive-outline"
-            disabled={!canRestoreFiles}
-            onClick={() => confirm(true)}
-          >
-            <T>Revert files too</T>
-          </Button>
+          {pending?.canRestoreFiles === false ? null : (
+            <Button variant="destructive-outline" onClick={() => confirm(true)}>
+              <T>Revert files too</T>
+            </Button>
+          )}
           <Button onClick={() => confirm(false)}>
             <T>Revert and keep changes</T>
           </Button>

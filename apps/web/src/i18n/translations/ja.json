@@ -3310,6 +3310,7 @@
   "2ce5b965862599cc": "コミットされていない変更があります。変更は別のブランチに引き継がれます。競合する場合は切り替えがブロックされます。",
   "c4280e2f9ff0e319": "ブランチを切り替え",
   "2369e92930d2d529": "ここから編集しますか？",
+  "d38f82c71b555bc6": "Rewind chat to before this message. Your prompt and attachments return to the composer. Files stay as they are: there is no file snapshot for this point.",
   "2028c02df18f2ccd": "このメッセージの前までチャットを巻き戻します。プロンプトと添付ファイルは入力欄に戻ります。「ファイルも元に戻す」を選ぶと、自分で行った編集も元に戻ります。",
   "95021203628e2378": "ファイルも元に戻す",
   "c1c9ebabaa960f8c": "巻き戻して変更を保持",

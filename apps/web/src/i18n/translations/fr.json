@@ -3314,6 +3314,7 @@
   "2ce5b965862599cc": "Vous avez des modifications non commitées. Elles seront reportées sur l’autre branche, ou bloqueront le changement en cas de conflit.",
   "c4280e2f9ff0e319": "Changer de branche",
   "2369e92930d2d529": "Modifier à partir d’ici ?",
+  "d38f82c71b555bc6": "Rewind chat to before this message. Your prompt and attachments return to the composer. Files stay as they are: there is no file snapshot for this point.",
   "2028c02df18f2ccd": "Ramène la discussion avant ce message. Votre prompt et vos pièces jointes reviennent dans la zone de saisie. « Annuler aussi les fichiers » annule également vos propres modifications.",
   "95021203628e2378": "Annuler aussi les fichiers",
   "c1c9ebabaa960f8c": "Revenir en arrière en gardant les modifications",
