@@ -6071,13 +6071,14 @@
     },
     " 기록에서 프로젝트를 찾는 중…"
   ],
-  "45194b35dc6d858a": [
+  "970db7c5cadb6e0b": [
+    "From the last 30 days of your ",
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    " 기록에서"
+    " history"
   ],
   "5c6a6009aedbf1d0": "모두 선택",
   "24c98c5086b8e76e": "모두 선택 해제",
@@ -6104,6 +6105,7 @@
     "을(를) 실행하세요."
   ],
   "9d9b9624c7bd95df": "기타 폴더",
+  "fcbd0f5e40a83cbd": "No recent conversations",
   "1eb8f3d4695033fb": [
     {
       "i": 1,
