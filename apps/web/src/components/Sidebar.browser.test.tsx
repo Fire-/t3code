@@ -8,6 +8,8 @@ import {
   EnvironmentId,
   type LocalApi,
   ProjectId,
+  ProviderInstanceId,
+  RunId,
   ThreadId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -395,5 +397,120 @@ describe("sidebar settled pagination", () => {
     const loadedRows = screen.container.querySelectorAll("[data-thread-item]").length;
     await act(() => moreButton.click());
     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(loadedRows);
+  });
+});
+
+describe("sidebar running child threads", () => {
+  it("lists running children under their parent, opens one on tap, and drops it when it finishes", async () => {
+    using stack = new DisposableStack();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    stack.defer(() => style.remove());
+    const activeProject = project("active");
+    const parent = threadShell(activeProject.id, 0);
+    const parentRef = { environmentId: activeProject.environmentId, threadId: parent.id };
+    const subagent = (index: number, running: boolean) =>
+      makeThreadFixture({
+        environmentId: activeProject.environmentId,
+        id: ThreadId.make(`child-${index}`),
+        projectId: activeProject.id,
+        title: `Child task ${index}`,
+        createdAt: `2026-01-01T00:0${index}:00.000Z`,
+        lineage: {
+          rootThreadId: parent.id,
+          parentThreadId: parent.id,
+          relationshipToParent: "subagent",
+        },
+        ...(running
+          ? {
+              runtime: {
+                status: "running",
+                activeRunId: RunId.make(`child-run-${index}`),
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                providerName: null,
+                lastError: null,
+                updatedAt: "2026-01-01T00:10:00.000Z",
+              },
+            }
+          : {}),
+      });
+    const threads = [parent, subagent(1, true), subagent(2, true), subagent(3, true)];
+    vi.mocked(useProjects).mockReturnValue([activeProject]);
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads,
+      subagent(4, true),
+      subagent(5, false),
+    ]);
+    vi.mocked(useThreadRouteTarget).mockReturnValue({ kind: "server", threadRef: parentRef });
+    vi.mocked(useHandleNewThread).mockReturnValue({
+      activeDraftThread: null,
+      activeThread: null,
+      defaultProjectRef: {
+        environmentId: activeProject.environmentId,
+        projectId: activeProject.id,
+      },
+      defaultProjectFallbackReady: true,
+      handleNewThread: vi.fn().mockResolvedValue(null),
+      routeDraftId: null,
+      routeThreadRef: parentRef,
+    });
+    const tree = () => (
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>
+    );
+    await using screen = await render(tree());
+    const childRows = () =>
+      [...screen.container.querySelectorAll<HTMLElement>('[data-testid="sidebar-child-row"]')].map(
+        (row) => row.textContent,
+      );
+
+    await expect.element(screen.getByText("Child task 4")).toBeInTheDocument();
+    expect(childRows().map((text) => text?.replace(/\d+s$/, ""))).toEqual([
+      "Child task 4",
+      "Child task 3",
+      "Child task 2",
+    ]);
+    await expect.element(screen.getByText("+1 more running")).toBeInTheDocument();
+    expect(screen.container.textContent).not.toContain("Child task 5");
+    const parentItem = screen.getByText("Thread 0").element().closest("li")!;
+    expect(
+      parentItem.nextElementSibling?.querySelector('[data-testid="sidebar-child-row"]'),
+    ).not.toBeNull();
+    const childRow = screen.getByRole("button", { name: /^Child task 3, Working/ });
+    // Phone width: the one-line child row fits inside the parent's column, indented under it.
+    expect(window.innerWidth).toBeLessThanOrEqual(414);
+    const parentBox = parentItem.getBoundingClientRect();
+    const childBox = childRow.element().getBoundingClientRect();
+    const childTitle = screen.getByText("Child task 3").element().getBoundingClientRect();
+    expect(childBox.right).toBeLessThanOrEqual(parentBox.right);
+    expect(childBox.height).toBeLessThan(parentBox.height / 2);
+    expect(childTitle.left).toBeGreaterThan(childBox.left + 16);
+
+    parentItem.querySelector<HTMLElement>("[data-sidebar-row]")!.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect
+      .element(screen.getByRole("button", { name: /^Child task 4, Working/ }))
+      .toHaveFocus();
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(parentItem.querySelector("[data-sidebar-row]"));
+
+    const navigate = vi.spyOn(screen.router!, "navigate");
+    await userEvent.click(childRow);
+    expect(navigate).toHaveBeenCalledExactlyOnceWith({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: activeProject.environmentId, threadId: ThreadId.make("child-3") },
+    });
+
+    vi.mocked(useQuietThreadShells).mockReturnValue([...threads, subagent(4, false)]);
+    await screen.rerender(tree());
+    await expect.element(screen.getByText("Child task 4")).not.toBeInTheDocument();
+    expect(childRows().map((text) => text?.replace(/\d+s$/, ""))).toEqual([
+      "Child task 3",
+      "Child task 2",
+      "Child task 1",
+    ]);
+    expect(screen.container.querySelector('[data-testid="sidebar-child-overflow"]')).toBeNull();
   });
 });

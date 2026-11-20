@@ -1,6 +1,9 @@
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import {
+  resolveThreadWorkingStartedAt,
+  threadRuntimeIsActive,
+} from "@t3tools/client-runtime/state/models";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
@@ -19,6 +22,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-search";
 import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
 import {
+  isListedThreadLineage,
   type ContextMenuItem,
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
@@ -607,6 +611,64 @@ export function filterSidebarV2VisibleThreads<
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
+}
+
+const SIDEBAR_CHILD_THREAD_LIMIT = 3;
+
+interface SidebarChildThreadGroup<T> {
+  readonly threads: readonly T[];
+  /** Running children past the limit, which the parent row only counts. */
+  readonly overflowCount: number;
+}
+
+/**
+ * Running children by their parent's scoped thread key, newest first: subagents and side
+ * chats by lineage, and tasks `delegatedUnderParent` places under a thread in a linked
+ * environment. Threads with a row of their own stay out, and so do a child's own children.
+ */
+export function groupSidebarChildThreads<
+  T extends Pick<
+    SidebarThreadSummary,
+    "archivedAt" | "createdAt" | "delegatedFrom" | "environmentId" | "id" | "lineage" | "runtime"
+  >,
+>(
+  threads: readonly T[],
+  delegatedUnderParent: ReadonlySet<string>,
+  limit = SIDEBAR_CHILD_THREAD_LIMIT,
+): ReadonlyMap<string, SidebarChildThreadGroup<T>> {
+  const childKeys = new Set<string>();
+  const runningByParent = new Map<string, T[]>();
+  for (const thread of threads) {
+    const ref = scopeThreadRef(thread.environmentId, thread.id);
+    if (!isShownUnderParent(ref, thread.lineage, delegatedUnderParent)) continue;
+    childKeys.add(scopedThreadKey(ref));
+    if (thread.archivedAt !== null || !threadRuntimeIsActive(thread.runtime)) continue;
+    const parent = !isListedThreadLineage(thread.lineage)
+      ? thread.lineage.parentThreadId === null
+        ? null
+        : scopeThreadRef(thread.environmentId, thread.lineage.parentThreadId)
+      : thread.delegatedFrom == null
+        ? null
+        : scopeThreadRef(thread.delegatedFrom.environmentId, thread.delegatedFrom.threadId);
+    if (parent === null) continue;
+    const parentKey = scopedThreadKey(parent);
+    const siblings = runningByParent.get(parentKey);
+    if (siblings) siblings.push(thread);
+    else runningByParent.set(parentKey, [thread]);
+  }
+  const groups = new Map<string, SidebarChildThreadGroup<T>>();
+  for (const [parentKey, children] of runningByParent) {
+    if (childKeys.has(parentKey)) continue;
+    children.sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id),
+    );
+    groups.set(parentKey, {
+      threads: children.slice(0, limit),
+      overflowCount: Math.max(0, children.length - limit),
+    });
+  }
+  return groups;
 }
 
 export function buildBulkTitleRegenerationContextMenuItem(input: {

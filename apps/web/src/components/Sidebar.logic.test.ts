@@ -36,6 +36,7 @@ import {
   groupSidebarThreadsByProject,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
+  groupSidebarChildThreads,
 } from "./Sidebar.logic";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -1702,5 +1703,120 @@ describe("shouldCreateNewThreadInCurrentProject", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 1, 3)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(false, 0, 0)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(true, 2, 2)).toBe(true);
+  });
+});
+
+describe("groupSidebarChildThreads", () => {
+  const otherEnvironmentId = EnvironmentId.make("environment-linked");
+  const parentId = ThreadId.make("thread-parent");
+  const parentKey = scopedThreadKey(scopeThreadRef(localEnvironmentId, parentId));
+  const running = (createdAt = "2026-03-09T10:00:00.000Z") => ({
+    createdAt,
+    latestRun: { ...makeLatestRun({ completedAt: null }), status: "running" as const },
+    runtime: {
+      status: "running" as const,
+      activeRunId: "turn-1" as never,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerName: null,
+      lastError: null,
+      updatedAt: createdAt,
+    },
+  });
+  const subagentOf = (id: string, parent: ThreadId, overrides: ThreadFixtureOverrides = {}) =>
+    makeThread({
+      id: ThreadId.make(id),
+      title: id,
+      lineage: { rootThreadId: parent, parentThreadId: parent, relationshipToParent: "subagent" },
+      ...running(),
+      ...overrides,
+    });
+  const ids = (group: { threads: readonly Thread[] } | undefined) =>
+    group?.threads.map((thread) => thread.id) ?? [];
+
+  it("lists running subagents, side chats and delegated tasks under their parent", () => {
+    const delegated = makeThread({
+      id: ThreadId.make("thread-delegated"),
+      environmentId: otherEnvironmentId,
+      delegatedFrom: { environmentId: localEnvironmentId, threadId: parentId, title: "Parent" },
+      ...running("2026-03-09T10:01:00.000Z"),
+    });
+    const sideChat = makeThread({
+      id: ThreadId.make("thread-side-chat"),
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "fork",
+        sideChat: true,
+      },
+      ...running("2026-03-09T10:02:00.000Z"),
+    });
+    const groups = groupSidebarChildThreads(
+      [
+        makeThread({ id: parentId }),
+        subagentOf("thread-subagent", parentId, running("2026-03-09T10:03:00.000Z")),
+        sideChat,
+        delegated,
+      ],
+      new Set([threadKey(scopeThreadRef(otherEnvironmentId, delegated.id))]),
+    );
+
+    expect(ids(groups.get(parentKey))).toEqual([
+      "thread-subagent",
+      "thread-side-chat",
+      "thread-delegated",
+    ]);
+    expect(groups.get(parentKey)?.overflowCount).toBe(0);
+  });
+
+  it("leaves out finished and archived children, grandchildren, and threads with their own row", () => {
+    const subagent = subagentOf("thread-subagent", parentId);
+    const groups = groupSidebarChildThreads(
+      [
+        makeThread({ id: parentId }),
+        subagent,
+        subagentOf("thread-finished", parentId, {
+          latestRun: makeLatestRun(),
+          runtime: null,
+        }),
+        subagentOf("thread-archived", parentId, { archivedAt: "2026-03-09T10:04:00.000Z" }),
+        subagentOf("thread-grandchild", subagent.id),
+        // Its parent is not listed, so delegatedUnderParent leaves it a row of its own.
+        makeThread({
+          id: ThreadId.make("thread-delegated-own-row"),
+          environmentId: otherEnvironmentId,
+          delegatedFrom: { environmentId: localEnvironmentId, threadId: parentId, title: "P" },
+          ...running(),
+        }),
+        makeThread({
+          id: ThreadId.make("thread-fork"),
+          lineage: {
+            rootThreadId: parentId,
+            parentThreadId: parentId,
+            relationshipToParent: "fork",
+          },
+          ...running(),
+        }),
+      ],
+      new Set(),
+    );
+
+    expect(ids(groups.get(parentKey))).toEqual(["thread-subagent"]);
+    expect(groups.has(scopedThreadKey(scopeThreadRef(localEnvironmentId, subagent.id)))).toBe(
+      false,
+    );
+    expect([...groups.keys()]).toEqual([parentKey]);
+  });
+
+  it("shows the three newest children and counts the rest", () => {
+    const children = [1, 2, 3, 4, 5].map((index) =>
+      subagentOf(`thread-child-${index}`, parentId, running(`2026-03-09T10:0${index}:00.000Z`)),
+    );
+    const group = groupSidebarChildThreads(
+      [makeThread({ id: parentId }), ...children],
+      new Set(),
+    ).get(parentKey);
+
+    expect(ids(group)).toEqual(["thread-child-5", "thread-child-4", "thread-child-3"]);
+    expect(group?.overflowCount).toBe(2);
   });
 });
