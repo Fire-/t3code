@@ -5,6 +5,12 @@ import {
   type ModelSelection,
 } from "@t3tools/contracts";
 import { compileResolvedKeybindingsConfig } from "@t3tools/shared/keybindings";
+import {
+  RouterProvider,
+  createBrowserHistory,
+  createRootRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import { useState } from "react";
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -288,7 +294,7 @@ it("opens on the active provider when every favorite belongs to a disabled provi
 });
 
 it("gives a docked picker on a phone the screen's width and height, without jump labels", async () => {
-  await page.viewport(390, 844);
+  await page.viewport(360, 800);
   const instanceId = ProviderInstanceId.make("droid");
   const entries = deriveProviderInstanceEntries([
     {
@@ -327,7 +333,7 @@ it("gives a docked picker on a phone the screen's width and height, without jump
     .mockImplementation((query) => matchMedia(query === "(pointer: coarse)" ? "all" : query));
 
   await using screen = await render(
-    <div style={{ position: "fixed", insetInline: 12, bottom: 12 }}>
+    <div style={{ position: "fixed", insetInline: 16, bottom: 12 }}>
       <ProviderModelPicker
         environmentId={null}
         activeInstanceId={instanceId}
@@ -353,13 +359,16 @@ it("gives a docked picker on a phone the screen's width and height, without jump
   const effort = popup.querySelector<HTMLElement>("[data-model-picker-effort]")!;
   const trigger = screen.getByRole("button", { name: "Choose model" }).element();
   await vi.waitFor(() => {
-    expect(popup.getBoundingClientRect().width).toBeGreaterThanOrEqual(390 - 24);
+    const { left, right } = popup.getBoundingClientRect();
+    expect(right - left).toBeGreaterThanOrEqual(360 - 24);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(right).toBeLessThanOrEqual(360);
     // The trigger stays uncovered, so tapping it can close the picker.
     expect(popup.getBoundingClientRect().bottom).toBeLessThanOrEqual(
       trigger.getBoundingClientRect().top,
     );
     // The list takes the height above the trigger; the levels keep only what they need.
-    expect(list.getBoundingClientRect().height).toBeGreaterThan(450);
+    expect(list.getBoundingClientRect().height).toBeGreaterThan(400);
     expect(effort.getBoundingClientRect().height).toBeLessThan(list.getBoundingClientRect().height);
   });
   expect(
@@ -368,6 +377,63 @@ it("gives a docked picker on a phone the screen's width and height, without jump
       .elements()
       .filter((row) => row.querySelector("kbd")),
   ).toEqual([]);
+});
+
+it("closes a picker open on a touch screen on back, staying on the page", async () => {
+  const instanceId = ProviderInstanceId.make("droid");
+  const entries = deriveProviderInstanceEntries([
+    {
+      instanceId,
+      driver: ProviderDriverKind.make("droid"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    },
+  ]);
+  const options = new Map([[instanceId, [{ slug: "first", name: "First model" }]]]);
+  const matchMedia = window.matchMedia.bind(window);
+  using _touch = vi
+    .spyOn(window, "matchMedia")
+    .mockImplementation((query) => matchMedia(query === "(pointer: coarse)" ? "all" : query));
+  // Android's back gesture pops real browser history, which a memory router never consults.
+  const startHref = window.location.href;
+  using _restoreUrl = {
+    [Symbol.dispose]: () => window.history.replaceState(window.history.state, "", startHref),
+  };
+  const router = createRouter({
+    routeTree: createRootRoute({
+      component: () => (
+        <ProviderModelPicker
+          environmentId={null}
+          activeInstanceId={instanceId}
+          model="first"
+          lockedProvider={null}
+          instanceEntries={entries}
+          modelOptionsByInstance={options}
+          triggerAriaLabel="Choose model"
+          onInstanceModelChange={() => {}}
+          effortColumn={<span>Levels</span>}
+        />
+      ),
+    }),
+    history: createBrowserHistory(),
+    disableGlobalCatchBoundary: true,
+  });
+  await using screen = await render(<RouterProvider router={router} />, { router: false });
+  router.history.push(`${window.location.pathname}${window.location.search}#picker-back`);
+  await vi.waitFor(() => expect(window.location.hash).toBe("#picker-back"));
+
+  await screen.getByRole("button", { name: "Choose model" }).click();
+  await expect.element(page.getByRole("option", { name: /First model/ })).toBeVisible();
+  window.history.back();
+  await expect.element(page.getByRole("option", { name: /First model/ })).not.toBeInTheDocument();
+  await vi.waitFor(() => expect(window.location.hash).toBe("#picker-back"));
 });
 
 it("keeps the touch keyboard down while choosing a provider", async () => {

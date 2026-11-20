@@ -6,6 +6,7 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { RegistryContext } from "@effect/atom-react";
+import { useBlocker } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import {
   createContext,
@@ -83,6 +84,19 @@ function lockBackgroundScroll(popup: HTMLElement | null) {
     body.style.overflow = previousBodyOverflow;
     body.style.paddingRight = previousBodyPaddingRight;
   };
+}
+
+/** Android's back gesture closes the open picker instead of leaving the page under it. */
+function CloseOnBack(props: { onBack: () => void }) {
+  useBlocker({
+    shouldBlockFn: ({ action }) => {
+      if (action === "PUSH" || action === "REPLACE") return false;
+      props.onBack();
+      return true;
+    },
+    enableBeforeUnload: false,
+  });
+  return null;
 }
 
 /** What a docked effort column needs from its picker: the model it serves. */
@@ -348,6 +362,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         if (open && docked && target) openTarget(target);
       }}
     >
+      {isMenuOpen && isCoarsePointer ? <CloseOnBack onBack={() => setIsMenuOpen(false)} /> : null}
       <PopoverTrigger
         render={
           <ComposerControl
@@ -476,7 +491,10 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       >
         {props.effortColumn ? (
           <DockedPickerContext value={{ modelLabel: triggerTitle }}>
-            <div className="flex max-h-(--available-height) flex-col max-sm:h-(--available-height) max-sm:w-(--available-width)">
+            {/* Base UI sizes the positioner from a measurement that sets --available-width to
+                max-content, so the phone width comes from the viewport less the 5px collision
+                padding on each side; otherwise the popup is never shifted to fit. */}
+            <div className="flex max-h-(--available-height) flex-col max-sm:h-(--available-height) max-sm:w-[calc(100vw-10px)]">
               {/* One fixed height, so a model with more options never resizes the popup. Short
                   windows shrink it and keep the footer. A phone stacks the levels under the list,
                   which takes whatever height they leave. */}
