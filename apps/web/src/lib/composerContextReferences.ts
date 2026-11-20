@@ -114,3 +114,18 @@ export function ensureInlineContextReferences(
   }
   return result;
 }
+
+/**
+ * Where new context goes for a selection: after a chip that is selected whole (tapping a chip
+ * selects it), otherwise at the selection's start.
+ */
+export function contextInsertionOffset(
+  prompt: string,
+  selection: { start: number; end: number },
+): number {
+  if (selection.end <= selection.start) return selection.start;
+  const selectsOneChip = collectComposerContextReferences(prompt).some(
+    (occurrence) => occurrence.start === selection.start && occurrence.end === selection.end,
+  );
+  return selectsOneChip ? selection.end : selection.start;
+}

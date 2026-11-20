@@ -3,10 +3,13 @@ import {
   sourceControlClients,
 } from "@t3tools/client-runtime/source-control-clients";
 import {
+  ASSISTANT_CITATION_CONTEXT_LENGTH,
+  ASSISTANT_CITATION_MAX_TEXT_LENGTH,
   COMPOSER_CONTEXT_PREVIEW_COMMENT_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
   COMPOSER_CONTEXT_TERMINAL_TEXT_MAX_CHARS,
+  type ReviewCommentQuote,
 } from "@t3tools/contracts";
 import type {
   ComposerContextId,
@@ -48,7 +51,7 @@ import {
   type TerminalContextDraft,
 } from "./terminalContext";
 import type { ReviewCommentContext } from "~/reviewCommentContext";
-import type { MessageResolver } from "~/i18n/messages";
+import { m, type MessageResolver } from "~/i18n/messages";
 import { changeRequestTermKind } from "~/components/pullRequest/changeRequestTerm";
 
 const PREVIEW_LABEL_MAX_CHARS = 48;
@@ -96,6 +99,34 @@ function diffRangeLabel(
     : resolve(msg("L{start} to L{end}", { $context: "line range in a diff" }), { start, end });
 }
 
+/** How much of a quote a chip shows, the same budget reply Cite gives its quotes. */
+const REVIEW_QUOTE_LABEL_CHARS = 64;
+
+/** A quote's first words, so cited passages read apart when one file has several chips. */
+function reviewCommentQuoteLabel(quote: ReviewCommentQuote): string {
+  const preview = quote.exact.replace(/\s+/g, " ").trim();
+  if (preview.length <= REVIEW_QUOTE_LABEL_CHARS) return preview;
+  let end = REVIEW_QUOTE_LABEL_CHARS;
+  const previous = preview.charCodeAt(end - 1);
+  const next = preview.charCodeAt(end);
+  if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  return `${preview.slice(0, end)}…`;
+}
+
+/** The rendered-view cite's accessible name keeps the file and its lines beside the quote. */
+export function reviewCommentQuoteAccessibleName(
+  comment: ReviewCommentPresentation,
+  resolve: MessageResolver = m,
+): string {
+  return resolve(
+    msg("File comment, {file} {range}: {quote}", {
+      file: basename(comment.filePath),
+      range: reviewCommentRangeText(comment.rangeLabel, resolve),
+      quote: reviewCommentQuoteLabel(comment.quote!),
+    }),
+  );
+}
+
 /** Without `resolve` the label stays English, for records sent to the agent. */
 export function reviewCommentContextLabel(
   comment: ReviewCommentPresentation,
@@ -105,6 +136,8 @@ export function reviewCommentContextLabel(
   if (isPullRequestSummaryContext(comment) && pullRequestNumber !== null) {
     return `#${pullRequestNumber}`;
   }
+  // Sibling cites from one file label alike; a quote is what reads them apart.
+  if (comment.quote !== undefined) return reviewCommentQuoteLabel(comment.quote);
   const diffRange = /^([+-])(\d+)(?: to \1(\d+))?$/u.exec(comment.rangeLabel);
   const rangeLabel = diffRange
     ? diffRangeLabel(diffRange[2]!, diffRange[3], diffRange[1] === "-", resolve)
@@ -415,7 +448,22 @@ export function reviewCommentContextRecord(
     text: clampContextText(comment.text, COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS),
     diff: clampContextText(comment.diff, COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS),
     ...(comment.fenceLanguage !== undefined ? { fenceLanguage: comment.fenceLanguage } : {}),
+    ...(comment.quote !== undefined ? { quote: clampReviewCommentQuote(comment.quote) } : {}),
     ...(comment.pullRequest !== undefined ? { pullRequest: comment.pullRequest } : {}),
+  };
+}
+
+/** The quote's wire bounds match an assistant citation's, so a quote always encodes. */
+function clampReviewCommentQuote(quote: ReviewCommentQuote): ReviewCommentQuote {
+  const context = (value: string) => {
+    const clipped = value.slice(0, ASSISTANT_CITATION_CONTEXT_LENGTH);
+    const last = clipped.charCodeAt(clipped.length - 1);
+    return last >= 0xd800 && last <= 0xdbff ? clipped.slice(0, -1) : clipped;
+  };
+  return {
+    exact: clampContextText(quote.exact, ASSISTANT_CITATION_MAX_TEXT_LENGTH),
+    prefix: context(quote.prefix),
+    suffix: context(quote.suffix),
   };
 }
 
@@ -643,6 +691,7 @@ export function reviewCommentFromRecord(record: ReviewCommentContextRecord): Rev
     text: record.text,
     diff: record.diff,
     ...(record.fenceLanguage !== undefined ? { fenceLanguage: record.fenceLanguage } : {}),
+    ...(record.quote !== undefined ? { quote: record.quote } : {}),
     ...(record.pullRequest !== undefined ? { pullRequest: record.pullRequest } : {}),
   };
 }
