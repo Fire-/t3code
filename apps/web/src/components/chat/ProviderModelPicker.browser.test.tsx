@@ -287,6 +287,89 @@ it("opens on the active provider when every favorite belongs to a disabled provi
   await expect.element(page.getByRole("option", { name: /Codex model/ })).toBeVisible();
 });
 
+it("gives a docked picker on a phone the screen's width and height, without jump labels", async () => {
+  await page.viewport(390, 844);
+  const instanceId = ProviderInstanceId.make("droid");
+  const entries = deriveProviderInstanceEntries([
+    {
+      instanceId,
+      driver: ProviderDriverKind.make("droid"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    },
+  ]);
+  const options = new Map([
+    [
+      instanceId,
+      Array.from({ length: 12 }, (_, index) => ({
+        slug: `model-${index}`,
+        name: `Nemotron 3.5 Super variant ${index}`,
+      })),
+    ],
+  ]);
+  const keybindings = compileResolvedKeybindingsConfig(
+    ([1, 2, 3, 4] as const).map((index) => ({
+      key: `mod+${index}`,
+      command: `modelPicker.jump.${index}` as const,
+      when: "modelPickerOpen",
+    })),
+  );
+  const matchMedia = window.matchMedia.bind(window);
+  using _touch = vi
+    .spyOn(window, "matchMedia")
+    .mockImplementation((query) => matchMedia(query === "(pointer: coarse)" ? "all" : query));
+
+  await using screen = await render(
+    <div style={{ position: "fixed", insetInline: 12, bottom: 12 }}>
+      <ProviderModelPicker
+        environmentId={null}
+        activeInstanceId={instanceId}
+        model="model-0"
+        lockedProvider={null}
+        instanceEntries={entries}
+        modelOptionsByInstance={options}
+        keybindings={keybindings}
+        triggerAriaLabel="Choose model"
+        onInstanceModelChange={() => {}}
+        effortColumn={["Low", "Medium", "High", "Xhigh", "Max"].map((level) => (
+          <button key={level} type="button" role="radio" aria-checked={level === "High"}>
+            {level}
+          </button>
+        ))}
+      />
+    </div>,
+  );
+  await screen.getByRole("button", { name: "Choose model" }).click();
+  await expect.element(page.getByRole("option", { name: /variant 0/ })).toBeVisible();
+  const popup = document.querySelector<HTMLElement>('[data-slot="popover-popup"]')!;
+  const list = popup.querySelector<HTMLElement>("[data-model-picker-content]")!;
+  const effort = popup.querySelector<HTMLElement>("[data-model-picker-effort]")!;
+  const trigger = screen.getByRole("button", { name: "Choose model" }).element();
+  await vi.waitFor(() => {
+    expect(popup.getBoundingClientRect().width).toBeGreaterThanOrEqual(390 - 24);
+    // The trigger stays uncovered, so tapping it can close the picker.
+    expect(popup.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      trigger.getBoundingClientRect().top,
+    );
+    // The list takes the height above the trigger; the levels keep only what they need.
+    expect(list.getBoundingClientRect().height).toBeGreaterThan(450);
+    expect(effort.getBoundingClientRect().height).toBeLessThan(list.getBoundingClientRect().height);
+  });
+  expect(
+    page
+      .getByRole("option")
+      .elements()
+      .filter((row) => row.querySelector("kbd")),
+  ).toEqual([]);
+});
+
 it("keeps the touch keyboard down while choosing a provider", async () => {
   const entries = deriveProviderInstanceEntries(
     ["Codex", "Claude"].map((name) => ({
