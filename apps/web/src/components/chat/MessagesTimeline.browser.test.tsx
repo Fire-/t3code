@@ -230,6 +230,96 @@ function setup({ scheduledTasks = [] as ReadonlyArray<{ id: string; title: strin
 const TASK_ID = ScheduledTaskId.make("task-1");
 const AUTOMATION_PROMPT = "Triage the inbox\n\nLabel every new issue and close duplicates.";
 
+describe("MessagesTimeline turn end while reading", () => {
+  const runId = RunId.make("reading-run");
+  const running = {
+    runId,
+    status: "running" as const,
+    startedAt: CREATED_AT,
+    completedAt: null,
+    turnEnded: false,
+  };
+  const completed = { ...running, status: "completed" as const, completedAt: CREATED_AT };
+  const entries = [
+    message("Start the work", { runId }, "prompt"),
+    message("First progress note", { role: "assistant", runId }, "first-progress"),
+    message("Also check the tests", { runId, inputIntent: "steer" }, "steer"),
+    message("Second progress note", { role: "assistant", runId }, "second-progress"),
+    message("All done", { role: "assistant", runId }, "final"),
+  ];
+  const progress = (screen: { text: () => string }) => [
+    screen.text().includes("First progress note"),
+    screen.text().includes("Second progress note"),
+  ];
+
+  it("keeps a scrolled-up reader's turn open until they return to the end", async () => {
+    const props = { ...baseProps(), liveFollowEnabled: false };
+    await using screen = await renderTimeline(entries, {
+      ...props,
+      isWorking: true,
+      latestRun: running,
+    });
+    await vi.waitFor(() => expect(progress(screen)).toEqual([true, true]));
+
+    await screen.rerender(
+      <MessagesTimeline {...props} timelineEntries={entries} latestRun={completed} />,
+    );
+    await expect.element(page.getByText("All done")).toBeVisible();
+    expect(progress(screen)).toEqual([true, true]);
+
+    await screen.rerender(
+      <MessagesTimeline
+        {...props}
+        timelineEntries={entries}
+        latestRun={completed}
+        liveFollowEnabled
+      />,
+    );
+    await vi.waitFor(() => expect(progress(screen)).toEqual([false, false]));
+    expect(screen.buttons(/^Worked for/)).toHaveLength(1);
+  });
+
+  it("folds the turn at once for a reader following the end", async () => {
+    const props = baseProps();
+    await using screen = await renderTimeline(entries, {
+      ...props,
+      isWorking: true,
+      latestRun: running,
+    });
+    await vi.waitFor(() => expect(progress(screen)).toEqual([true, true]));
+
+    await screen.rerender(
+      <MessagesTimeline {...props} timelineEntries={entries} latestRun={completed} />,
+    );
+    await vi.waitFor(() => expect(progress(screen)).toEqual([false, false]));
+  });
+
+  it("folds a held turn when the next turn starts", async () => {
+    const props = { ...baseProps(), liveFollowEnabled: false };
+    await using screen = await renderTimeline(entries, {
+      ...props,
+      isWorking: true,
+      latestRun: running,
+    });
+    await screen.rerender(
+      <MessagesTimeline {...props} timelineEntries={entries} latestRun={completed} />,
+    );
+    await expect.element(page.getByText("All done")).toBeVisible();
+    expect(progress(screen)).toEqual([true, true]);
+
+    const nextRunId = RunId.make("next-run");
+    await screen.rerender(
+      <MessagesTimeline
+        {...props}
+        isWorking
+        timelineEntries={[...entries, message("Next request", { runId: nextRunId }, "next")]}
+        latestRun={{ ...running, runId: nextRunId }}
+      />,
+    );
+    await vi.waitFor(() => expect(progress(screen)).toEqual([false, false]));
+  });
+});
+
 describe("MessagesTimeline work rows", () => {
   it("keeps a tall HTML preview in place when its last accordion opens at the bottom", async () => {
     const props = baseProps();
