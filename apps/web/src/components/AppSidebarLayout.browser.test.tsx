@@ -92,7 +92,7 @@ async function renderWithBrowserHistory(threadPage: ReactNode) {
 }
 
 describe("back on a phone", () => {
-  it("opens the sidebar from a thread, then goes back once it is open", async () => {
+  it("opens the sidebar from a thread, and the next back closes it", async () => {
     await page.viewport(414, 896);
     await using app = await renderWithBrowserHistory(<p>Thread page</p>);
     await app.router.navigate({
@@ -105,10 +105,25 @@ describe("back on a phone", () => {
     window.history.back();
     await vi.waitFor(() => expect(app.sidebarState()).toBe("expanded"));
     await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
-    await expect.element(page.getByText("Thread page")).toBeInTheDocument();
 
     window.history.back();
-    await expect.element(page.getByText("Home page")).toBeInTheDocument();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("collapsed"));
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
+    await expect.element(page.getByText("Thread page")).toBeInTheDocument();
+  });
+
+  it("closes a sidebar opened on a page that is not a thread", async () => {
+    await page.viewport(414, 896);
+    await using app = await renderWithBrowserHistory(<p>Thread page</p>);
+    await app.router.navigate({ to: "/usage" });
+    await expect.element(page.getByText("Usage page")).toBeVisible();
+    await page.getByRole("button", { name: "Toggle main sidebar" }).click();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("expanded"));
+
+    window.history.back();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("collapsed"));
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/usage"));
+    await expect.element(page.getByText("Usage page")).toBeInTheDocument();
   });
 
   it.each([
