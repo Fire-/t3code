@@ -12,8 +12,8 @@ Each step records its outcome in `~/.t3/code/upgrades/<run>/state.json` and rewr
 
 ## The run
 
-1. `preflight`. Confirms the previous deploy went live, checks that no worktree has uncommitted changes, fetches, and takes over the requests waiting in the inbox (see [Requests](#requests)). Exit codes:
-   - `10`: up to date and no requests. Reply "t3code is up to date" and stop.
+1. `preflight`. Confirms the previous deploy went live, checks that no worktree has uncommitted changes, fetches, updates the Droid CLI (see [Droid](#droid)), and takes over the requests waiting in the inbox (see [Requests](#requests)). Exit codes:
+   - `10`: up to date and no requests. Reply "t3code is up to date" and stop. If preflight's Droid line says anything but "is current", add it to the reply.
    - `3`: the run is blocked. If it was already escalated, say it is still waiting and stop. Otherwise escalate.
    - `4`: a run is in progress. It is this thread's own unfinished run: `preflight --resume`, then continue from the first step that has not passed.
    - `5`: the previous deploy is not live yet, usually because T3 has not been idle. It lists the busy threads; one waiting on a question stays busy until someone answers it. Stop, and name any thread other than this one in your reply. Escalate if it is more than 20 hours old.
@@ -72,6 +72,12 @@ Overlays are merged into `local` one at a time (alphabetically), so two overlays
 
 When `plan` reports a changed `engines` or `packageManager` in `package.json`, update the pins in `.mise.toml` to match: `fix overlay/dev-infra`, edit, commit `chore(infra): track upstream's node <version>`, `fixed overlay/dev-infra --note "..."`, then `mise install` in the main checkout before `rebuild`. `deploy` regenerates the runtime shim when the node path moves. A version mise cannot install is a reason to block.
 
+## Droid
+
+Droid updates itself only from its own terminal UI, so a Droid that only T3 runs never updates, and new models ship inside the CLI. `preflight` updates `~/.local/bin/droid` every day, even when upstream has nothing new, and copies the version it replaces to `~/.t3/code/backups/droid/` (the last two are kept). It then asks the new Droid for every `droid.*` method the adapter in `packages/provider-droid` calls, without running any, and for its model list. If a method is gone or no models come back, it puts the old version back and later runs skip that version. Either way it prints one Droid line; it never blocks the run. T3 picks up the new models within five minutes.
+
+That check cannot see a method that changed what it does. If Droid threads in T3 break after an update (turns hang, fail, or lose events), put the previous version back and hold updates: `droid-restore --note "<what broke>"` (or `droid-restore <version> --note ...` for an older backup). Later runs never reinstall the version it replaced, but they do try newer ones. `droid-release` lets updates resume once the adapter is fixed. Holds and skips live in `~/.t3/code/upgrades/droid.json`.
+
 ## Requests
 
 fire, or an agent on fire's behalf, leaves work for the next run without waking this thread: `ask "<text>"` (or `--note-file <path>`) puts a request in `~/.t3/code/upgrades/inbox.json`. `ask` alone lists the inbox, and `unask <id>` takes one back out. The next `preflight` takes every waiting request into its run, even on a day upstream has nothing new; requests asked during a run wait for the next one.
@@ -88,7 +94,7 @@ To escalate, block first, then send one message to the thread the scheduled prom
 
 ## If the deploy goes wrong
 
-The daemon falls back on its own (current, then bak) when a build fails its health check, and `verify-deploy` then blocks the run. To go back by hand: `mise run swap-back`. The database backup from the deploy is `~/.t3/code/backups/statev2-pre-upgrade-<run>.sqlite`; restoring it loses everything since the deploy, so that is fire's call, never yours. The `ember-backup/<run>/*` tags hold every branch as it was before the run.
+The daemon falls back on its own (current, then bak) when a build fails its health check, and `verify-deploy` then blocks the run. To go back by hand: `mise run swap-back`. The database backup from the deploy is `~/.t3/code/backups/statev2-pre-upgrade-<run>.sqlite`; restoring it loses everything since the deploy, so that is fire's call, never yours. The `ember-backup/<run>/*` tags hold every branch as it was before the run. A Droid update that broke T3: see [Droid](#droid).
 
 ## When a run dies
 
@@ -106,6 +112,7 @@ Keep it short. fire reads it on a phone.
 t3code upgrade <run>: deployed | up to date | blocked
 - upstream: <n> commits (<old>..<new>)
 - overlays: <n> clean; resolved: <names>; fixed: <names>; absorbed: <names>; retired: <names>
+- droid: <preflight's Droid line>
 - requests: #<id> done | declined (<one line each>) | none
 - accepted failures: <step: reason> | none
 - deploy: waiting for T3 to go idle; the next run confirms it[; held by "<thread>", waiting on a question since <time>]

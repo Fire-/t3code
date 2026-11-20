@@ -10,6 +10,14 @@ import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import {
+  adapterMethods,
+  describeDroid,
+  releaseDroid,
+  restoreDroid,
+  updateDroid,
+} from "./upgrade-droid.mjs";
+
 const HOME = NodeOS.homedir();
 const RUNTIME = process.env.T3_RUNTIME_DIR ?? NodePath.join(HOME, ".t3/code");
 const UPGRADES = process.env.T3_UPGRADE_DIR ?? NodePath.join(RUNTIME, "upgrades");
@@ -43,6 +51,11 @@ const MAIN = NodePath.dirname(
   gitOk(import.meta.dirname, "rev-parse", "--path-format=absolute", "--git-common-dir"),
 );
 const WORKTREE = NodePath.join(NodePath.dirname(MAIN), "t3code-worktrees", "upgrade");
+const droidPaths = {
+  bin: process.env.T3_DROID_BIN ?? NodePath.join(HOME, ".local/bin/droid"),
+  backups: NodePath.join(RUNTIME, "backups/droid"),
+  stateFile: NodePath.join(UPGRADES, "droid.json"),
+};
 
 const now = () => new Date().toISOString();
 const rev = (ref, cwd = MAIN) => gitOk(cwd, "rev-parse", ref);
@@ -166,6 +179,7 @@ function renderReport(s) {
     "",
     `Upstream: ${short(s.upstream.before)} -> ${short(s.upstream.after)} (${s.upstream.commits} commits).`,
     `local before: ${short(s.local.before)}; fork/local before: ${short(s.local.forkBefore)}.`,
+    ...(s.droid ? [s.droid.line] : []),
     "",
   ];
   if (s.requests?.length) {
@@ -391,6 +405,41 @@ function sqliteRo(db, query) {
   return r.out ? JSON.parse(r.out) : [];
 }
 
+async function droidUpdate() {
+  if (!NodeFS.existsSync(droidPaths.bin)) return null;
+  const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "upgrade-droid-"));
+  try {
+    return await updateDroid({
+      ...droidPaths,
+      methods: adapterMethods(NodePath.join(MAIN, "packages/provider-droid/src/server")),
+      cwd,
+    });
+  } finally {
+    NodeFS.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+function droidRestore(args) {
+  const version = args[0]?.startsWith("--") ? undefined : args[0];
+  const reason = noteText(version ? args.slice(1) : args);
+  if (!reason) die('Usage: droid-restore [<version>] --note "<what broke>"');
+  try {
+    const r = restoreDroid({ ...droidPaths, version, reason });
+    console.log(
+      `Droid ${r.from} -> ${r.to}. Updates are held until \`droid-release\`; ${r.from} stays skipped after that.`,
+    );
+  } catch (error) {
+    die(error.message);
+  }
+}
+
+function droidRelease() {
+  const held = releaseDroid(droidPaths);
+  console.log(
+    held ? `Released the hold on Droid ${held.version}.` : "Droid updates were not held.",
+  );
+}
+
 async function preflight(args) {
   NodeFS.mkdirSync(UPGRADES, { recursive: true });
   let prev = loadRun();
@@ -440,6 +489,9 @@ async function preflight(args) {
 
   gitOk(MAIN, "fetch", "--quiet", "origin", "main");
   gitOk(MAIN, "fetch", "--quiet", FORK);
+  // Before the up-to-date exit: Droid releases on days upstream has nothing new.
+  const droid = await droidUpdate();
+  if (droid) console.log(describeDroid(droid));
   const overlays = listOverlays();
   const behind = overlays.filter((b) => !isAncestor("origin/main", b));
   const inbox = readInbox();
@@ -474,6 +526,7 @@ async function preflight(args) {
     steps: {},
     notes: [],
   };
+  if (droid) state.droid = { ...droid, line: describeDroid(droid) };
   if (prev && prev.status !== "verified") {
     state.notes.push({
       at: now(),
@@ -1574,6 +1627,8 @@ const steps = {
   done: (args) => closeRequest("done", args),
   decline: (args) => closeRequest("declined", args),
   retire,
+  "droid-restore": droidRestore,
+  "droid-release": droidRelease,
 };
 
 const [name, ...args] = process.argv.slice(2);
