@@ -11,6 +11,11 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { render } from "../../test/render";
+import {
+  dismissContextMenu,
+  isContextMenuOpen,
+  showContextMenuFallback,
+} from "../contextMenuFallback";
 import { registerModelPickerContent } from "../modelPickerVisibility";
 import { Dialog, DialogPopup, DialogTitle } from "./ui/dialog";
 
@@ -110,6 +115,44 @@ describe("back on a phone", () => {
     await vi.waitFor(() => expect(app.sidebarState()).toBe("collapsed"));
     await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
     await expect.element(page.getByText("Thread page")).toBeInTheDocument();
+  });
+
+  it("leaves focus off the toggle when back closes the sidebar", async () => {
+    await page.viewport(414, 896);
+    await using app = await renderWithBrowserHistory(<p>Thread page</p>);
+    await app.router.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "env-1", threadId: "thread-1" },
+    });
+    const toggle = page.getByRole("button", { name: "Toggle main sidebar" });
+    await toggle.click();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("expanded"));
+
+    window.history.back();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("collapsed"));
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
+    // The toggle reappears once the sheet finishes closing, after any focus return.
+    await expect.element(toggle).toBeVisible();
+    expect(document.activeElement).not.toBe(toggle.element());
+  });
+
+  it("closes an open context menu before touching the sidebar", async () => {
+    await page.viewport(414, 896);
+    await using app = await renderWithBrowserHistory(<p>Thread page</p>);
+    await app.router.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "env-1", threadId: "thread-1" },
+    });
+    await expect.element(page.getByText("Thread page")).toBeVisible();
+    using _menu = { [Symbol.dispose]: () => dismissContextMenu(false) };
+    void showContextMenuFallback([{ id: "rename", label: "Rename thread" }]);
+    await expect.element(page.getByRole("menuitem", { name: "Rename thread" })).toBeVisible();
+
+    window.history.back();
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
+    expect(isContextMenuOpen()).toBe(false);
+    expect(app.sidebarState()).toBe("collapsed");
   });
 
   it("closes a sidebar opened on a page that is not a thread", async () => {

@@ -1,6 +1,7 @@
 import { useBlocker } from "@tanstack/react-router";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
+import { dismissContextMenu, isContextMenuOpen } from "../contextMenuFallback";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useSidebar } from "./ui/sidebar";
@@ -20,16 +21,24 @@ function isOverlayOpen(): boolean {
 
 /** On a phone, back closes the open thread list, and on a thread opens it, instead of leaving. */
 export function ToggleSidebarOnBack() {
-  const { isMobile, openMobile, setOpenMobile } = useSidebar();
+  const { isMobile, openMobile, setOpenMobile, closeMobileWithoutFocusReturn } = useSidebar();
   useBlocker({
     shouldBlockFn: ({ action, current }) => {
-      // Whatever is open over the page keeps its own back behavior.
-      if (action !== "BACK" || !isMobile || isOverlayOpen()) return false;
-      if (!openMobile) {
-        const params: Readonly<Record<string, string | undefined>> = current.params;
-        if (!resolveThreadRouteTarget(params)) return false;
+      if (action !== "BACK" || !isMobile) return false;
+      // The fallback context menu is plain DOM, so the open-overlay check cannot see it.
+      if (isContextMenuOpen()) {
+        dismissContextMenu(false);
+        return true;
       }
-      setOpenMobile(!openMobile);
+      // Whatever else is open over the page keeps its own back behavior.
+      if (isOverlayOpen()) return false;
+      if (openMobile) {
+        closeMobileWithoutFocusReturn();
+        return true;
+      }
+      const params: Readonly<Record<string, string | undefined>> = current.params;
+      if (!resolveThreadRouteTarget(params)) return false;
+      setOpenMobile(true);
       return true;
     },
     enableBeforeUnload: false,
