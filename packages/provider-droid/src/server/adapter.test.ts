@@ -101,6 +101,7 @@ const EXPECTED_CAPABILITIES = {
     supportsInterrupt: true,
     supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: false,
+    supportsNativeResume: false,
     supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
   },

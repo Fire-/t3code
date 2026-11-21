@@ -173,6 +173,7 @@ const DroidProviderCapabilitiesV2 = {
     supportsInterrupt: true,
     supportsActiveSteering: true,
     supportsSteeringByInterruptRestart: false,
+    supportsNativeResume: false,
     supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
   },
