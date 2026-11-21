@@ -61,6 +61,7 @@ import {
   decodeComposerContextFragment,
 } from "@t3tools/shared/composerContextClipboard";
 import { collectComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 
 const environmentQuery = vi.hoisted(() => ({
   error: "Pull request not found" as string | null,
@@ -1377,6 +1378,46 @@ describe("MessagesTimeline citations", () => {
     );
     await expect.element(screen.getByText("the cited answer")).toBeVisible();
     expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("shows a response quoted in a question answer as a card with its comment", async () => {
+    const quote = serializeAssistantCitation({
+      version: 1,
+      environmentId: ENVIRONMENT_ID,
+      threadId: ThreadId.make("thread-1"),
+      messageId: MessageId.make("message-1"),
+      text: "Missing ffmpeg looks like nothing wrong",
+      start: 0,
+      end: 39,
+      prefix: "",
+      suffix: "",
+      comment: "fix please",
+    });
+    await using screen = await renderTimeline([
+      work("question", {
+        label: "AskUser",
+        tone: "info",
+        itemType: "user_input_request",
+        questionAnswer: {
+          requestId: "request-1",
+          questionTextById: { q1: "Which suggestions should I apply?" },
+          answers: { q1: `${quote}  and the rest too` },
+          attachmentsByQuestionId: {},
+        },
+      }),
+    ]);
+    await click(screen.button(/^Which suggestions should I apply\?/));
+
+    await expect
+      .element(
+        page.getByRole("link", {
+          name: "Go to quoted response: Missing ffmpeg looks like nothing wrong",
+        }),
+      )
+      .toBeVisible();
+    expect(screen.text()).toContain("fix please");
+    expect(screen.text()).toContain("and the rest too");
+    expect(screen.text()).not.toContain("t3-citation:");
   });
 });
 
