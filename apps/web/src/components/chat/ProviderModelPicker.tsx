@@ -6,6 +6,7 @@ import {
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { RegistryContext } from "@effect/atom-react";
+import { useBlocker } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import {
   createContext,
@@ -85,6 +86,19 @@ function lockBackgroundScroll(popup: HTMLElement | null) {
   };
 }
 
+/** Android's back gesture closes the open picker instead of leaving the page under it. */
+function CloseOnBack(props: { onBack: () => void }) {
+  useBlocker({
+    shouldBlockFn: ({ action }) => {
+      if (action === "PUSH" || action === "REPLACE") return false;
+      props.onBack();
+      return true;
+    },
+    enableBeforeUnload: false,
+  });
+  return null;
+}
+
 /** What a docked effort column needs from its picker: the model it serves. */
 export const DockedPickerContext = createContext<{ modelLabel: string }>({ modelLabel: "" });
 
@@ -154,6 +168,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const popupRef = useRef<HTMLDivElement | null>(null);
   // Touch opens on the popup itself so the on-screen keyboard stays down until the search is tapped.
   const isCoarsePointer = useMediaQuery({ pointer: "coarse" });
+  const isPhone = useMediaQuery("max-sm");
   const size = props.size ?? "sm";
   const docked = props.effortColumn !== undefined;
 
@@ -347,6 +362,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         if (open && docked && target) openTarget(target);
       }}
     >
+      {isMenuOpen && isCoarsePointer ? <CloseOnBack onBack={() => setIsMenuOpen(false)} /> : null}
       <PopoverTrigger
         render={
           <ComposerControl
@@ -462,8 +478,12 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         align={props.popupAlign ?? "start"}
         // Docked, the popup opens above the composer and slides over it when that space is short,
         // so a short window gets its full height (Floating UI sizes to the viewport) instead of a sliver.
+        // A phone fills the roomier side of the trigger instead, leaving the trigger to tap to close.
         {...(docked
-          ? { side: "top" as const, collisionAvoidance: { side: "shift", align: "shift" } as const }
+          ? {
+              side: "top" as const,
+              collisionAvoidance: { side: isPhone ? "flip" : "shift", align: "shift" } as const,
+            }
           : {})}
         className="before:hidden"
         padding="none"
@@ -471,14 +491,18 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       >
         {props.effortColumn ? (
           <DockedPickerContext value={{ modelLabel: triggerTitle }}>
-            <div className="flex max-h-(--available-height) flex-col">
+            {/* Base UI sizes the positioner from a measurement that sets --available-width to
+                max-content, so the phone width comes from the viewport less the 5px collision
+                padding on each side; otherwise the popup is never shifted to fit. */}
+            <div className="flex max-h-(--available-height) flex-col max-sm:h-(--available-height) max-sm:w-[calc(100vw-10px)]">
               {/* One fixed height, so a model with more options never resizes the popup. Short
-                  windows shrink it and keep the footer. */}
-              <div className="flex h-86.5 min-h-0 max-sm:h-auto max-sm:flex-col">
+                  windows shrink it and keep the footer. A phone stacks the levels under the list,
+                  which takes whatever height they leave. */}
+              <div className="flex h-86.5 min-h-0 max-sm:h-auto max-sm:flex-1 max-sm:flex-col">
                 {picker}
                 <div
                   data-model-picker-effort
-                  className="flex min-h-0 w-48 flex-col sm:shrink-0 border-l border-border/70 bg-muted/40 max-sm:h-64 max-sm:w-full max-sm:border-t max-sm:border-l-0"
+                  className="flex min-h-0 w-48 flex-col sm:shrink-0 border-l border-border/70 bg-muted/40 max-sm:max-h-1/2 max-sm:w-full max-sm:border-t max-sm:border-l-0"
                   onKeyDown={(event) => {
                     if (event.key !== "ArrowLeft" || event.altKey || event.ctrlKey || event.metaKey)
                       return;
