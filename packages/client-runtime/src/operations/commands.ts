@@ -770,6 +770,12 @@ export const setThreadInteractionMode = Effect.fn("EnvironmentCommands.setThread
 // it when manualContinuationOfRunId is set.
 const MANUAL_CONTINUATION_FALLBACK_TEXT = "Continue where you left off.";
 
+// Read per send so a device that changed zone since the app started reports where it is now.
+const deviceTimeZone = () => {
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone?.trim();
+  return timeZone ? { timeZone } : {};
+};
+
 export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(function* (
   input: StartThreadTurnInput,
 ) {
@@ -832,6 +838,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
         text: input.message.text,
         ...(context ? { context } : {}),
         attachments,
+        ...deviceTimeZone(),
       },
     });
   }
@@ -866,6 +873,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
           ? {}
           : { sourcePlanRef: input.sourceProposedPlan }),
         ...(input.freshContext ? { freshContext: true } : {}),
+        ...deviceTimeZone(),
         dispatchMode: { type: "start_immediately" },
       },
       resendAfterSocketLoss,
@@ -896,6 +904,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
         ? {}
         : { sourcePlanRef: input.sourceProposedPlan }),
       ...(input.freshContext ? { freshContext: true } : {}),
+      ...deviceTimeZone(),
       ...(requestedMode !== "queue" ? { deliveryIntent: requestedMode } : {}),
       dispatchMode,
     },
@@ -1022,6 +1031,7 @@ export const respondToThreadUserInput = Effect.fn("EnvironmentCommands.respondTo
       ...(input.attachmentsByQuestionId === undefined
         ? {}
         : { attachmentsByQuestionId: input.attachmentsByQuestionId }),
+      ...deviceTimeZone(),
     });
   },
 );
