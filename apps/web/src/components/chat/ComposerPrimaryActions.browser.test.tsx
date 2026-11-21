@@ -106,6 +106,23 @@ it.each(["resume", "draft", "question"] as const)(
   },
 );
 
+it("keeps a repeat Send click from reaching the Stop that replaces it", async () => {
+  const props = setup();
+  await using screen = await render(<ComposerPrimaryActions {...props} hasSendableContent />);
+  using _timers = fakeTimers();
+  await screen.rerender(<ComposerPrimaryActions {...props} />);
+  const stop = screen
+    .getByRole("button", { name: "Stop generation" })
+    .element() as HTMLButtonElement;
+  await act(() => stop.click());
+  await act(() => vi.advanceTimersByTime(499));
+  await act(() => stop.click());
+  expect(props.onInterrupt).not.toHaveBeenCalled();
+  await act(() => vi.advanceTimersByTime(1));
+  await act(() => stop.click());
+  expect(props.onInterrupt).toHaveBeenCalledTimes(1);
+});
+
 it("allows retry after ten seconds and protects a late stop", async () => {
   const props = setup();
   await using screen = await render(<ComposerPrimaryActions {...props} />);
@@ -180,13 +197,18 @@ it("swaps the collapsed composer's send button for Stop while a turn can be stop
     </CollapsedComposerStopAction>
   );
   await using screen = await render(collapsed({ hasSendableContent: true }));
+  using _timers = fakeTimers();
   await expect.element(screen.getByRole("button", { name: "Send message" })).toBeVisible();
   await screen.rerender(collapsed());
-  await act(() =>
-    (
-      screen.getByRole("button", { name: "Stop generation" }).element() as HTMLButtonElement
-    ).click(),
-  );
+  const stop = screen
+    .getByRole("button", { name: "Stop generation" })
+    .element() as HTMLButtonElement;
+  await act(() => stop.click());
+  await act(() => vi.advanceTimersByTime(499));
+  await act(() => stop.click());
+  expect(onInterrupt).not.toHaveBeenCalled();
+  await act(() => vi.advanceTimersByTime(1));
+  await act(() => stop.click());
   expect(onInterrupt).toHaveBeenCalledTimes(1);
   await expect
     .element(screen.getByRole("button", { name: "Stopping", exact: true }))
