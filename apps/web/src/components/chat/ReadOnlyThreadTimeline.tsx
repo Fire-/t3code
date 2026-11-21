@@ -20,7 +20,7 @@ import type { ChatFileAttachment } from "~/types";
 
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./MessagesTimeline";
-import { ScrollToEndButton } from "./TimelineOverlays";
+import { ComposerDock, ScrollToEndButton } from "./TimelineOverlays";
 import type { TimelineRow, TurnItemSource } from "./timelineRowContext";
 import { useTimelineFollow } from "./useTimelineFollow";
 
@@ -133,11 +133,9 @@ export function ReadOnlyThreadTimeline(props: {
           />
         </SideThreadsOpenContext>
         {follow.showScrollToBottom ? (
-          <ScrollToEndButton
-            summary={null}
-            bottom={4}
-            onScrollToEnd={() => follow.scrollToEnd(true)}
-          />
+          <ComposerDock bottom={4}>
+            <ScrollToEndButton summary={null} onScrollToEnd={() => follow.scrollToEnd(true)} />
+          </ComposerDock>
         ) : null}
       </div>
       {props.children({ scrollToEnd: () => follow.scrollToEnd(true) })}
