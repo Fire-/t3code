@@ -6,6 +6,7 @@ import { linkRequestTargetName } from "@t3tools/client-runtime/link-request";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { turnHasChanges } from "@t3tools/client-runtime/state/thread-repositories";
+import { workedMsBetween } from "@t3tools/client-runtime/state/models";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import {
   isLiveSubagentTurnItem,
@@ -57,6 +58,7 @@ import type {
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItem,
   OrchestrationV2UserMessageInputIntent,
+  OrchestrationV2UserWait,
   RunAttemptId,
   ScheduledTaskId,
   TurnItemId,
@@ -1067,12 +1069,6 @@ function groupAdjacentActivities(
   return grouped;
 }
 
-function computeElapsedMs(startIso: string, endIso: string): number | null {
-  const start = Date.parse(startIso);
-  const end = Date.parse(endIso);
-  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
-}
-
 function maxIsoTimestamp(left: string | null, right: string | null): string | null {
   if (left === null) return right;
   if (right === null) return left;
@@ -1211,6 +1207,7 @@ function deriveThreadFeedRunFolds(
   runlessWorkActive: boolean,
   feedFailedRunIds: ReadonlySet<RunId>,
   resolve: MessageResolver,
+  userWaits: ReadonlyArray<OrchestrationV2UserWait>,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
   const terminalAssistantMessageIdByRun = new Map<RunId, string>();
   const retainedAnswerIds = finalAnswerIds(feed);
@@ -1337,13 +1334,14 @@ function deriveThreadFeedRunFolds(
       lastEntry.type === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
     const elapsedMs =
       latestRunMatches && latestRun.startedAt && latestRun.completedAt
-        ? computeElapsedMs(latestRun.startedAt, latestRun.completedAt)
-        : computeElapsedMs(
+        ? workedMsBetween(latestRun.startedAt, latestRun.completedAt, userWaits)
+        : workedMsBetween(
             group.startBoundary ?? firstEntry.createdAt,
             maxIsoTimestamp(
               terminalEntry?.type === "message" ? terminalEntry.message.updatedAt : null,
               lastEntryEnd,
             ) ?? lastEntryEnd,
+            userWaits,
           );
     const duration = elapsedMs === null ? null : formatDuration(elapsedMs, resolve);
     const interrupted =
@@ -1365,11 +1363,12 @@ function deriveThreadFeedRunFolds(
       },
       ...group.steerSegments.map(({ startIndex, steer }, index) => {
         const entries = group.entries.slice(startIndex, group.steerSegments[index + 1]?.startIndex);
-        const segmentMs = computeElapsedMs(
+        const segmentMs = workedMsBetween(
           steer.createdAt,
           entries
             .map((entry) => (entry.type === "message" ? entry.message.updatedAt : entry.createdAt))
             .reduce<string | null>(maxIsoTimestamp, null) ?? steer.createdAt,
+          userWaits,
         );
         return {
           runId: steerFoldRunId(runId, steer.id),
@@ -1468,6 +1467,7 @@ interface ThreadFeedPresentationBuild {
   readonly runlessWorkActive: boolean;
   readonly display: ThreadFeedDisplay;
   readonly locale: string | undefined;
+  readonly userWaits: ReadonlyArray<OrchestrationV2UserWait>;
   readonly rows: ReadonlyArray<ThreadFeedEntry>;
   /** Feed entry `entry` is a user message whose rows start at `rowsLength`. */
   readonly restarts: ReadonlyArray<{ readonly entry: number; readonly rowsLength: number }>;
@@ -1510,6 +1510,22 @@ function staysOutOfFold(entry: ThreadFeedEntry): boolean {
   );
 }
 
+function userWaitsEqual(
+  left: ReadonlyArray<OrchestrationV2UserWait>,
+  right: ReadonlyArray<OrchestrationV2UserWait>,
+) {
+  const sameInstant = (a: DateTime.Utc | null, b: DateTime.Utc | null) =>
+    a === null || b === null ? a === b : DateTime.Equivalence(a, b);
+  return (
+    left === right ||
+    (left.length === right.length &&
+      left.every(
+        (wait, index) =>
+          sameInstant(wait.startedAt, right[index]!.startedAt) &&
+          sameInstant(wait.endedAt, right[index]!.endedAt),
+      ))
+  );
+}
 function feedEntryRunId(entry: ThreadFeedEntry): RunId | null {
   return entry.type === "message" ? (entry.message.runId ?? null) : entry.runId;
 }
@@ -1534,6 +1550,7 @@ function presentationRestart(
   runlessWorkActive: boolean,
   display: ThreadFeedDisplay,
   locale: string | undefined,
+  userWaits: ReadonlyArray<OrchestrationV2UserWait>,
 ): { readonly entry: number; readonly rowsLength: number; readonly index: number } | null {
   if (
     previous === null ||
@@ -1543,6 +1560,7 @@ function presentationRestart(
     previous.runlessWorkActive !== runlessWorkActive ||
     previous.display.toolCallVisibility !== display.toolCallVisibility ||
     previous.display.revealedMessageId !== display.revealedMessageId ||
+    !userWaitsEqual(previous.userWaits, userWaits) ||
     !setsEqual(previous.expandedRunIds, expandedRunIds) ||
     !setsEqual(previous.expandedWorkGroupIds, expandedWorkGroupIds)
   ) {
@@ -1713,6 +1731,7 @@ export function deriveThreadFeedPresentation(
   display: ThreadFeedDisplay = DEFAULT_THREAD_FEED_DISPLAY,
   resolve: MessageResolver = m,
   locale?: string,
+  userWaits: ReadonlyArray<OrchestrationV2UserWait> = [],
 ): ThreadFeedEntry[] {
   const previous = cache?.presentation ?? null;
   const restart = presentationRestart(
@@ -1725,6 +1744,7 @@ export function deriveThreadFeedPresentation(
     runlessWorkActive,
     display,
     locale,
+    userWaits,
   );
   const start = restart?.entry ?? 0;
   const result: ThreadFeedEntry[] =
@@ -1817,6 +1837,7 @@ export function deriveThreadFeedPresentation(
         isWorking && runlessWorkActive,
         failedRunIds,
         resolve,
+        userWaits,
       );
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
@@ -2049,6 +2070,7 @@ export function deriveThreadFeedPresentation(
       runlessWorkActive,
       display,
       locale,
+      userWaits,
       rows: result,
       restarts: cleanRestarts,
       firstEntryByRun,
