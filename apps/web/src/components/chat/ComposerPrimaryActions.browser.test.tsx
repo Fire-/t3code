@@ -106,10 +106,22 @@ it.each(["resume", "draft", "question"] as const)(
   },
 );
 
-it("keeps a repeat Send click from reaching the Stop that replaces it", async () => {
+it.each<[string, Partial<ComponentProps<typeof ComposerPrimaryActions>>[]]>([
+  ["steering a running turn", [{ hasSendableContent: true }]],
+  [
+    "sending while idle",
+    [
+      { isRunning: false, canInterrupt: false, hasSendableContent: true },
+      { isRunning: false, canInterrupt: false },
+    ],
+  ],
+  ["resuming", [{ isRunning: false, canInterrupt: false, canResume: true }]],
+])("keeps a repeat click from reaching the Stop that appears after %s", async (_, steps) => {
   const props = setup();
-  await using screen = await render(<ComposerPrimaryActions {...props} hasSendableContent />);
+  const [first, ...rest] = steps;
+  await using screen = await render(<ComposerPrimaryActions {...props} {...first} />);
   using _timers = fakeTimers();
+  for (const step of rest) await screen.rerender(<ComposerPrimaryActions {...props} {...step} />);
   await screen.rerender(<ComposerPrimaryActions {...props} />);
   const stop = screen
     .getByRole("button", { name: "Stop generation" })
