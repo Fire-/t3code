@@ -313,6 +313,28 @@ export function threadWithQuestion(name: string, question: string): FakeThread {
 
 const parentOf = (thread: FakeThread) => thread.sideChatOf ?? thread.providerSubagentOf;
 
+/** A `threadWithQuestion` whose turn explains itself in reasoning instead of a visible assistant message. */
+export function threadWithReasonedQuestion(
+  name: string,
+  question: string,
+  reasoning: string,
+): FakeThread {
+  const thread = threadWithQuestion(name, question);
+  return {
+    ...thread,
+    items: thread.items.map((item) =>
+      item.type === "assistant_message"
+        ? ({
+            ...base(thread.id, RunId.make(`${name}-run-0`), `${name}-reasoning`, item.ordinal),
+            type: "reasoning",
+            text: reasoning,
+            streaming: false,
+          } satisfies OrchestrationV2TurnItem)
+        : item,
+    ),
+  };
+}
+
 function shellOf(thread: FakeThread): OrchestrationV2ThreadShell {
   const latest = thread.runs.at(-1);
   const modelSelection = thread.modelSelection ?? MODEL;
