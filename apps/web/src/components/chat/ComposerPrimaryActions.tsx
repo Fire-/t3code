@@ -93,7 +93,8 @@ const formatPendingPrimaryActionLabel = (
 };
 
 const STOP_PENDING_MAX_MS = 10_000;
-// The action that takes Stop's place ignores clicks this long, so repeat Stop clicks can't resume.
+// Whichever of Send and Stop takes the other's place ignores clicks this long, so a repeat tap
+// can't resume a stopped run or stop the run it just steered.
 const STOP_LANDED_CLICK_GUARD_MS = 500;
 
 const messageActionPillClassName =
@@ -103,16 +104,22 @@ const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
   event.preventDefault();
 };
 
-type StopPhase = "pending" | "timedOut" | "landed" | null;
+type StopPhase = "pending" | "timedOut" | "landed" | "sent" | null;
 
 function useStopPhase(input: {
   runId: string | null;
   canInterrupt: boolean;
   canOperateThread: boolean;
+  hasSendableContent: boolean;
 }) {
-  const { runId, canInterrupt, canOperateThread } = input;
+  const { runId, canInterrupt, canOperateThread, hasSendableContent } = input;
   const [stopPhase, setStopPhase] = useState<StopPhase>(null);
   const [stopRunId, setStopRunId] = useState(runId);
+  const [hadSendableContent, setHadSendableContent] = useState(hasSendableContent);
+  if (hadSendableContent !== hasSendableContent) {
+    setHadSendableContent(hasSendableContent);
+    if (!hasSendableContent && canInterrupt && stopPhase === null) setStopPhase("sent");
+  }
   if (runId !== null && stopRunId !== runId) {
     setStopRunId(runId);
     setStopPhase(null);
@@ -128,7 +135,7 @@ function useStopPhase(input: {
       const timeout = setTimeout(() => setStopPhase("timedOut"), STOP_PENDING_MAX_MS);
       return () => clearTimeout(timeout);
     }
-    if (stopPhase === "landed") {
+    if (stopPhase === "landed" || stopPhase === "sent") {
       const timeout = setTimeout(() => setStopPhase(null), STOP_LANDED_CLICK_GUARD_MS);
       return () => clearTimeout(timeout);
     }
@@ -166,7 +173,7 @@ function StopGenerationButton({
             onPointerDown={preserveComposerFocusOnPointerDown ? preventPointerFocus : undefined}
             disabled={!canOperateThread || isStopDisabled}
             onClick={() => {
-              if (!canOperateThread || isStopDisabled) return;
+              if (!canOperateThread || isStopDisabled || stopPhase === "sent") return;
               onStopRequested();
               onInterrupt();
             }}
@@ -205,7 +212,12 @@ export function CollapsedComposerStopAction({
   isEditingQueuedMessage: boolean;
   onInterrupt: () => void;
 }) {
-  const [stopPhase, setStopPhase] = useStopPhase({ runId, canInterrupt, canOperateThread });
+  const [stopPhase, setStopPhase] = useStopPhase({
+    runId,
+    canInterrupt,
+    canOperateThread,
+    hasSendableContent,
+  });
   if (
     !(canInterrupt || stopPhase === "pending" || stopPhase === "timedOut") ||
     hasSendableContent ||
@@ -262,7 +274,12 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
 }: ComposerPrimaryActionsProps) {
   const gt = useGT();
   const m = useMessages();
-  const [stopPhase, setStopPhase] = useStopPhase({ runId, canInterrupt, canOperateThread });
+  const [stopPhase, setStopPhase] = useStopPhase({
+    runId,
+    canInterrupt,
+    canOperateThread,
+    hasSendableContent,
+  });
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
