@@ -233,6 +233,8 @@ interface MessagesTimelineProps {
     citation: AssistantCitation,
     sourceAnchor: AssistantCitationSourceAnchor,
   ) => boolean;
+  /** Dock anchor above the composer where the touch Cite chip mounts. */
+  citeChipAnchor?: HTMLElement | null;
   onReplyToResponse?: TimelineRowSharedState["onReplyToResponse"];
   isWorking: boolean;
   /** The thread is catching up from a cached copy, whose working state may be stale. */
@@ -356,6 +358,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   citationRequest = null,
   citationHistory = CITED_HISTORY_LOADING,
   onCiteAssistantText,
+  citeChipAnchor = null,
   onReplyToResponse,
   isWorking,
   syncing = false,
@@ -1451,6 +1454,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
               <AssistantSelectionToolbar
                 viewport={timelineViewportElement}
                 threadRef={citationThreadRef}
+                anchor={citeChipAnchor}
                 onCite={onCiteAssistantText}
               />
             ) : null}

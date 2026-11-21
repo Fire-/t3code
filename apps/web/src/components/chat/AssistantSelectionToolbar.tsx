@@ -6,7 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { useGT } from "gt-react";
 import { QuoteIcon } from "lucide-react";
-import { use, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { use, useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { createPortal } from "react-dom";
 import {
   captureAssistantTextSelection,
@@ -24,18 +24,23 @@ import { BackgroundThreadContext } from "./backgroundThread";
 export function AssistantSelectionToolbar({
   viewport,
   threadRef,
+  anchor,
   onCite,
 }: {
   viewport: HTMLElement | null;
   threadRef: ScopedThreadRef;
+  /** Where the touch chip mounts: the floating dock ChatView keeps above the composer. */
+  anchor: HTMLElement | null;
   onCite: (citation: AssistantCitation, sourceAnchor: AssistantCitationSourceAnchor) => boolean;
 }) {
   const [selection, setSelection] = useState<{
     citation: AssistantCitation;
-    position: SelectionActionPoint;
+    /** Null for a touch offer, which shows as the chip above the composer. */
+    position: SelectionActionPoint | null;
     sourceAnchor: AssistantCitationSourceAnchor;
   } | null>(null);
   const toolbarRef = useRef<HTMLButtonElement>(null);
+  const chipRef = useRef<HTMLButtonElement>(null);
   const actionsRef = useRef<ReturnType<typeof observeSelectionActions> | null>(null);
   const backgroundThread = use(BackgroundThreadContext);
   const gt = useGT();
@@ -43,7 +48,7 @@ export function AssistantSelectionToolbar({
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the toolbar DOM node and clamps its position inside the window before paint
   useLayoutEffect(() => {
     const toolbar = toolbarRef.current;
-    if (!toolbar || !selection) return;
+    if (!toolbar || !selection?.position) return;
     const rect = toolbar.getBoundingClientRect();
     toolbar.style.left = `${Math.max(8, Math.min(selection.position.x, window.innerWidth - rect.width - 8))}px`;
     toolbar.style.top = `${Math.max(8, Math.min(selection.position.y, window.innerHeight - rect.height - 8))}px`;
@@ -53,7 +58,7 @@ export function AssistantSelectionToolbar({
   useEffect(() => {
     if (!viewport) return;
     const clear = () => setSelection(null);
-    const update = (pointer: SelectionActionPoint | null) => {
+    const update = (pointer: SelectionActionPoint | null, touch: boolean) => {
       const nativeSelection = window.getSelection();
       const captured = captureAssistantTextSelection(viewport, nativeSelection);
       const messageId = captured?.source.dataset.assistantCitationSource;
@@ -131,17 +136,21 @@ export function AssistantSelectionToolbar({
           messageId: MessageId.make(messageId),
           ...captured.selector,
         },
-        position: resolveSelectionActionPosition({
-          bounds: viewportRect,
-          selectionRect: rects.item(rects.length - 1) ?? rect,
-          pointer: pointerOnText ? pointer : null,
-          viewport: { width: window.innerWidth, height: window.innerHeight },
-        }),
+        // A touch offer is the chip above the composer: Android's own menu floats
+        // over the selection and its end handle sits right under the selection.
+        position: touch
+          ? null
+          : resolveSelectionActionPosition({
+              bounds: viewportRect,
+              selectionRect: rects.item(rects.length - 1) ?? rect,
+              pointer: pointerOnText ? pointer : null,
+              viewport: { width: window.innerWidth, height: window.innerHeight },
+            }),
       });
     };
     const actions = observeSelectionActions({
       element: viewport,
-      getActionElement: () => toolbarRef.current,
+      getActionElement: () => chipRef.current ?? toolbarRef.current,
       restoreAfterScroll: true,
       onSelection: update,
       onDismiss: clear,
@@ -190,31 +199,65 @@ export function AssistantSelectionToolbar({
     dismiss();
     return true;
   };
+  if (selection.position === null) {
+    if (anchor === null) return null;
+    return createPortal(
+      <CiteButton
+        ref={chipRef}
+        tooLong={tooLong}
+        onCite={cite}
+        onDismiss={dismiss}
+        aria-label={tooLong ? gt("Selection is too long to cite") : gt("Cite selection")}
+        className="pointer-events-auto"
+      />,
+      anchor,
+    );
+  }
   return createPortal(
-    <Button
+    <CiteButton
       ref={toolbarRef}
+      tooLong={tooLong}
+      onCite={cite}
+      onDismiss={dismiss}
+      aria-label={tooLong ? gt("Selection is too long to cite") : gt("Cite selection in composer")}
+      className="fixed z-50 max-w-[calc(100vw-1rem)]"
+      style={{ left: selection.position.x, top: selection.position.y }}
+    />,
+    document.body,
+  );
+}
+
+/** The Cite control itself, shared by the touch chip and the desktop popover. */
+function CiteButton(
+  props: {
+    readonly tooLong: boolean;
+    readonly onCite: () => boolean;
+    readonly onDismiss: () => void;
+  } & Omit<ComponentProps<typeof Button>, "type" | "size" | "variant" | "disabled" | "onClick">,
+) {
+  const gt = useGT();
+  const { tooLong, onCite, onDismiss, ...button } = props;
+  return (
+    <Button
       type="button"
       size="xs"
       variant="glass"
       disabled={tooLong}
-      aria-label={tooLong ? gt("Selection is too long to cite") : gt("Cite selection in composer")}
-      className="fixed z-50 max-w-[calc(100vw-1rem)]"
-      style={{ left: selection.position.x, top: selection.position.y }}
       onPointerDown={(event) => event.preventDefault()}
-      onClick={cite}
+      onClick={onCite}
       onKeyDown={(event) => {
         event.stopPropagation();
         if (event.key === "Escape" && !event.nativeEvent.isComposing) {
           event.preventDefault();
-          dismiss();
+          onDismiss();
         }
       }}
+      {...button}
     >
       <QuoteIcon aria-hidden="true" className="size-3.5" />
       {tooLong
         ? gt("Shorten selection")
         : gt("Cite", { $context: "verb, button that quotes the selected text" })}
-    </Button>,
-    document.body,
+    </Button>
   );
 }
