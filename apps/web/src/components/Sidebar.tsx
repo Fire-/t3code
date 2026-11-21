@@ -184,6 +184,7 @@ import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
   groupSidebarThreadsByProject,
+  groupSidebarChildThreads,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
@@ -273,6 +274,7 @@ import {
   type SidebarSweepAction,
 } from "./sidebar/SidebarThreadRow";
 import { SidebarDraftBlock, useSidebarDrafts } from "./sidebar/SidebarDraftBlock";
+import { SidebarChildThreadOverflow, SidebarChildThreadRow } from "./sidebar/SidebarChildThreadRow";
 import {
   SidebarProjectFolderHeader,
   sidebarFolderRowId,
@@ -1124,6 +1126,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     routeThreadRef === null
       ? null
       : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
+  // Quiet shells still change when a run starts or stops, so children come and go live.
+  const childThreadsByParentKey = groupSidebarChildThreads(threads, delegatedUnderParent);
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
@@ -3579,11 +3583,57 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           onDraftContextMenu={handleDraftContextMenu}
                         />,
                       ];
+                      // Reorder drags place rows as if child rows were not there, so those hide in
+                      // place instead of showing under the rows that slide over them.
+                      const hideChildRows = dragState !== null && !isContextDrag;
+                      const pushThreadRow = (
+                        thread: EnvironmentThreadShell,
+                        section: SidebarSection,
+                        folderRow?: string,
+                      ) => {
+                        items.push(renderThreadRow(thread, section, folderRow));
+                        const parentKey = scopedThreadKey(
+                          scopeThreadRef(thread.environmentId, thread.id),
+                        );
+                        const children = childThreadsByParentKey.get(parentKey);
+                        if (children === undefined) return;
+                        for (const child of children.threads) {
+                          const childKey = scopedThreadKey(
+                            scopeThreadRef(child.environmentId, child.id),
+                          );
+                          items.push(
+                            <SidebarChildThreadRow
+                              key={`child:${childKey}`}
+                              thread={child}
+                              parentRowKey={parentKey}
+                              inFolder={folderRow !== undefined}
+                              isActive={routeThreadKey === childKey}
+                              hidden={hideChildRows}
+                              providerEntry={
+                                providerEntriesByEnvironment
+                                  .get(child.environmentId)
+                                  ?.get(child.providerInstanceId) ?? null
+                              }
+                              onActivate={navigateToThread}
+                            />,
+                          );
+                        }
+                        if (children.overflowCount > 0) {
+                          items.push(
+                            <SidebarChildThreadOverflow
+                              key={`child-overflow:${parentKey}`}
+                              count={children.overflowCount}
+                              inFolder={folderRow !== undefined}
+                              hidden={hideChildRows}
+                            />,
+                          );
+                        }
+                      };
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
                           // Folders draw active rows in their own place below.
                           if (projectFolders !== null && item.section === "active") continue;
-                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          pushThreadRow(threadByKey.get(item.key)!, item.section);
                           continue;
                         }
                         if (projectFolders !== null && item.marker === "active-placeholder") {
@@ -3600,12 +3650,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               />,
                             );
                             for (const thread of folder.threads) {
-                              items.push(
-                                renderThreadRow(
-                                  thread,
-                                  "active",
-                                  sidebarFolderRowId(folder.group.projectKey),
-                                ),
+                              pushThreadRow(
+                                thread,
+                                "active",
+                                sidebarFolderRowId(folder.group.projectKey),
                               );
                             }
                           }
