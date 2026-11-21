@@ -5,9 +5,12 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
-import { providerMessageTextWithAttachmentPaths } from "./attachmentPrompt.ts";
+import { gifFrameCount, providerMessageTextWithAttachmentPaths } from "./attachmentPrompt.ts";
 
 const document = ChatFileAttachment.make({
   id: ChatAttachmentId.make("file-document"),
@@ -27,7 +30,69 @@ const image = ChatImageAttachment.make({
 const resolveAttachmentPath = (attachment: { readonly id: string; readonly name: string }) =>
   `/attachments/${attachment.id}${attachment.name.slice(attachment.name.lastIndexOf("."))}`;
 
+const ascii = (value: string) => Array.from(value, (char) => char.charCodeAt(0));
+// 1x1 screen with a two-color global table.
+const GIF_HEAD = [...ascii("GIF89a"), 1, 0, 1, 0, 0x80, 0, 0, 0, 0, 0, 255, 255, 255];
+const GIF_LOOP = [0x21, 0xff, 0x0b, ...ascii("NETSCAPE2.0"), 0x03, 0x01, 0x00, 0x00, 0x00];
+const GIF_CONTROL = [0x21, 0xf9, 0x04, 0x04, 0x0a, 0x00, 0x00, 0x00];
+const GIF_DESCRIPTOR = [0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0x00];
+const GIF_DESCRIPTOR_WITH_TABLE = [0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0x80, 0, 0, 0, 255, 255, 255];
+// Image data holding separator and trailer bytes, which a byte scan would miscount.
+const GIF_IMAGE_DATA = [0x02, 0x02, 0x2c, 0x3b, 0x00];
+const gifFrame = (descriptor = GIF_DESCRIPTOR) => [
+  ...GIF_CONTROL,
+  ...descriptor,
+  ...GIF_IMAGE_DATA,
+];
+const gif = (...blocks: ReadonlyArray<ReadonlyArray<number>>) =>
+  Uint8Array.from([...GIF_HEAD, ...blocks.flat(), 0x3b]);
+const stillGif = gif(gifFrame());
+const animatedGif = gif(GIF_LOOP, gifFrame(), gifFrame(GIF_DESCRIPTOR_WITH_TABLE), gifFrame());
+
+describe("gifFrameCount", () => {
+  it.each([
+    ["a single frame", stillGif, 1],
+    ["three frames with a loop extension and a local color table", animatedGif, 3],
+    ["a truncated file", animatedGif.subarray(0, animatedGif.length - 4), undefined],
+    ["a PNG", Uint8Array.from([0x89, ...ascii("PNG"), 0x0d, 0x0a, 0x1a, 0x0a]), undefined],
+  ])("reads %s", (_, bytes, expected) => {
+    assert.strictEqual(gifFrameCount(bytes), expected);
+  });
+});
+
 describe("provider attachment prompts", () => {
+  it.effect("marks multi-frame GIFs as animated and still lists unreadable ones", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped();
+      const [animated, still, missing] = ["animated", "still", "missing"].map((name) =>
+        ChatImageAttachment.make({
+          ...image,
+          id: ChatAttachmentId.make(name),
+          name: `${name}.gif`,
+          mimeType: "image/gif",
+        }),
+      );
+      yield* fs.writeFile(path.join(dir, "animated.gif"), animatedGif);
+      yield* fs.writeFile(path.join(dir, "still.gif"), stillGif);
+      const text = yield* providerMessageTextWithAttachmentPaths({
+        text: "Look.",
+        attachments: [animated!, still!, missing!],
+        resolveAttachmentPath: (attachment) => path.join(dir, attachment.name),
+      });
+
+      assert.strictEqual(
+        text,
+        [
+          "Look.",
+          `[Attached image "animated.gif" (animated, 3 frames) is saved at: ${path.join(dir, "animated.gif")}]`,
+          `[Attached image "still.gif" is saved at: ${path.join(dir, "still.gif")}]`,
+          `[Attached image "missing.gif" is saved at: ${path.join(dir, "missing.gif")}]`,
+        ].join("\n\n"),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
   it.effect("lists extracted text only when the host resolves it", () =>
     Effect.gen(function* () {
       const path = "/attachments/report.docx";
