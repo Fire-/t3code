@@ -8793,23 +8793,28 @@
   "e4e91d155cb6a9b4": "단순 사이드바(프로젝트별 그룹화)",
   "f079556d67367fe7": "폴더 스레드를 두 줄로 표시합니다. 첫 줄은 제목, 둘째 줄은 브랜치, 풀 리퀘스트, 에이전트입니다.",
   "ac1e5c94d1ad3c6a": "두 줄 폴더 행",
-  "9ae293971d93c819": "브라우저에서 실시간으로 지켜보고 승인한 메시지를 보낼 수 있는 게스트와 스레드를 공유합니다. 게스트 링크를 사용하려면 T3 Connect에 로그인하세요.",
+  "20db32b7a7fd65e0": "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect, or set a public link address, to use guest links.",
   "0aa5406ac4d7f7c7": "게스트 링크",
+  "d4e430509402c82e": "Public link address",
+  "8d83c105855e4e5a": "Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links.",
+  "cd0e7b5cd07a0a67": "public link address",
+  "d52b3d6bf9f2a013": "혼합",
+  "b94233c79ed5e14a": "Enter an HTTPS address with no path, such as https://t3.example.com.",
   "f0e853acd2006d53": "연결된 환경",
   "13e86eb5d8287a71": "Claude 또는 Codex 턴이 끝난 뒤 빈 입력창에 예상되는 다음 메시지를 표시합니다. Tab을 누르면 사용합니다. 제안마다 요금제에서 캐시된 요청이 하나 더 발생합니다. Codex 0.165 이상이 필요합니다. Claude 스레드는 다시 시작하면 업데이트됩니다.",
   "d4b2a2ec812aafb0": "다음 프롬프트 제안",
   "298c7150a7621c80": "Simlock 기기 호스트",
   "67937aa49179285e": "Mac에서 모든 파일을 쓰는 대신 T3 홈 폴더에 캐시된 체크아웃에서 새 워크트리를 복제합니다. 불가능하면 Git의 일반 체크아웃을 사용합니다. 끄면 캐시가 삭제됩니다.",
   "f9904f78d3003f58": "빠른 워크트리 체크아웃",
-  "ec7623deed751c05": [
-    "브라우저에서 실시간으로 지켜보고 승인한 메시지를 보낼 수 있는 게스트와 스레드를 공유합니다. T3 Connect가 필요합니다. 로그인한 뒤",
+  "cd24900f08eb1ffc": [
+    "Share a thread with a guest who watches it live and sends messages you approve. Needs T3 Connect (link this machine in",
     " ",
     {
       "t": "Link",
       "i": 1,
-      "c": "공유 및 액세스"
+      "c": "Sharing & access"
     },
-    "에서 이 머신을 연결하세요. 끄면 모든 게스트 링크가 중지됩니다."
+    ") or the address below. Turning it off stops every guest link."
   ],
   "bff0033ea41eb38e": [
     "이곳의 에이전트가 다른 머신에서, 다른 머신의 에이전트가 이곳에서 작업하도록 허용합니다. 머신마다 켠 뒤",
@@ -10083,7 +10088,6 @@
   "16bdc70b858c223f": "패널 미리 열기 기본값으로 재설정",
   "c5424f09d77138ff": "200,000 토큰이 넘는 유휴 Claude 스레드를 압축할 시점입니다. 돌아온 뒤, 프롬프트 캐시가 만료되기 직전, 또는 압축 안 함 중에서 선택합니다. 각 Claude 제공자에서 재정의할 수 있습니다.",
   "3e99c5c14f4939c8": "유휴 스레드 압축 기본값으로 재설정",
-  "d52b3d6bf9f2a013": "혼합",
   "cd72fe451ba0d6aa": "새 프로젝트",
   "394c3bd0a1782c8e": "프로젝트 추가 탐색기가 열릴 때 \"~/\"를 사용하려면 비워 두세요.",
   "f9b912a818bd869d": "프로젝트 추가 기본 디렉터리 기본값으로 재설정",
@@ -11726,7 +11730,8 @@
   "8f71bc7c325e23e3": "숨기기 도구 호출 명령 편집 검색 작업 로그 활동 조용한 채팅 젠 최종 답변만",
   "5a3af411a0d5354c": "접근성 a11y 화면 낭독기 nvda jaws voiceover orca 내레이터 음성 알림 소리 내어 읽기 메시지 활동 단계",
   "d443390c4d2dcfd4": "접근성 a11y 화면 낭독기 nvda jaws voiceover orca 내레이터 창 제목 탭 제목 alt tab 작업 표시줄 스레드 상태 순서 작업 중 승인",
-  "6826fa9579c22035": "베타 공유 게스트 초대 링크 팀원 지켜보기 T3 Connect 터널",
+  "497aa6f68531e34e": "beta share guest invite link teammate watch t3 connect tunnel public address https proxy",
+  "648028fbc96c368a": "guest links public address url https origin tunnel reverse proxy cloudflare without t3 connect",
   "f10c06cba0cdf7fe": "베타 다른 머신 연결 vps 피어 에이전트 원격 작업 위임",
   "4a21cf825a2045b0": "베타 탭 자동 완성 다음 메시지 예측 Claude Codex 고스트 텍스트",
   "fea2dc36585c4a20": "Simlock 기기 호스트(알파)",

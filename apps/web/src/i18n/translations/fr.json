@@ -8833,23 +8833,28 @@
   "e4e91d155cb6a9b4": "Barre latérale classique (regrouper par projet)",
   "f079556d67367fe7": "Affiche les fils des dossiers sur deux lignes : le titre, puis la branche, la pull request et l’agent.",
   "ac1e5c94d1ad3c6a": "Lignes de dossier sur deux lignes",
-  "9ae293971d93c819": "Partagez un fil avec un invité qui le suit en direct dans un navigateur et envoie des messages que vous approuvez. Connectez-vous à T3 Connect pour utiliser les liens invités.",
+  "20db32b7a7fd65e0": "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect, or set a public link address, to use guest links.",
   "0aa5406ac4d7f7c7": "Liens invités",
+  "d4e430509402c82e": "Public link address",
+  "8d83c105855e4e5a": "Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links.",
+  "cd0e7b5cd07a0a67": "public link address",
+  "d52b3d6bf9f2a013": "Mixte",
+  "b94233c79ed5e14a": "Enter an HTTPS address with no path, such as https://t3.example.com.",
   "f0e853acd2006d53": "Environnements associés",
   "13e86eb5d8287a71": "Affiche un prochain message suggéré dans la zone de saisie vide après un tour Claude ou Codex. Tab l’utilise. Chaque suggestion est une requête en cache supplémentaire sur votre forfait. Nécessite Codex 0.165+. Les fils Claude se mettent à jour au redémarrage.",
   "d4b2a2ec812aafb0": "Suggérer le prochain prompt",
   "298c7150a7621c80": "Hôtes d’appareils Simlock",
   "67937aa49179285e": "Sur Mac, clone les nouveaux worktrees depuis une copie en cache dans le dossier T3 home au lieu d’écrire chaque fichier. Utilise le checkout Git normal quand ce n’est pas possible. La désactivation supprime le cache.",
   "f9904f78d3003f58": "Checkout rapide des worktrees",
-  "ec7623deed751c05": [
-    "Partagez un fil avec un invité qui le suit en direct dans un navigateur et envoie des messages que vous approuvez. Nécessite T3 Connect : connectez-vous et associez cette machine dans",
+  "cd24900f08eb1ffc": [
+    "Share a thread with a guest who watches it live and sends messages you approve. Needs T3 Connect (link this machine in",
     " ",
     {
       "t": "Link",
       "i": 1,
-      "c": "Partage et accès"
+      "c": "Sharing & access"
     },
-    ". La désactivation arrête tous les liens invités."
+    ") or the address below. Turning it off stops every guest link."
   ],
   "bff0033ea41eb38e": [
     "Permet aux agents d’ici de travailler sur vos autres machines, et aux leurs de travailler ici. Activez l’option sur chaque machine, puis associez-les dans",
@@ -10128,7 +10133,6 @@
   "16bdc70b858c223f": "Réinitialiser les panneaux proactifs à la valeur par défaut",
   "c5424f09d77138ff": "Quand compacter un fil Claude inactif de plus de 200 000 tokens : à votre retour, juste avant l’expiration de son cache de prompt, ou jamais. Chaque fournisseur Claude peut remplacer ce paramètre.",
   "3e99c5c14f4939c8": "Réinitialiser le compactage des fils inactifs à la valeur par défaut",
-  "d52b3d6bf9f2a013": "Mixte",
   "cd72fe451ba0d6aa": "Nouveaux projets",
   "394c3bd0a1782c8e": "Laissez vide pour utiliser « ~/ » à l’ouverture du navigateur Ajouter un projet.",
   "f9b912a818bd869d": "Réinitialiser le répertoire de base pour l’ajout de projets à la valeur par défaut",
@@ -11779,7 +11783,8 @@
   "8f71bc7c325e23e3": "masquer appels d’outils commandes modifications recherches journal de travail activité discussion silencieuse zen réponses finales uniquement",
   "5a3af411a0d5354c": "accessibilité a11y lecteur d’écran nvda jaws voiceover orca narrateur synthèse vocale annoncer lire à voix haute messages activité étapes",
   "d443390c4d2dcfd4": "accessibilité a11y lecteur d’écran nvda jaws voiceover orca narrateur titre de fenêtre titre d’onglet alt tab barre des tâches statut du fil ordre en cours approbation",
-  "6826fa9579c22035": "bêta partager invité invitation lien coéquipier regarder t3 connect tunnel",
+  "497aa6f68531e34e": "beta share guest invite link teammate watch t3 connect tunnel public address https proxy",
+  "648028fbc96c368a": "guest links public address url https origin tunnel reverse proxy cloudflare without t3 connect",
   "f10c06cba0cdf7fe": "bêta associer une autre machine vps pair agents y travaillent déléguer",
   "4a21cf825a2045b0": "bêta tab autocomplétion prédire prochain message claude codex texte fantôme",
   "fea2dc36585c4a20": "Hôtes d’appareils Simlock (alpha)",
