@@ -1179,6 +1179,7 @@ describe("DroidAdapterV2", () => {
         failed: true,
       },
       { reason: "model_rate_limited", status: "failed", disposition: "reusable", failed: true },
+      { reason: "model_usage_exhausted", status: "failed", disposition: "reusable", failed: true },
       { reason: "process_exit", status: "failed", disposition: "broken", failed: true },
     ] as const;
 
@@ -1227,6 +1228,53 @@ describe("DroidAdapterV2", () => {
             tool?.type === "turn_item.updated" && tool.turnItem.status !== "running",
             "no tool item of the turn is still running after its terminal",
           );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "[VAL-TURN-013] an exhausted usage limit fails as usage_limit, reset by the notice before it",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakeDroid();
+          const opened = yield* openRuntime(fake);
+          const thread = yield* ensure(opened);
+          yield* startTurn(opened.runtime, thread);
+          const process = fake.current();
+          yield* process.emit({
+            type: "create_message",
+            message: {
+              id: "notice-limit",
+              role: "system",
+              visibility: "user_only",
+              content: [
+                {
+                  type: "text",
+                  text: "You've reached your 5-hour standard usage limit (resets in 2h 26min) and your Extra Usage balance is empty.\nSwitch to Droid Core to continue.",
+                },
+              ],
+            },
+          });
+          yield* process.emit(completed(1, "model_usage_exhausted"));
+          const limited = yield* opened.takeEvent(isTerminal);
+          assert.deepStrictEqual(limited.type === "turn.terminal" ? limited.failure : null, {
+            class: "usage_limit",
+            code: "model_usage_exhausted",
+            message:
+              "You've reached your 5-hour standard usage limit (resets in 2h 26min) and your Extra Usage balance is empty.",
+            retryable: false,
+            resetAt: "1970-01-01T02:27:00.000Z",
+          });
+
+          const unparsed = yield* runTurn(opened, fake, thread, {
+            runOrdinal: 2,
+            reason: "model_usage_exhausted",
+          });
+          assert.deepStrictEqual(unparsed.type === "turn.terminal" ? unparsed.failure : null, {
+            class: "usage_limit",
+            code: "model_usage_exhausted",
+            message: "Droid reached its usage limit.",
+            retryable: false,
+          });
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 

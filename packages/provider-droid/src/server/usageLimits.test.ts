@@ -2,7 +2,11 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
-import { droidUsageResponsesToLimits, readDroidUsageLimits } from "./usageLimits.ts";
+import {
+  droidUsageLimitResetDelayMs,
+  droidUsageResponsesToLimits,
+  readDroidUsageLimits,
+} from "./usageLimits.ts";
 
 const checkedAt = "2026-11-05T00:00:00.000Z";
 
@@ -162,4 +166,21 @@ describe("Droid usage limits", () => {
       ]);
     }),
   );
+
+  it.each([
+    ["5-hour", "You've reached your 5-hour standard usage limit (resets in 2h 26min) and", 146],
+    ["weekly", "You've reached your weekly standard usage limit (resets in 10h 6min) ...", 606],
+    ["days", "You've reached your monthly standard usage limit (resets in 3 days) ...", 3 * 1440],
+    ["one day", "your monthly standard usage limit (resets in 1 day) ...", 1440],
+    ["minutes only", "your 5-hour standard usage limit (resets in 45min) ...", 45],
+  ])("reads the reset delay of a %s usage-limit notice", (_name, notice, minutes) => {
+    expect(droidUsageLimitResetDelayMs(notice)).toBe(minutes * 60_000);
+  });
+
+  it.each([
+    "You've reached your monthly standard usage limit and your balance is empty.",
+    "Droid resets in a moment.",
+  ])("finds no reset delay in %j", (notice) => {
+    expect(droidUsageLimitResetDelayMs(notice)).toBeUndefined();
+  });
 });

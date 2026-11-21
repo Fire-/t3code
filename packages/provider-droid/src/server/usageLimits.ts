@@ -14,6 +14,49 @@ import {
 
 const FACTORY_API_ORIGIN = "https://api.factory.ai";
 
+const RESETS_IN = /resets in ([^)\n]+)/i;
+const DURATION_PART = /(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)\b/gi;
+const DURATION_UNIT_MS: Readonly<Record<string, number>> = {
+  d: 86_400_000,
+  h: 3_600_000,
+  m: 60_000,
+};
+// The notice states the delay to the minute at best, so resuming at it exactly can be early.
+const RESET_MARGIN_MS = 60_000;
+
+/** The delay in a notice like "usage limit (resets in 2h 26min)", or undefined when it has none. */
+export function droidUsageLimitResetDelayMs(notice: string): number | undefined {
+  const span = RESETS_IN.exec(notice)?.[1];
+  if (span === undefined) return undefined;
+  let delayMs = 0;
+  for (const [, amount, unit] of span.matchAll(DURATION_PART)) {
+    delayMs += Number(amount) * (DURATION_UNIT_MS[unit!.charAt(0).toLowerCase()] ?? 0);
+  }
+  return delayMs > 0 ? delayMs : undefined;
+}
+
+export interface DroidUsageLimitNotice {
+  readonly message: string;
+  readonly resetAt: string | undefined;
+}
+
+/** Reads the notice Droid shows right before it ends a turn with `model_usage_exhausted`. */
+export function droidUsageLimitNotice(
+  notice: string,
+  receivedAt: DateTime.Utc,
+): DroidUsageLimitNotice | undefined {
+  if (!/usage limit/i.test(notice)) return undefined;
+  const message = notice.trim().split("\n", 1)[0]!.trim();
+  const delayMs = droidUsageLimitResetDelayMs(notice);
+  return {
+    message,
+    resetAt:
+      delayMs === undefined
+        ? undefined
+        : DateTime.formatIso(DateTime.add(receivedAt, { milliseconds: delayMs + RESET_MARGIN_MS })),
+  };
+}
+
 const FactoryWindow = Schema.Struct({
   usedPercent: Schema.optional(Schema.Number),
   windowEnd: Schema.optional(Schema.NullOr(Schema.String)),

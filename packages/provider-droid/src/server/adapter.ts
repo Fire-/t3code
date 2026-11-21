@@ -83,6 +83,7 @@ import {
   DROID_ASK_USER_CANCELLED,
   DROID_PICK_OPTIONS_CANCELLED,
   droidBackgroundCommandEnded,
+  droidMessageText,
   droidTaskCompletionOf,
   droidWakeMessageId,
   type DroidTaskCompletion,
@@ -138,6 +139,7 @@ import {
   type DroidSubagentOutcome,
   type DroidSubagentUpdate,
 } from "./subagents.ts";
+import { droidUsageLimitNotice, type DroidUsageLimitNotice } from "./usageLimits.ts";
 
 export const DROID_PROVIDER = ProviderDriverKind.make("droid");
 const DEFAULT_DROID_SETTINGS = Schema.decodeSync(DroidSettings)({});
@@ -282,6 +284,8 @@ interface ActiveDroidTurn {
   mapper: DroidMapperState;
   /** The latest `error` notification's text: Droid sends the reason before the failing completion. */
   errorMessage: string | undefined;
+  /** Droid's usage-limit notice, sent before a `model_usage_exhausted` completion. */
+  usageLimit: DroidUsageLimitNotice | undefined;
   /**
    * The native turn whose completion this turn waits for: the one its message started, or the wake
    * it took over. A compaction has none.
@@ -397,9 +401,20 @@ const droidRef = (nativeId: string): OrchestrationV2ProviderRef => ({
   strength: "strong",
 });
 
+function usageLimitNoticeOf(
+  notification: DroidNotification,
+  now: DateTime.Utc,
+): DroidUsageLimitNotice | undefined {
+  const message = notification["message"];
+  if (!Predicate.isObject(message)) return undefined;
+  if (message["visibility"] !== "user_only" || message["role"] === "assistant") return undefined;
+  return droidUsageLimitNotice(droidMessageText(message["content"]), now);
+}
+
 function terminalFailure(
   reason: string,
   errorMessage: string | undefined,
+  usageLimit: DroidUsageLimitNotice | undefined,
 ): OrchestrationV2ProviderFailure {
   switch (reason) {
     case "model_authentication_failed":
@@ -415,6 +430,14 @@ function terminalFailure(
         class: "provider_error",
         code: reason,
         retryable: true,
+      });
+    case "model_usage_exhausted":
+      return makeProviderFailure({
+        message: usageLimit?.message ?? errorMessage ?? "Droid reached its usage limit.",
+        class: "usage_limit",
+        code: reason,
+        retryable: false,
+        resetAt: usageLimit?.resetAt ?? null,
       });
     default:
       return makeProviderFailure({
@@ -449,6 +472,7 @@ function processExitOutcome(closing: boolean, message: string): TurnOutcome {
 function classifyCompletion(
   reason: unknown,
   errorMessage: string | undefined,
+  usageLimit: DroidUsageLimitNotice | undefined,
   closing: boolean,
 ): TurnOutcome {
   switch (reason) {
@@ -464,7 +488,7 @@ function classifyCompletion(
     default:
       return {
         kind: "failed",
-        failure: terminalFailure(String(reason), errorMessage),
+        failure: terminalFailure(String(reason), errorMessage, usageLimit),
         disposition: "reusable",
       };
   }
@@ -1238,7 +1262,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         turn.mapper = mapped.state;
         yield* emitMapped(state, mapped.events);
 
-        const outcome = classifyCompletion(notification["reason"], turn.errorMessage, closing);
+        const outcome = classifyCompletion(
+          notification["reason"],
+          turn.errorMessage,
+          turn.usageLimit,
+          closing,
+        );
         // A steer Droid has queued or is running natively belongs to this t3 turn, so a clean
         // completion of an earlier native turn does not end it. Any other outcome does.
         if (
@@ -1542,7 +1571,11 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
           return yield* handleDiscardedSteers(state, turn, notification);
         }
         if (yield* handleSubagentFrame(state, turn, notification)) return;
-        if (notification.type === "create_message") noteQueuedSteerStarted(turn, notification);
+        if (notification.type === "create_message") {
+          noteQueuedSteerStarted(turn, notification);
+          const notice = usageLimitNoticeOf(notification, yield* DateTime.now);
+          if (notice !== undefined) turn.usageLimit = notice;
+        }
         const ctx = eventContext(state, turn);
         const startedCommand = droidBackgroundCommandStarted(turn.mapper, ctx, notification);
         if (startedCommand !== undefined) state.backgroundCommands.add(startedCommand);
@@ -2248,6 +2281,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
                 desired === undefined || desired.router ? undefined : desired.modelId,
             }),
             errorMessage: undefined,
+            usageLimit: undefined,
             nativeTurnId,
             nativeSettled: false,
             lastActivityMs: yield* Clock.currentTimeMillis,
@@ -2778,6 +2812,7 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
             providerTurn,
             mapper: { ...opened, nextItemOrdinal: compaction.ordinal + 1 },
             errorMessage: undefined,
+            usageLimit: undefined,
             // No native turn runs, so none owes a completion.
             nativeTurnId: undefined,
             nativeSettled: true,
