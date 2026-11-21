@@ -106,6 +106,35 @@ it.each(["resume", "draft", "question"] as const)(
   },
 );
 
+it.each<[string, Partial<ComponentProps<typeof ComposerPrimaryActions>>[]]>([
+  ["steering a running turn", [{ hasSendableContent: true }]],
+  [
+    "sending while idle",
+    [
+      { isRunning: false, canInterrupt: false, hasSendableContent: true },
+      { isRunning: false, canInterrupt: false },
+    ],
+  ],
+  ["resuming", [{ isRunning: false, canInterrupt: false, canResume: true }]],
+])("keeps a repeat click from reaching the Stop that appears after %s", async (_, steps) => {
+  const props = setup();
+  const [first, ...rest] = steps;
+  await using screen = await render(<ComposerPrimaryActions {...props} {...first} />);
+  using _timers = fakeTimers();
+  for (const step of rest) await screen.rerender(<ComposerPrimaryActions {...props} {...step} />);
+  await screen.rerender(<ComposerPrimaryActions {...props} />);
+  const stop = screen
+    .getByRole("button", { name: "Stop generation" })
+    .element() as HTMLButtonElement;
+  await act(() => stop.click());
+  await act(() => vi.advanceTimersByTime(499));
+  await act(() => stop.click());
+  expect(props.onInterrupt).not.toHaveBeenCalled();
+  await act(() => vi.advanceTimersByTime(1));
+  await act(() => stop.click());
+  expect(props.onInterrupt).toHaveBeenCalledTimes(1);
+});
+
 it("allows retry after ten seconds and protects a late stop", async () => {
   const props = setup();
   await using screen = await render(<ComposerPrimaryActions {...props} />);
@@ -180,13 +209,18 @@ it("swaps the collapsed composer's send button for Stop while a turn can be stop
     </CollapsedComposerStopAction>
   );
   await using screen = await render(collapsed({ hasSendableContent: true }));
+  using _timers = fakeTimers();
   await expect.element(screen.getByRole("button", { name: "Send message" })).toBeVisible();
   await screen.rerender(collapsed());
-  await act(() =>
-    (
-      screen.getByRole("button", { name: "Stop generation" }).element() as HTMLButtonElement
-    ).click(),
-  );
+  const stop = screen
+    .getByRole("button", { name: "Stop generation" })
+    .element() as HTMLButtonElement;
+  await act(() => stop.click());
+  await act(() => vi.advanceTimersByTime(499));
+  await act(() => stop.click());
+  expect(onInterrupt).not.toHaveBeenCalled();
+  await act(() => vi.advanceTimersByTime(1));
+  await act(() => stop.click());
   expect(onInterrupt).toHaveBeenCalledTimes(1);
   await expect
     .element(screen.getByRole("button", { name: "Stopping", exact: true }))
