@@ -6212,8 +6212,8 @@
     },
     " history…"
   ],
-  "45194b35dc6d858a": [
-    "From your ",
+  "970db7c5cadb6e0b": [
+    "From the last 30 days of your ",
     {
       "i": 1,
       "k": "_gt_value_1",
@@ -6245,6 +6245,7 @@
     "in this terminal."
   ],
   "9d9b9624c7bd95df": "Other folders",
+  "fcbd0f5e40a83cbd": "No recent conversations",
   "1eb8f3d4695033fb": [
     "Added to ",
     {
