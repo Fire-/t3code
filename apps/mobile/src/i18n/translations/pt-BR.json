@@ -806,6 +806,7 @@
   "25bca212561d8ba3": "{used} / {budget} tokens",
   "2dc1d7193b9ba1ae": "{count, plural, one {{count} verificação} other {{count} verificações}}",
   "d1e4cc873f510a86": "Objetivo definido",
+  "d037b283771d583c": "Tasks {done}/{total}",
   "a37fc08ee9b0a937": "Enviando feedback para a OpenAI...",
   "66ebdd79f5bbcacd": "Feedback enviado para a OpenAI",
   "f60f20f2831735fb": "ID da thread: {feedbackId}",
