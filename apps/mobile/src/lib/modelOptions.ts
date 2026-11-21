@@ -86,6 +86,8 @@ function providerDisplayLabel(provider: {
   if (provider.driver === "pi") return "Pi";
   // oxlint-disable-next-line t3code/no-untranslated-copy -- A provider name, like Pi above it.
   if (provider.driver === "droid") return "Droid";
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- A provider name, like Pi above it.
+  if (provider.driver === "prime-agent") return "Prime";
   return provider.instanceId;
 }
 

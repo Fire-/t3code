@@ -12,6 +12,7 @@ import { GrokDriver, type GrokDriverEnv } from "@t3tools/provider-grok/server";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "@t3tools/provider-opencode/server";
 import { MuseDriver, type MuseDriverEnv } from "@t3tools/provider-muse/server";
 import { PiDriver, type PiDriverEnv } from "@t3tools/provider-pi/server";
+import { PrimeDriver, type PrimeDriverEnv } from "@t3tools/provider-prime/server";
 import type {
   AnyProviderDriver,
   ProviderUsageReaderEnv,
@@ -30,6 +31,7 @@ export type BuiltInDriversEnv =
   | OpenCodeDriverEnv
   | PiDriverEnv
   | DroidDriverEnv
+  | PrimeDriverEnv
   | MuseDriverEnv;
 
 export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [
@@ -42,6 +44,7 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   AntigravityDriver,
   KiroDriver,
   PiDriver,
+  PrimeDriver,
   MuseDriver,
   DroidDriver,
   AcpRegistryDriver,
