@@ -878,7 +878,7 @@ describe("DroidAdapterV2", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
-    it.effect("[VAL-TURN-006] images travel as base64 and other attachments as saved paths", () =>
+    it.effect("[VAL-TURN-006] images travel as base64 and every attachment as its saved path", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -914,7 +914,11 @@ describe("DroidAdapterV2", () => {
         ]);
         assert.strictEqual(
           params["text"],
-          `Look\n\n[Attachment saved at ${path.join(host.paths.attachmentsDir, "note-1")}]`,
+          [
+            "Look",
+            `[Attached image "shot.png" is saved at: ${path.join(host.paths.attachmentsDir, "image-1")}]`,
+            `[Attached file "note.txt" is saved at: ${path.join(host.paths.attachmentsDir, "note-1")}]`,
+          ].join("\n\n"),
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );

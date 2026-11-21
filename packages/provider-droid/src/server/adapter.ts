@@ -35,6 +35,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
@@ -2064,7 +2065,12 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         attachments: ReadonlyArray<ChatAttachment>,
       ) {
         const images: Array<{ type: "base64"; data: string; mediaType: string }> = [];
-        const extraLines: Array<string> = [];
+        const message = yield* providerMessageTextWithAttachmentPaths({
+          text,
+          attachments,
+          resolveAttachmentPath: host.resolveAttachmentPath,
+          resolveExtractedTextPath: host.resolveExtractedTextPath,
+        });
         for (const attachment of attachments) {
           const path = host.resolveAttachmentPath(attachment);
           if (path === null) continue;
@@ -2075,14 +2081,9 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               data: Buffer.from(bytes).toString("base64"),
               mediaType: attachment.mimeType,
             });
-          } else {
-            extraLines.push(`[Attachment saved at ${path}]`);
           }
         }
-        return {
-          text: extraLines.length === 0 ? text : `${text}\n\n${extraLines.join("\n")}`,
-          images,
-        };
+        return { text: message, images };
       });
 
       /**
