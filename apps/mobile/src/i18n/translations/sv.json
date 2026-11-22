@@ -809,6 +809,7 @@
   "25bca212561d8ba3": "{used} / {budget} token",
   "2dc1d7193b9ba1ae": "{count, plural, one {{count} kontroll} other {{count} kontroller}}",
   "d1e4cc873f510a86": "Mål satt",
+  "d037b283771d583c": "Tasks {done}/{total}",
   "a37fc08ee9b0a937": "Skickar feedback till OpenAI...",
   "66ebdd79f5bbcacd": "Feedback skickad till OpenAI",
   "f60f20f2831735fb": "Tråd-ID: {feedbackId}",
