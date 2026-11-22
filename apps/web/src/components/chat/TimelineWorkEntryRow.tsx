@@ -26,8 +26,10 @@ import {
   turnItemNeedsDetailFetch,
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { claudeSkillInvocation } from "@t3tools/shared/toolActivity";
+import { collectAssistantCitations } from "@t3tools/shared/assistantCitations";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { memo, use, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { AssistantCitationEmbed } from "./AssistantCitationChip";
 import {
   workEntryDisplayIndicatesToolFailure,
   workEntrySignalsSevereFailure,
@@ -740,6 +742,40 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
   );
 }
 
+/** An answer's text with each quoted response shown as the card a user message shows. */
+function QuestionAnswerText({ text }: { text: string }) {
+  const citations = collectAssistantCitations(text);
+  if (citations.length === 0) return text;
+  const parts: Array<string | (typeof citations)[number]> = [];
+  let cursor = 0;
+  for (const citation of citations) {
+    parts.push(text.slice(cursor, citation.start), citation);
+    cursor = citation.end;
+  }
+  parts.push(text.slice(cursor));
+  // Cards are blocks, so the spaces that separated links in the text would be blank lines.
+  const pieces = parts
+    .map((part, index) => {
+      if (typeof part !== "string") return part;
+      const afterCard = index > 0;
+      const beforeCard = index < parts.length - 1;
+      return afterCard && beforeCard ? part.trim() : afterCard ? part.trimStart() : part.trimEnd();
+    })
+    .filter((part) => part !== "");
+  return pieces.map((part, index) =>
+    typeof part === "string" ? (
+      part
+    ) : (
+      <AssistantCitationEmbed
+        key={part.start}
+        citation={part.citation}
+        leading={index === 0}
+        trailing={index === pieces.length - 1}
+      />
+    ),
+  );
+}
+
 function QuestionAnswerHistory({
   answer,
 }: {
@@ -769,7 +805,7 @@ function QuestionAnswerHistory({
           ) : null}
           {getQuestionAnswerText(answer.answers[questionId]) ? (
             <p className="ms-3 whitespace-pre-wrap text-sm text-muted-foreground">
-              {getQuestionAnswerText(answer.answers[questionId])}
+              <QuestionAnswerText text={getQuestionAnswerText(answer.answers[questionId])} />
             </p>
           ) : null}
           <div className="flex flex-wrap gap-2">
