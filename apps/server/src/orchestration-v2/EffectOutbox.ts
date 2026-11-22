@@ -13,6 +13,7 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   RunId,
+  RuntimeMode,
   RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -55,6 +56,12 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-session.apply-thread-title"),
     title: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("provider-session.runtime-mode.set"),
+    providerSessionId: ProviderSessionId,
+    providerThreadId: ProviderThreadId,
+    runtimeMode: RuntimeMode,
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
@@ -157,6 +164,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
 export const PROCESS_BOUND_EFFECT_TYPES = [
   "provider-session.apply-model-selection",
   "provider-session.apply-thread-title",
+  "provider-session.runtime-mode.set",
   "provider-turn.start",
   "provider-turn.interrupt",
   "provider-turn.steer",

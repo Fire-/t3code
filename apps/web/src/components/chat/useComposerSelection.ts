@@ -60,6 +60,8 @@ interface ComposerSelectionInput {
     SetStateAction<Record<string, boolean>>
   >;
   readonly scheduleComposerFocus: () => void;
+  /** Set when the thread's live session takes a runtime mode change without restarting. */
+  readonly applyRuntimeModeLive: ((mode: RuntimeMode) => void) | null;
 }
 
 /**
@@ -85,6 +87,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
     setPendingServerThreadEnvModeEntry,
     setPendingServerThreadStartFromOriginByThreadId,
     scheduleComposerFocus,
+    applyRuntimeModeLive,
   } = input;
   const messages = useMessages();
   const navigate = useNavigate();
@@ -103,6 +106,7 @@ export function useComposerSelection(input: ComposerSelectionInput) {
     if (isLocalDraftThread) {
       setDraftThreadContext(composerDraftTarget, { runtimeMode: mode });
     }
+    applyRuntimeModeLive?.(mode);
     scheduleComposerFocus();
   };
   const handleRuntimeModeChangeStable = useStableCallback(handleRuntimeModeChange);

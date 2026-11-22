@@ -589,6 +589,8 @@ export function routeProviderEvent(
       ];
     case "background_work.updated":
       return [state.ownedProviderTurns.has(event.providerTurnId), state];
+    case "runtime_mode.raised":
+      return [event.threadId === input.threadId, state];
     case "background_work.lost":
     case "command_output.delta":
     case "prompt_suggestion.updated":
