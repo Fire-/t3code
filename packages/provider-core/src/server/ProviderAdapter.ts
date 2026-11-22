@@ -185,6 +185,17 @@ export const ProviderAdapterV2Event = Schema.Union([
     providerThreadId: ProviderThreadId,
     tasks: Schema.Array(OrchestrationV2PendingBackgroundTask),
   }),
+  /**
+   * A steer the provider accepted but threw away before the agent read it,
+   * usually because the turn stopped first. The user's message stays in the
+   * thread, marked as not delivered.
+   */
+  Schema.Struct({
+    type: Schema.Literal("steer.discarded"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    messageId: MessageId,
+  }),
   /** Unpersisted deltas go only to clients showing the row; final output arrives in turn_item.updated. */
   Schema.Struct({
     type: Schema.Literal("command_output.delta"),
