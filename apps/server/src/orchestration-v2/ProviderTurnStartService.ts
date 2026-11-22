@@ -80,6 +80,7 @@ import {
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as TurnTimeLine from "./TurnTimeLine.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -305,6 +306,7 @@ export const layer: Layer.Layer<
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const restoreMissingWorktree = yield* makeRestoreMissingWorktree;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const turnTimeZone = yield* TurnTimeLine.TurnTimeZone;
 
     // Build draining callbacks outside startup scope so they cannot retain full thread history.
     const makeRunControls = (input: {
@@ -1017,14 +1019,30 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
-      const messageText = withMessageSenderNote(
-        providerMessage,
-        projectComposerContextForProvider({
-          text: providerMessage.text,
-          records: providerMessage.context?.records ?? [],
-        }),
-      );
+      const messageText = yield* TurnTimeLine.stampProviderText({
+        timeZone: turnTimeZone,
+        message: providerMessage,
+        text: withMessageSenderNote(
+          providerMessage,
+          projectComposerContextForProvider({
+            text: providerMessage.text,
+            records: providerMessage.context?.records ?? [],
+          }),
+        ),
+        previousTimes: projectionStore
+          .getLatestUserMessageAt(input.threadId, providerMessage.createdAt)
+          .pipe(
+            Effect.orElseSucceed(() => undefined),
+            Effect.map((latest) => [
+              latest,
+              ...projection.runs
+                .filter((source) => source.ordinal < run.ordinal)
+                .map((source) => source.completedAt),
+            ]),
+          ),
+      });
       const slashCommand = isSlashCommandMessage(providerMessage);
+      // Native goal commands go verbatim; handoff history waits a turn.
       const goalDriver =
         session.driver === "codex" ||
         session.driver === "claudeAgent" ||
