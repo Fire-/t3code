@@ -1,16 +1,28 @@
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
 import { useAuth } from "@clerk/react";
 import { Link } from "@tanstack/react-router";
+import { guestSharePublicBaseUrlOrigin } from "@t3tools/contracts";
 import { T, useGT, useMessages } from "gt-react";
+import { useState } from "react";
 
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { ScopedSwitch } from "./ScopedSwitch";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingsPageContainer,
+  SettingsRow,
+  SettingResetButton,
+  SettingsSection,
+} from "./settingsLayout";
 import { useSearchableSetting } from "./settingsSearch";
-import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
+import {
+  useScopedSettings,
+  useScopedSettingsMixed,
+  useUpdateScopedSettings,
+} from "./useScopedSettings";
 import { useOptionalSettingsScope, useSettingsScope } from "./SettingsScopeContext";
 import { firstManagedDenial, usePrimaryManagedPolicy } from "~/state/managedPolicy";
 
@@ -91,13 +103,14 @@ function GuestLinksRowWithSignIn() {
   const gt = useGT();
   const { isSignedIn } = useAuth();
   const { openAuthPrompt } = useT3ConnectAuthPrompt();
-  // `isSignedIn` is undefined until Clerk loads.
-  if (isSignedIn !== false) return <GuestLinksRow />;
+  const publicBaseUrl = useScopedSettings((settings) => settings.guestSharePublicBaseUrl);
+  // `isSignedIn` is undefined until Clerk loads. A configured address works without T3 Connect.
+  if (isSignedIn !== false || publicBaseUrl != null) return <GuestLinksRow />;
   return (
     <SettingsRow
       {...searchableSetting("guest-links")}
       description={gt(
-        "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect to use guest links.",
+        "Share a thread with a guest who watches it live in a browser and sends messages you approve. Sign in to T3 Connect, or set a public link address, to use guest links.",
       )}
       control={
         <Button size="sm" variant="outline" onClick={openAuthPrompt}>
@@ -116,7 +129,8 @@ function GuestLinksRow() {
   const messages = useMessages();
   const scope = useOptionalSettingsScope();
   const primaryPolicy = usePrimaryManagedPolicy();
-  // Guests arrive through T3 Connect, so a policy that turns Connect off turns this off too.
+  // Guests arrive through T3 Connect or the owner's own address below, so a policy that turns
+  // Connect off turns off only the Connect path.
   const connectDenial = firstManagedDenial(
     scope
       ? scope.connectedEnvironments.map((environment) => environment.serverConfig?.managedPolicy)
@@ -132,12 +146,12 @@ function GuestLinksRow() {
       managed={settings.guestSharingEnabled ? undefined : connectDenial}
       description={
         <T>
-          Share a thread with a guest who watches it live in a browser and sends messages you
-          approve. Needs T3 Connect: sign in and link this machine in{" "}
+          Share a thread with a guest who watches it live and sends messages you approve. Needs T3
+          Connect (link this machine in{" "}
           <Link to="/settings/access" className="underline underline-offset-2">
             Sharing & access
           </Link>
-          . Turning it off stops every guest link.
+          ) or the address below. Turning it off stops every guest link.
         </T>
       }
       control={
@@ -146,6 +160,86 @@ function GuestLinksRow() {
           checked={settings.guestSharingEnabled}
           onCheckedChange={(checked) => updateSettings({ guestSharingEnabled: Boolean(checked) })}
           aria-label={gt("Guest links")}
+        />
+      }
+    >
+      <GuestLinksAddressRow />
+    </SettingsRow>
+  );
+}
+
+/** The HTTPS address guest links point at when this machine does not use T3 Connect. */
+function GuestLinksAddressRow() {
+  const searchableSetting = useSearchableSetting();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const gt = useGT();
+  const mixed = useScopedSettingsMixed(["guestSharePublicBaseUrl"]);
+  const committed = settings.guestSharePublicBaseUrl;
+  // The problem belongs to the value in the box, so it hides once the committed value moves on.
+  const [problem, setProblem] = useState<{
+    readonly forCommitted: string | null;
+    readonly message: string;
+  } | null>(null);
+  const problemMessage = problem?.forCommitted === (committed ?? null) ? problem.message : null;
+  return (
+    <SettingsRow
+      serverScoped
+      className="px-0 py-2 sm:px-0"
+      {...searchableSetting("guest-links-address")}
+      settingKeys={["guestSharePublicBaseUrl"]}
+      title={gt("Public link address")}
+      description={gt(
+        "Your own HTTPS address for this machine, such as https://t3.example.com, from a tunnel or reverse proxy you run. Links point at it instead of T3 Connect; changing or clearing it stops current links.",
+      )}
+      status={
+        problemMessage === null ? undefined : (
+          <p role="alert" className="text-destructive text-xs">
+            {problemMessage}
+          </p>
+        )
+      }
+      resetAction={
+        mixed || committed !== null ? (
+          <SettingResetButton
+            ariaLabel={gt("public link address")}
+            onClick={() => {
+              setProblem(null);
+              updateSettings({ guestSharePublicBaseUrl: null });
+            }}
+          />
+        ) : null
+      }
+      control={
+        <Input
+          key={`${mixed}:${committed ?? ""}`}
+          aria-label={gt("Public link address")}
+          autoCapitalize="none"
+          spellCheck={false}
+          type="url"
+          placeholder={mixed ? gt("Mixed") : "https://t3.example.com"}
+          defaultValue={mixed ? "" : (committed ?? "")}
+          onBlur={(event) => {
+            if (mixed) return;
+            const value = event.target.value.trim();
+            if (value === "") {
+              setProblem(null);
+              if (committed !== null) updateSettings({ guestSharePublicBaseUrl: null });
+              return;
+            }
+            // The server's schema stays the authority; this catches the same shapes before the
+            // round trip and shows its answer in the toast the writer already raises.
+            const origin = guestSharePublicBaseUrlOrigin(value);
+            if (origin === null) {
+              setProblem({
+                forCommitted: committed ?? null,
+                message: gt("Enter an HTTPS address with no path, such as https://t3.example.com."),
+              });
+              return;
+            }
+            setProblem(null);
+            if (origin !== committed) updateSettings({ guestSharePublicBaseUrl: origin });
+          }}
         />
       }
     />

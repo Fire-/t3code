@@ -284,6 +284,17 @@ const make = Effect.gen(function* () {
   const connectHostname = managedEndpoint.inspectConnector.pipe(
     Effect.map((facts) => facts?.hostname ?? null),
   );
+  // The host guest links point at: the public address the owner configured, or the running T3
+  // Connect tunnel. The request's Host header is never consulted, because a LAN client can forge
+  // it; this value is what `share.host` is checked against.
+  const shareHost = Effect.gen(function* () {
+    const settings = yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => null));
+    if (settings?.guestSharePublicBaseUrl != null) {
+      // The settings schema stores an HTTPS origin, so this cannot parse as anything else.
+      return new URL(settings.guestSharePublicBaseUrl).host;
+    }
+    return yield* connectHostname;
+  });
   // A beta: while it is off, no link opens and every guest request is refused.
   const sharingEnabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.guestSharingEnabled),
@@ -308,7 +319,7 @@ const make = Effect.gen(function* () {
       Effect.orDie,
     );
 
-  /** Checks a token against the live share: same id, not expired, and Connect still serving it. */
+  /** Checks a token against the live share: same id, not expired, and its host still serving it. */
   const authorize = Effect.fn("GuestShareService.authorize")(function* (
     token: string,
     kind: "invite" | "session",
@@ -330,7 +341,7 @@ const make = Effect.gen(function* () {
       thread.deletedAt !== null ||
       DateTime.toEpochMillis(now) >= Date.parse(share.expiresAt) ||
       (kind === "session" && share.guestName === null) ||
-      (yield* connectHostname) !== share.host
+      (yield* shareHost) !== share.host
     ) {
       return yield* inactive;
     }
@@ -341,7 +352,7 @@ const make = Effect.gen(function* () {
     if (!(yield* sharingEnabled)) {
       return yield* new GuestShareCreateError({ reason: "disabled" });
     }
-    const host = yield* connectHostname;
+    const host = yield* shareHost;
     if (host === null) {
       return yield* new GuestShareCreateError({ reason: "connect_unavailable" });
     }
@@ -598,11 +609,11 @@ const make = Effect.gen(function* () {
         }),
       ),
       Stream.takeUntil((event) => event.type === "ended"),
-      // Unlinking T3 Connect closes it quietly, so a tunnel that comes back on the same host
-      // keeps the guest in. Turning the beta off closes it the same way. Closing and expiry end
-      // it above, with `ended`.
+      // Losing the host guest links arrive on — T3 Connect unlinked, or the configured address
+      // cleared — closes it quietly, so the same host coming back keeps the guest in. Turning the
+      // beta off closes it the same way. Closing and expiry end it above, with `ended`.
       Stream.interruptWhen(
-        Effect.all([connectHostname, sharingEnabled]).pipe(
+        Effect.all([shareHost, sharingEnabled]).pipe(
           Effect.repeat({
             schedule: Schedule.spaced(ACCESS_RECHECK_INTERVAL),
             until: ([host, enabled]) => host !== share.host || !enabled,
