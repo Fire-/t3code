@@ -116,13 +116,16 @@ describe("citation comment source disappearance", () => {
     expect(textarea()).toBeNull();
   });
 
-  it("preserves a rejected save and allows a later retry", async () => {
+  it("keeps a draft open at the composer, preserving a rejected save for a later retry", async () => {
     using source = setup();
     const onSave = vi.fn(() => false);
     await using _screen = await mount(source.sourceAnchor, onSave);
     await typeComment("keep this draft");
     await removeSource();
 
+    expect(onSave).not.toHaveBeenCalled();
+    expect(textarea()?.value).toBe("keep this draft");
+    await clickButton("Save");
     expect(onSave).toHaveBeenCalledWith("keep this draft");
     expect(textarea()?.value).toBe("keep this draft");
     onSave.mockReturnValue(true);

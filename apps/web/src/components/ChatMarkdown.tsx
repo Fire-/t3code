@@ -1811,6 +1811,15 @@ const CHAT_MARKDOWN_COMPONENTS = {
     if (!codeBlock) {
       return <pre {...props}>{children}</pre>;
     }
+    // A code block replaces the <pre>, so its source offsets ride on a wrapper instead.
+    const dataProps = props as Record<string, unknown>;
+    const sourceOffsetProps =
+      dataProps["data-source-start"] !== undefined
+        ? {
+            "data-source-start": dataProps["data-source-start"],
+            "data-source-end": dataProps["data-source-end"],
+          }
+        : null;
 
     const language = extractFenceLanguage(codeBlock.className);
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
@@ -1853,7 +1862,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
         </MarkdownMermaidCodeBlock>
       );
     }
-    return (
+    const codeBlockElement = (
       <MarkdownCodeBlock
         code={codeBlock.code}
         language={language}
@@ -1868,6 +1877,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
       >
         {highlightedCode}
       </MarkdownCodeBlock>
+    );
+    return sourceOffsetProps ? (
+      <div {...sourceOffsetProps}>{codeBlockElement}</div>
+    ) : (
+      codeBlockElement
     );
   },
 } satisfies MarkdownComponents;

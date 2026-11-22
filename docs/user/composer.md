@@ -144,7 +144,8 @@ Leaving reasoning level or service tier unset uses the provider's own configurat
 
 On web and desktop, select text within one assistant response and choose
 **Cite in composer**. You can add a comment about the quote and write instructions
-around it.
+around it. If the quoted text leaves the timeline while you type, for example when its turn
+ends and folds, the comment box stays open and moves to the chip.
 
 Select the quote in a draft or sent message to return to its source. If the source
 is unavailable or has changed, the saved quote remains readable.
@@ -350,10 +351,21 @@ its progress.
 
 Context you attach lands where your cursor is, as a chip inside your text: a terminal excerpt,
 a review comment from a diff or file, a preview annotation, or a file. You can type before and
-after a chip, move it by cutting and pasting, and delete it like a character. Hover a chip for
+after a chip, move it by cutting and pasting, and delete it like a character. New chips go in
+at the caret, or right after a chip you last tapped. Hover a chip for
 its brief details. Select a terminal excerpt to open its captured output, or select a review
 comment, picked element, or preview annotation to open its full details. Chips read as "Terminal
 excerpt, Terminal 1 lines 3-4" and similar to screen readers.
+
+Comment on a file from its preview. In the code view, select lines and write the comment
+beside them. In the rendered markdown view, select text and choose **Cite**; with touch, the
+Cite button docks near the bottom of the preview instead of sitting on the selection. Both put
+a file comment chip in your message that carries the file, its lines, and the quoted text,
+and you can add a short comment right after citing. A rendered-view cite's chip shows the quoted
+text so several cites from one file read apart. Tap the chip or its pencil to edit the comment
+later; the editor shows the file, lines, and full quote above it. Tapping away from the editor
+keeps what you typed; Escape or **Cancel** drops it. An empty
+comment is fine when the quote says it all.
 
 A pull request appears as its icon and number. Its color reflects whether it was open, draft,
 merged, or closed when it was attached. Select it to inspect the captured title and branches,

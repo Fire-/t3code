@@ -3,6 +3,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { maskMarkdownFrontmatter } from "@t3tools/shared/markdownFrontmatter";
+import { markdownSourceBlocks } from "@t3tools/shared/markdownSourceBlocks";
 
 export function FileMarkdownPreview(props: {
   readonly cwd: string;
@@ -23,14 +24,19 @@ export function FileMarkdownPreview(props: {
       ? resolvePathLinkTarget(props.relativePath.slice(0, lastSeparator), props.cwd)
       : props.cwd;
 
+  const text = maskMarkdownFrontmatter(props.text);
+  // Blocks carry their source offsets, so a selection can cite the file's lines.
+  const extensions = { sourceBlocks: markdownSourceBlocks(text) };
+
   return (
     <ChatMarkdown
-      text={maskMarkdownFrontmatter(props.text)}
+      text={text}
       cwd={props.cwd}
       imageBaseDir={imageBaseDir}
       threadRef={props.threadRef}
       workspaceMutationId={props.workspaceMutationId}
       className="mx-auto max-w-4xl px-6 py-5"
+      extensions={extensions}
       onTaskListChange={props.onTaskListChange}
     />
   );
