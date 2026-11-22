@@ -1844,6 +1844,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
             IdAllocator.layer,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               repositoryScopes: () => Effect.succeed([]),
+              capturesSoFar: () => Effect.succeed(0),
               materializeBaselineCheckpoint: ({ ordinalWithinScope }) =>
                 Effect.succeed(missingCheckpoint({ ordinalWithinScope, runId: null })),
               capture: () =>
