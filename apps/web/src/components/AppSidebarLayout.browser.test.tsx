@@ -1,7 +1,23 @@
+import {
+  createHashHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
+import type { ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { render } from "../../test/render";
+import {
+  dismissContextMenu,
+  isContextMenuOpen,
+  showContextMenuFallback,
+} from "../contextMenuFallback";
+import { registerModelPickerContent } from "../modelPickerVisibility";
+import { Dialog, DialogPopup, DialogTitle } from "./ui/dialog";
 
 vi.mock(import("../state/server"), async (original) => {
   const actual = await original();
@@ -38,5 +54,159 @@ describe("sidebar toggle shortcut", () => {
     await userEvent.click(screen.getByRole("button", { name: "Outside" }));
     await userEvent.keyboard("{Control>}b{/Control}");
     await vi.waitFor(() => expect(wrapper.getAttribute("data-sidebar-state")).toBe("collapsed"));
+  });
+});
+
+// Android's back gesture pops real browser history, which a memory router never consults.
+async function renderWithBrowserHistory(threadPage: ReactNode) {
+  const startHref = window.location.href;
+  const root = createRootRoute({
+    component: () => (
+      <AppSidebarLayout>
+        <Outlet />
+      </AppSidebarLayout>
+    ),
+  });
+  const routeTree = root.addChildren([
+    createRoute({ getParentRoute: () => root, path: "/", component: () => <p>Home page</p> }),
+    createRoute({ getParentRoute: () => root, path: "/usage", component: () => <p>Usage page</p> }),
+    createRoute({
+      getParentRoute: () => root,
+      path: "/$environmentId/$threadId",
+      component: () => threadPage,
+    }),
+  ]);
+  const router = createRouter({
+    routeTree,
+    history: createHashHistory(),
+    disableGlobalCatchBoundary: true,
+  });
+  const screen = await render(<RouterProvider router={router} />, { router: false });
+  await expect.element(page.getByText("Home page")).toBeVisible();
+  return {
+    router,
+    sidebarState: () =>
+      screen.container
+        .querySelector('[data-slot="sidebar-wrapper"]')
+        ?.getAttribute("data-sidebar-state"),
+    async [Symbol.asyncDispose]() {
+      await screen[Symbol.asyncDispose]();
+      window.history.replaceState(window.history.state, "", startHref);
+    },
+  };
+}
+
+describe("back on a phone", () => {
+  it("opens the sidebar from a thread, and the next back closes it", async () => {
+    await page.viewport(414, 896);
+    await using app = await renderWithBrowserHistory(<p>Thread page</p>);
+    await app.router.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "env-1", threadId: "thread-1" },
+    });
+    await expect.element(page.getByText("Thread page")).toBeVisible();
+    expect(app.sidebarState()).toBe("collapsed");
+
+    window.history.back();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("expanded"));
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
+
+    window.history.back();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("collapsed"));
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
+    await expect.element(page.getByText("Thread page")).toBeInTheDocument();
+  });
+
+  it("leaves focus off the toggle when back closes the sidebar", async () => {
+    await page.viewport(414, 896);
+    await using app = await renderWithBrowserHistory(<p>Thread page</p>);
+    await app.router.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "env-1", threadId: "thread-1" },
+    });
+    const toggle = page.getByRole("button", { name: "Toggle main sidebar" });
+    await toggle.click();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("expanded"));
+
+    window.history.back();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("collapsed"));
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
+    // The toggle reappears once the sheet finishes closing, after any focus return.
+    await expect.element(toggle).toBeVisible();
+    expect(document.activeElement).not.toBe(toggle.element());
+  });
+
+  it("closes an open context menu before touching the sidebar", async () => {
+    await page.viewport(414, 896);
+    await using app = await renderWithBrowserHistory(<p>Thread page</p>);
+    await app.router.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "env-1", threadId: "thread-1" },
+    });
+    await expect.element(page.getByText("Thread page")).toBeVisible();
+    using _menu = { [Symbol.dispose]: () => dismissContextMenu(false) };
+    void showContextMenuFallback([{ id: "rename", label: "Rename thread" }]);
+    await expect.element(page.getByRole("menuitem", { name: "Rename thread" })).toBeVisible();
+
+    window.history.back();
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/env-1/thread-1"));
+    expect(isContextMenuOpen()).toBe(false);
+    expect(app.sidebarState()).toBe("collapsed");
+  });
+
+  it("closes a sidebar opened on a page that is not a thread", async () => {
+    await page.viewport(414, 896);
+    await using app = await renderWithBrowserHistory(<p>Thread page</p>);
+    await app.router.navigate({ to: "/usage" });
+    await expect.element(page.getByText("Usage page")).toBeVisible();
+    await page.getByRole("button", { name: "Toggle main sidebar" }).click();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("expanded"));
+
+    window.history.back();
+    await vi.waitFor(() => expect(app.sidebarState()).toBe("collapsed"));
+    await vi.waitFor(() => expect(window.location.hash).toBe("#/usage"));
+    await expect.element(page.getByText("Usage page")).toBeInTheDocument();
+  });
+
+  it.each([
+    { name: "a wide window", width: 1280, to: "thread" },
+    { name: "an open model picker", width: 414, to: "thread", picker: true },
+    { name: "an open dialog", width: 414, to: "thread", dialog: true },
+    { name: "a page that is not a thread", width: 414, to: "usage" },
+  ] as const)("leaves back alone on $name", async (testCase) => {
+    await page.viewport(testCase.width, 896);
+    await using app = await renderWithBrowserHistory(
+      <>
+        <p>Thread page</p>
+        {"dialog" in testCase ? (
+          <Dialog defaultOpen>
+            <DialogPopup>
+              <DialogTitle>Rename thread</DialogTitle>
+            </DialogPopup>
+          </Dialog>
+        ) : null}
+      </>,
+    );
+    const sidebarBefore = app.sidebarState();
+    if (testCase.to === "usage") {
+      await app.router.navigate({ to: "/usage" });
+      await expect.element(page.getByText("Usage page")).toBeVisible();
+    } else {
+      await app.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: "env-1", threadId: "thread-1" },
+      });
+      await expect.element(page.getByText("Thread page")).toBeVisible();
+    }
+    const unregisterPicker = "picker" in testCase ? registerModelPickerContent() : () => {};
+    using _picker = { [Symbol.dispose]: unregisterPicker };
+    if ("dialog" in testCase) {
+      await expect.element(page.getByRole("dialog", { name: "Rename thread" })).toBeVisible();
+    }
+
+    window.history.back();
+    await expect.element(page.getByText("Home page")).toBeInTheDocument();
+    expect(app.sidebarState()).toBe(sidebarBefore);
   });
 });
