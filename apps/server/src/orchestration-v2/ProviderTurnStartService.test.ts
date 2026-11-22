@@ -2313,7 +2313,7 @@ effectIt.effect.each([
       yield* harness.start;
       expect(harness.settledRuns).toEqual([]);
       expect(harness.startTurn.mock.calls.map(([turn]) => turn.message.text)).toEqual([
-        withInlineContext("SIDE_CHAT_CONTEXT", "Continue where you left off."),
+        withInlineContext("SIDE_CHAT_CONTEXT", "[09-04 05:00 PDT]\nContinue where you left off."),
       ]);
     }),
 );

@@ -53,7 +53,9 @@ export const stampProviderText = Effect.fn("TurnTimeLine.stampProviderText")(fun
   readonly text: string;
   readonly previousTimes: Effect.Effect<ReadonlyArray<DateTime.Utc | null | undefined>, E>;
 }) {
-  if (input.timeZone === undefined || !stampsMessage(input.message)) return input.text;
+  // Empty text stays empty, so a resume without a message still gets its prompt.
+  if (input.timeZone === undefined || !stampsMessage(input.message) || input.text.trim() === "")
+    return input.text;
   const sentAt = DateTime.toEpochMillis(input.message.createdAt);
   const earlier = (yield* input.previousTimes).flatMap((time) => {
     if (time == null) return [];

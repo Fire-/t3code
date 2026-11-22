@@ -26,6 +26,7 @@ it.effect.each([
     sent: "[09-04 05:02 PDT]\nhello",
   },
   { label: "never for a slash command", text: "  /compact", previousTimes: unread, sent: "hello" },
+  { label: "never for empty text", input: "  ", previousTimes: unread, sent: "  " },
   {
     label: "in the zone the message was sent from",
     message: { timeZone: "Asia/Tokyo" },
@@ -54,7 +55,7 @@ it.effect.each([
         createdAt: at("2026-09-04T12:02:30Z"),
         ...row.message,
       },
-      text: "hello",
+      text: row.input ?? "hello",
       previousTimes: row.previousTimes,
     });
     assert.equal(sent, row.sent);

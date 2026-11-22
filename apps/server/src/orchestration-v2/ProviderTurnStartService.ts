@@ -1019,28 +1019,33 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
-      const messageText = yield* TurnTimeLine.stampProviderText({
-        timeZone: turnTimeZone,
-        message: providerMessage,
-        text: withMessageSenderNote(
+      const previousTimes = projectionStore
+        .getLatestUserMessageAt(input.threadId, providerMessage.createdAt)
+        .pipe(
+          Effect.orElseSucceed(() => undefined),
+          Effect.map((latest) => [
+            latest,
+            ...projection.runs
+              .filter((source) => source.ordinal < run.ordinal)
+              .map((source) => source.completedAt),
+          ]),
+        );
+      const stampPrompt = (text: string) =>
+        TurnTimeLine.stampProviderText({
+          timeZone: turnTimeZone,
+          message: providerMessage,
+          text,
+          previousTimes,
+        });
+      const messageText = yield* stampPrompt(
+        withMessageSenderNote(
           providerMessage,
           projectComposerContextForProvider({
             text: providerMessage.text,
             records: providerMessage.context?.records ?? [],
           }),
         ),
-        previousTimes: projectionStore
-          .getLatestUserMessageAt(input.threadId, providerMessage.createdAt)
-          .pipe(
-            Effect.orElseSucceed(() => undefined),
-            Effect.map((latest) => [
-              latest,
-              ...projection.runs
-                .filter((source) => source.ordinal < run.ordinal)
-                .map((source) => source.completedAt),
-            ]),
-          ),
-      });
+      );
       const slashCommand = isSlashCommandMessage(providerMessage);
       // Native goal commands go verbatim; handoff history waits a turn.
       const goalDriver =
@@ -2171,7 +2176,9 @@ export const layer: Layer.Layer<
           const prompted = context !== "" || missedAttachments.length > 0;
           // A resume that must be prompted still needs a request, or the agent has nothing to do.
           const requestText =
-            turnInput.resume && prompted && userText === "" ? RESUME_PROMPT : userText;
+            turnInput.resume && prompted && userText === ""
+              ? yield* stampPrompt(RESUME_PROMPT)
+              : userText;
           const text = slashCommand ? userText : withInlineContext(context, requestText);
           const operation =
             turnInput.resume && !prompted
