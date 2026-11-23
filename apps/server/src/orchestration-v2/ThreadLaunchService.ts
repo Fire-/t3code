@@ -95,6 +95,7 @@ export interface ThreadLaunchInitialMessage {
   readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
   /** Ask the first run for a result as data matching this JSON Schema. */
   readonly outputSchema?: Readonly<Record<string, Schema.Json>> | undefined;
+  readonly timeZone?: string;
 }
 
 export interface ThreadLaunchInput {
