@@ -1,6 +1,22 @@
+import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 import { describe, expect, it } from "vite-plus/test";
 
 import { getQuestionAnswerPreview, getQuestionAnswerText } from "./userInput.js";
+
+const citation = (text: string, comment?: string) =>
+  serializeAssistantCitation({
+    version: 1,
+    environmentId: EnvironmentId.make("environment-local"),
+    threadId: ThreadId.make("thread-1"),
+    messageId: MessageId.make("message-1"),
+    text,
+    start: 0,
+    end: text.length,
+    prefix: "",
+    suffix: "",
+    ...(comment === undefined ? {} : { comment }),
+  });
 
 // Shape the web client submits for an answer holding a review-comment chip.
 const answerWithReviewComment = [
@@ -35,5 +51,19 @@ describe("question answer display", () => {
     const typedXml =
       'Use this XML literally: <t3_context version="1"><context kind="review-comment" id="example">keep me</context></t3_context>';
     expect(getQuestionAnswerText(typedXml)).toBe(typedXml);
+  });
+
+  it("shows quoted responses in the preview as their text and comment, not their links", () => {
+    const answer = `${citation("Missing ffmpeg looks like nothing wrong", "fix please")} ${citation(
+      "genuine",
+    )}  and the rest too`;
+    const preview = getQuestionAnswerPreview({
+      requestId: "request-1",
+      answers: { q1: answer },
+      attachmentsByQuestionId: {},
+      questionTextById: { q1: "Which suggestions should I apply?" },
+    });
+
+    expect(preview).toBe("“Missing ffmpeg looks…” fix please “genuine” and the rest too");
   });
 });
