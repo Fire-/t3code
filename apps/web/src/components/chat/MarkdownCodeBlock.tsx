@@ -46,6 +46,7 @@ export function MarkdownCodeBlockFrame({
   fenceTitle,
   theme,
   wrapped = true,
+  flush = false,
   title,
   actions,
   headerProps,
@@ -56,6 +57,8 @@ export function MarkdownCodeBlockFrame({
   fenceTitle: string | null;
   theme: "light" | "dark";
   wrapped?: boolean;
+  /** Drops the prose spacing around the block for containers that space their own children. */
+  flush?: boolean;
   title?: React.ReactNode;
   actions?: React.ReactNode;
   headerProps?: React.HTMLAttributes<HTMLDivElement>;
@@ -64,7 +67,10 @@ export function MarkdownCodeBlockFrame({
   return (
     <Wrapper
       dir="ltr"
-      className="chat-markdown-codeblock my-[0.65rem] text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
+      className={cn(
+        "chat-markdown-codeblock text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32",
+        !flush && "my-[0.65rem]",
+      )}
       data-language={language}
       data-wrap={wrapped ? "true" : "false"}
     >
@@ -139,6 +145,7 @@ export function MarkdownCodeBlock({
   viewToggle,
   canWrap = true,
   diagram = false,
+  flush = false,
   children,
 }: {
   code: string;
@@ -150,6 +157,7 @@ export function MarkdownCodeBlock({
   viewToggle?: ReactNode;
   canWrap?: boolean;
   diagram?: boolean;
+  flush?: boolean;
   children: ReactNode;
 }) {
   const gt = useGT();
@@ -219,6 +227,7 @@ export function MarkdownCodeBlock({
       fenceTitle={fenceTitle}
       theme={theme}
       wrapped={wrapped}
+      flush={flush}
       headerProps={THREAD_FIND_IGNORE_PROPS}
       actions={
         <span
