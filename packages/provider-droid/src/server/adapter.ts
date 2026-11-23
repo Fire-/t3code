@@ -2548,7 +2548,6 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
         });
         return {
           providerThread: state.providerThread,
-          providerTurns: [],
           messages,
           runtimeRequests: [],
         };

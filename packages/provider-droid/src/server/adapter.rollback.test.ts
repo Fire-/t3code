@@ -288,7 +288,6 @@ describe("DroidAdapterV2 rollback", () => {
             snapshot.messages.map((message) => [message.role, message.text]),
             [["user", "prompt 1"]],
           );
-          assert.deepStrictEqual(snapshot.providerTurns, []);
           assert.deepStrictEqual(snapshot.runtimeRequests, []);
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );

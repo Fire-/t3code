@@ -1820,7 +1820,6 @@ describe("DroidAdapterV2", () => {
               ["assistant", "It is 4.", "agent"],
             ],
           );
-          assert.deepStrictEqual(snapshot.providerTurns, []);
           assert.deepStrictEqual(snapshot.runtimeRequests, []);
           assert.strictEqual(snapshot.providerThread.id, resumed.id);
           assert.isTrue(
