@@ -559,6 +559,7 @@ it.effect.each([true, false])(
         branch: null,
         activeProviderThreadId: providerThreadId,
         modelSelection: { instanceId: providerInstanceId, model: "test-model" },
+        deletedAt: null,
       },
       providerThread,
       providerSession: undefined,
