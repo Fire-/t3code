@@ -31,6 +31,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as TurnTimeLine from "./TurnTimeLine.ts";
 
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -464,5 +465,97 @@ it.effect("steers a running turn with its sender and the thread's MCP app model 
     assert.deepEqual("appContext" in steered[0]! ? steered[0].appContext : undefined, [
       { key: "mcp_app_turn-item_call-1", text: "Pressed: blue" },
     ]);
+  }),
+);
+
+it.effect("puts a steer's time line above the note that an agent sent it", () =>
+  Effect.gen(function* () {
+    const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
+    const threadId = ThreadId.make("thread:steer-time");
+    const sessionId = ProviderSessionId.make("provider-session:steer-time");
+    const providerTurnId = ProviderTurnId.make("provider-turn:steer-time");
+    const attemptId = RunAttemptId.make("run-attempt:steer-time");
+    const providerThread = {
+      id: ProviderThreadId.make("provider-thread:steer-time"),
+      driver,
+      providerInstanceId,
+      providerSessionId: sessionId,
+    } as OrchestrationV2ProviderThread;
+    const projection = makeProjection({ now, threadId, providerThread, providerTurnId, attemptId });
+    const steered: Array<ProviderAdapter.ProviderAdapterV2SteerInput> = [];
+    const runtime = {
+      instanceId: providerInstanceId,
+      driver,
+      providerSessionId: sessionId,
+      steerTurn: (input: ProviderAdapter.ProviderAdapterV2SteerInput) =>
+        Effect.sync(() => void steered.push(input)),
+    } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    const layerProjection = Layer.effect(
+      ProjectionStore.ProjectionStoreV2,
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        return ProjectionStore.ProjectionStoreV2.of({
+          ...store,
+          getLatestUserMessageAt: () => Effect.undefined,
+        });
+      }),
+    ).pipe(
+      Layer.provide(
+        layerProjectionStore(() =>
+          Effect.succeed({
+            providerThread,
+            providerTurn: projection.providerTurns[0],
+            attempt: projection.attempts[0],
+            message: {
+              id: MessageId.make("message:steer-time"),
+              text: "What did the app report?",
+              attachments: [],
+              createdBy: "agent",
+              creationSource: "mcp",
+              senderThreadId: ThreadId.make("thread:steer-sender"),
+              createdAt: now,
+            } as unknown as NonNullable<
+              ProjectionStore.ProjectionProviderControlContext["message"]
+            >,
+            run: {
+              id: RunId.make("run:steer-time"),
+              status: "running",
+              activeAttemptId: attemptId,
+            } as OrchestrationV2Run,
+          }),
+        ),
+      ),
+    );
+
+    yield* Effect.gen(function* () {
+      const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+      yield* control.steer({
+        threadId,
+        providerSessionId: sessionId,
+        providerThreadId: providerThread.id,
+        providerTurnId,
+        messageId: MessageId.make("message:steer-time"),
+      });
+    }).pipe(
+      Effect.provide(
+        ProviderTurnControlService.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              layerProjection,
+              layerSessions(sessionId, runtime),
+              Layer.mock(EventSink.EventSinkV2)({}),
+              McpAppModelContext.layerEmpty,
+              Layer.succeed(TurnTimeLine.TurnTimeZone, Effect.succeed("America/Los_Angeles")),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // Imports strip the time line only from the very start of the text (stripTurnTimeLine).
+    assert.equal(
+      steered[0]?.message.text,
+      '[09-04 05:00 PDT]\n[T3 Code: the agent in T3 thread "thread:steer-sender" sent this message, not the user.]\n\nWhat did the app report?',
+    );
   }),
 );

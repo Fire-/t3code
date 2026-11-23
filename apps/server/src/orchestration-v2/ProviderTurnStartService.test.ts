@@ -2780,6 +2780,36 @@ effectIt.effect.each([
   }),
 );
 
+effectIt.effect.each([
+  {
+    name: "an agent",
+    createdBy: "agent" as const,
+    note: "[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]",
+  },
+  {
+    name: "a scheduled task",
+    scheduledTaskId: ScheduledTaskId.make("task"),
+    note: '[T3 Code: scheduled task "task" sent this prompt, not the user typing in this chat.]',
+  },
+])(
+  "puts the time line above the note that $name sent the message",
+  ({ name: _name, note, ...sender }) =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Run the report",
+        ...sender,
+        previousTurn: { runStatus: "completed", turnStatus: "completed" },
+      });
+
+      yield* harness.start;
+
+      // Imports strip the time line only from the very start of the text (stripTurnTimeLine).
+      expect(harness.startRootRun.mock.calls[0]?.[0].message.text).toBe(
+        `[09-04 05:00 PDT]\n${note}\n\nRun the report`,
+      );
+    }),
+);
+
 effectIt.effect("does not start another turn when abandoned-turn cleanup fails", () =>
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({
