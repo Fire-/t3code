@@ -3440,7 +3440,6 @@ export const makePrimeAdapterV2 = Effect.fn("makePrimeAdapterV2")(function* (
             );
             return {
               providerThread: state.providerThread,
-              providerTurns: [],
               messages,
               runtimeRequests: [],
             };
@@ -3839,7 +3838,7 @@ function primeExtensionDisplayName(extensionPath: string | undefined): string {
 function primeThreadSnapshot(
   providerThread: OrchestrationV2ProviderThread,
 ): ProviderAdapter.ProviderAdapterV2ThreadSnapshot {
-  return { providerThread, providerTurns: [], messages: [], runtimeRequests: [] };
+  return { providerThread, messages: [], runtimeRequests: [] };
 }
 
 function primeQuestion(
