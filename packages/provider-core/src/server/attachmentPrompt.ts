@@ -8,6 +8,8 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The adapters calling this provide no FileSystem service.
+import * as NodeFSP from "node:fs/promises";
 
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -157,6 +159,35 @@ export function isProviderNativeImageAttachment(attachment: ChatAttachment): boo
   );
 }
 
+const gifColorTableBytes = (packed: number) => (packed & 0x80 ? 3 << ((packed & 0x07) + 1) : 0);
+
+/** Counts image descriptors, or undefined when the bytes are not a complete GIF. */
+export function gifFrameCount(bytes: Uint8Array): number | undefined {
+  const signature = String.fromCharCode(...bytes.subarray(0, 6));
+  if (signature !== "GIF87a" && signature !== "GIF89a") return undefined;
+  let offset = 13 + gifColorTableBytes(bytes[10] ?? 0);
+  let frames = 0;
+  while (offset < bytes.length) {
+    const introducer = bytes[offset];
+    if (introducer === 0x3b) return frames;
+    if (introducer === 0x21) {
+      offset += 2;
+    } else if (introducer === 0x2c) {
+      offset += 11 + gifColorTableBytes(bytes[offset + 9] ?? 0);
+      frames += 1;
+    } else {
+      return undefined;
+    }
+    let size = -1;
+    while (size !== 0 && offset < bytes.length) {
+      size = bytes[offset]!;
+      offset += size + 1;
+    }
+    if (size !== 0) return undefined;
+  }
+  return undefined;
+}
+
 export const providerMessageTextWithAttachmentPaths = Effect.fn(
   "providerMessageTextWithAttachmentPaths",
 )(function* (input: {
@@ -175,10 +206,15 @@ export const providerMessageTextWithAttachmentPaths = Effect.fn(
       path === null || !input.resolveExtractedTextPath
         ? undefined
         : yield* input.resolveExtractedTextPath(path);
+    const frames =
+      path === null || attachment.mimeType.toLowerCase() !== "image/gif"
+        ? undefined
+        : yield* Effect.promise(() => NodeFSP.readFile(path).then(gifFrameCount, () => undefined));
+    const animated = frames !== undefined && frames > 1 ? ` (animated, ${frames} frames)` : "";
     const context =
       path === null
         ? `[Attached ${attachment.type} "${attachment.name}" is unavailable: could not resolve a saved path for attachment '${attachment.id}'.]`
-        : `[Attached ${attachment.type} "${attachment.name}" is saved at: ${path}${extracted ? ` (text extracted to: ${extracted})` : ""}]`;
+        : `[Attached ${attachment.type} "${attachment.name}"${animated} is saved at: ${path}${extracted ? ` (text extracted to: ${extracted})` : ""}]`;
     text = text ? `${text}\n\n${context}` : context;
   }
 
