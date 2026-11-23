@@ -39,6 +39,16 @@ export interface DescriptorPreset {
   readonly choices?: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }>;
 }
 
+const THINKING_LEVEL_CHOICES = [
+  { id: "off", label: msg("Off", { $context: "reasoning level" }) },
+  { id: "minimal", label: msg("Minimal", { $context: "reasoning level" }) },
+  { id: "low", label: msg("Low", { $context: "reasoning level" }) },
+  { id: "medium", label: msg("Medium", { $context: "reasoning level" }), isDefault: true },
+  { id: "high", label: msg("High", { $context: "reasoning level" }) },
+  { id: "xhigh", label: msg("Extra High", { $context: "reasoning level" }) },
+  { id: "max", label: msg("Max", { $context: "reasoning level" }) },
+] as const;
+
 const EFFORT_CHOICES = [
   { id: "low", label: msg("Low", { $context: "reasoning level" }) },
   { id: "medium", label: msg("Medium", { $context: "reasoning level" }), isDefault: true },
@@ -105,15 +115,15 @@ export const DESCRIPTOR_PRESETS_BY_KIND: Partial<
       id: "thinking",
       label: msg("Thinking", { $context: "model option name" }),
       type: "select",
-      choices: [
-        { id: "off", label: msg("Off", { $context: "reasoning level" }) },
-        { id: "minimal", label: msg("Minimal", { $context: "reasoning level" }) },
-        { id: "low", label: msg("Low", { $context: "reasoning level" }) },
-        { id: "medium", label: msg("Medium", { $context: "reasoning level" }), isDefault: true },
-        { id: "high", label: msg("High", { $context: "reasoning level" }) },
-        { id: "xhigh", label: msg("Extra High", { $context: "reasoning level" }) },
-        { id: "max", label: msg("Max", { $context: "reasoning level" }) },
-      ],
+      choices: THINKING_LEVEL_CHOICES,
+    },
+  ],
+  [ProviderDriverKind.make("prime-agent")]: [
+    {
+      id: "thinking",
+      label: msg("Thinking", { $context: "model option name" }),
+      type: "select",
+      choices: THINKING_LEVEL_CHOICES,
     },
   ],
   [ProviderDriverKind.make("opencode")]: [
