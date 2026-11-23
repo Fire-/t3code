@@ -178,6 +178,7 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import {
   collectInlineContextIds,
   type ComposerContextReference,
+  contextInsertionOffset,
   ensureInlineContextReferences,
   formatInlineContextReference,
   insertInlineContextReference,
@@ -825,6 +826,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
     openPullRequest: (event: React.MouseEvent<HTMLElement>, url: string) => {
       openPrLink(event, url);
+    },
+    editReviewComment: (comment: ReviewCommentContext, text: string) => {
+      addComposerDraftReviewComment(
+        composerDraftTarget,
+        { ...comment, text },
+        { appendReference: false },
+      );
     },
   };
   const composerContextRecords = composerContextRecordsFromDraft({
@@ -2818,7 +2826,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const insertComposerText = (
     text: string,
-    position: "cursor" | "end",
+    position: "cursor" | "end" | number,
     options?: {
       ensureLeadingBoundary?: boolean;
       citationCommentAnchor?: AssistantCitationSourceAnchor;
@@ -2839,7 +2847,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       text = importPastedComposerText(options.clipboardData, importContextFragment);
     }
     const prompt = promptRef.current;
-    const cursor = position === "cursor" ? readComposerSnapshot().expandedCursor : prompt.length;
+    const cursor =
+      position === "cursor"
+        ? readComposerSnapshot().expandedCursor
+        : position === "end"
+          ? prompt.length
+          : Math.max(0, Math.min(prompt.length, position));
     const needsLeadingSpace =
       (options?.ensureLeadingBoundary ?? false) &&
       cursor > 0 &&
@@ -3057,10 +3070,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const onComposerPasteStable = useStableCallback(onComposerPaste);
   const insertContextReferencesAtCaret = (
     references: ReadonlyArray<ComposerContextReference>,
-  ): boolean =>
-    insertComposerText(`${references.map(formatInlineContextReference).join(" ")} `, "cursor", {
-      ensureLeadingBoundary: true,
-    });
+  ): boolean => {
+    const selection = composerEditorRef.current?.readSelectionRange();
+    return insertComposerText(
+      `${references.map(formatInlineContextReference).join(" ")} `,
+      selection ? contextInsertionOffset(promptRef.current, selection) : "cursor",
+      { ensureLeadingBoundary: true },
+    );
+  };
   const insertContextReferencesAtCaretStable = useStableCallback(insertContextReferencesAtCaret);
   const setContextInsertionHandler = useComposerDraftStore(
     (store) => store.setContextInsertionHandler,
