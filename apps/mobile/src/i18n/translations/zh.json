@@ -859,6 +859,7 @@
   "25bca212561d8ba3": "{used} / {budget} token",
   "2dc1d7193b9ba1ae": "{count, plural, other {{count} 项检查}}",
   "d1e4cc873f510a86": "已设置目标",
+  "d037b283771d583c": "Tasks {done}/{total}",
   "a37fc08ee9b0a937": "正在向 OpenAI 发送反馈…",
   "66ebdd79f5bbcacd": "已向 OpenAI 发送反馈",
   "f60f20f2831735fb": "会话 ID：{feedbackId}",
