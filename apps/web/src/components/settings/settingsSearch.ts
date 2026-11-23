@@ -550,7 +550,23 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: msg("Guest links"),
     to: "/settings/labs",
     scope: "environment",
-    searchTerms: [msg("beta share guest invite link teammate watch t3 connect tunnel")],
+    searchTerms: [
+      msg(
+        "beta share guest invite link teammate watch t3 connect tunnel public address https proxy",
+      ),
+    ],
+  },
+  {
+    id: "guest-links-address",
+    title: msg("Public link address"),
+    to: "/settings/labs",
+    // Shown inside the guest links row, so search lands on the parent.
+    targetId: "guest-links",
+    searchTerms: [
+      msg(
+        "guest links public address url https origin tunnel reverse proxy cloudflare without t3 connect",
+      ),
+    ],
   },
   {
     id: "linked-environments-beta",
