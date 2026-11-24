@@ -208,6 +208,7 @@ computer.
 | Muse Code           | Install [Muse Code](https://dev.meta.ai/docs/muse-code) on the server, run `muse login`, then enable it in Settings → Providers.                          |
 | fx                  | Install [fx](https://fx.sh) with `curl -fsSL https://fx.sh/setup.sh \| bash`, then run `fx login`.                                                        |
 | ACP Registry agents | Add GitHub Copilot and other [ACP agents](./providers-acp.md#add-an-agent) from **Settings → Providers → Add provider → Show more**.                      |
+| Droid               | Install [Droid](./providers-droid.md#set-up-droid), then run `droid` and sign in, or set `FACTORY_API_KEY`. Enable it in Settings → Providers.            |
 
 Provider CLIs must be on the server's `PATH`. If T3 Code cannot find one, set its
 **Binary path** in provider settings, especially when using a version manager.
@@ -247,8 +248,8 @@ their original values.
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
 [Antigravity](./providers-antigravity.md), [Kiro](./providers-kiro.md),
-[Pi](./providers-pi.md), [Muse Code](./providers-muse.md), [fx](./providers-fx.md), and
-[ACP Registry agents](./providers-acp.md).
+[Pi](./providers-pi.md), [Muse Code](./providers-muse.md), [fx](./providers-fx.md),
+[ACP Registry agents](./providers-acp.md), and [Droid](./providers-droid.md).
 
 ### Provider check timeouts
 
