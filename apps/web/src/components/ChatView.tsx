@@ -84,6 +84,7 @@ import {
   type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
+  orchestrationV2UserWaits,
   ProviderInteractionMode,
   resolveIdleCompaction,
   RuntimeMode,
@@ -3688,6 +3689,8 @@ export default function ChatView(props: ChatViewProps) {
                       ? (providerStartingRun.providerStarting ?? null)
                       : null
                   }
+                  activeTurnPausedAt={activeRuntime?.activityPausedAt ?? null}
+                  userWaits={orchestrationV2UserWaits(serverProjection?.runtimeRequests ?? [])}
                   worktreeSetup={worktreeSetup}
                   onCancelWorktreeSetup={onCancelWorktreeSetupStable}
                   retryableWorkspacePreparationRunIds={retryableWorkspacePreparationRunIds}
