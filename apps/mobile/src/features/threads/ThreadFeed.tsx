@@ -4283,6 +4283,16 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               iconColor={iconSubtleColor}
             />
           ) : null}
+          {info.item.type === "activity-group" &&
+          info.item.activities.length === 1 &&
+          info.item.activities[0]?.projectedItem.item.type === "system_notice" &&
+          info.item.activities[0].projectedItem.item.modelSwitch ? (
+            <ThreadModelSwitchDivider
+              environmentId={props.environmentId}
+              modelSwitch={info.item.activities[0].projectedItem.item.modelSwitch}
+              iconColor={iconSubtleColor}
+            />
+          ) : null}
           {renderFeedEntry(info, {
             m,
             userMessageGrouping: info.item.userMessageGrouping,

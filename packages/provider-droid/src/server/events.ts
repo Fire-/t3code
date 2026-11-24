@@ -5,8 +5,10 @@
  * from them, so the adapter adopts the emitted record before the next call.
  */
 import {
+  type ModelSelection,
   type NodeId,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2ModelSwitch,
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2PlanStep,
   type OrchestrationV2ProviderRef,
@@ -43,6 +45,7 @@ import {
   splitDroidExecuteOutput,
   subtractDroidCounts,
 } from "./protocol.ts";
+import { DROID_REASONING_EFFORT_OPTION_ID } from "./sessionSettings.ts";
 
 export const DROID_DRIVER = ProviderDriverKind.make("droid");
 
@@ -84,6 +87,17 @@ export interface DroidAssistantModel {
   readonly modelId?: string;
   readonly apiProvider?: string;
   readonly reasoningEffort?: string;
+  /** Set on every reply the router picked the model for. */
+  readonly routerId?: string;
+}
+
+/** What a turn asked Droid for. */
+export interface DroidRequestedModel {
+  /** Resolved, as sent in the settings frame. */
+  readonly modelId: string;
+  readonly router: boolean;
+  /** The thread's selection as the user made it. */
+  readonly selection: ModelSelection;
 }
 
 interface StreamSurface {
@@ -131,8 +145,8 @@ export interface DroidMapperState {
   readonly tools: ReadonlyMap<string, ToolState>;
   /** The model the latest assistant message ran on (Droid may reroute a request). */
   readonly assistantModel: DroidAssistantModel | undefined;
-  /** The model this turn asked for; undefined for the router, which picks its own. */
-  readonly requestedModelId: string | undefined;
+  /** Undefined for a turn that sent no settings (a continuation). */
+  readonly requestedModel: DroidRequestedModel | undefined;
   /** Models already announced as a reroute this turn, so each is announced once. */
   readonly reroutedModels: ReadonlySet<string>;
   /** Session-wide counts at turn start and now; undefined while unknown. */
@@ -174,7 +188,7 @@ export function createDroidTurnState(input: {
   readonly firstItemOrdinal: number;
   readonly sessionUsage?: DroidTokenCounts | undefined;
   readonly contextUsage?: ThreadTokenUsageSnapshot | undefined;
-  readonly requestedModelId?: string | undefined;
+  readonly requestedModel?: DroidRequestedModel | undefined;
 }): DroidMapperState {
   return {
     nextItemOrdinal: input.firstItemOrdinal,
@@ -182,7 +196,7 @@ export function createDroidTurnState(input: {
     generations: new Map(),
     tools: new Map(),
     assistantModel: undefined,
-    requestedModelId: input.requestedModelId,
+    requestedModel: input.requestedModel,
     reroutedModels: new Set(),
     turnBaseline: input.sessionUsage,
     sessionUsage: input.sessionUsage,
@@ -520,10 +534,12 @@ function assistantModelOf(message: Readonly<Record<string, unknown>>): DroidAssi
   const modelId = asTrimmed(message["modelId"]);
   const apiProvider = asTrimmed(message["apiProvider"]);
   const reasoningEffort = asTrimmed(message["reasoningEffort"]);
+  const routerId = asTrimmed(message["routerId"]);
   return {
     ...(modelId === undefined ? {} : { modelId }),
     ...(apiProvider === undefined ? {} : { apiProvider }),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(routerId === undefined ? {} : { routerId }),
   };
 }
 
@@ -533,6 +549,7 @@ function systemNotice(
   nativeItemId: string,
   message: string,
   now: DateTime.Utc,
+  modelSwitch?: OrchestrationV2ModelSwitch,
 ): DroidMapResult {
   const ordinal = state.nextItemOrdinal;
   return {
@@ -549,6 +566,7 @@ function systemNotice(
           completedAt: now,
           type: "system_notice",
           message,
+          ...(modelSwitch === undefined ? {} : { modelSwitch }),
         },
       },
     ],
@@ -556,10 +574,9 @@ function systemNotice(
 }
 
 /**
- * Droid may answer a request with another model than the one asked for. The first reply of each
- * such model in a turn gets one notice; the router asks for no model, so it never reroutes. Droid
- * keeps that model for the session without saying so, and the adapter asks for the thread's model
- * again on the next turn, which the notice promises.
+ * Droid may answer with another model than the one asked for, and a refusal retry leaves the
+ * router (those replies stop naming it). Droid keeps that model for the session without saying so;
+ * the adapter asks for the thread's model again next turn, as the notice promises.
  */
 function rerouteNotice(
   state: DroidMapperState,
@@ -567,25 +584,35 @@ function rerouteNotice(
   answeredBy: DroidAssistantModel,
   now: DateTime.Utc,
 ): DroidMapResult | undefined {
-  const { modelId, apiProvider } = answeredBy;
-  const requested = state.requestedModelId;
-  if (
-    requested === undefined ||
-    modelId === undefined ||
-    modelId === requested ||
-    state.reroutedModels.has(modelId)
-  ) {
+  const { modelId, apiProvider, reasoningEffort } = answeredBy;
+  const requested = state.requestedModel;
+  if (requested === undefined || modelId === undefined || state.reroutedModels.has(modelId)) {
     return undefined;
   }
-  const message = `Droid answered with ${modelId}${
-    apiProvider === undefined ? "" : ` (${apiProvider})`
-  } instead of the requested ${requested}. Switching back to ${requested} on your next message.`;
+  const rerouted = requested.router
+    ? answeredBy.routerId === undefined
+    : modelId !== requested.modelId;
+  if (!rerouted) return undefined;
+  const answered = `${modelId}${apiProvider === undefined ? "" : ` (${apiProvider})`}`;
+  const message = requested.router
+    ? `Droid left the ${requested.modelId} router and answered with ${answered}. Switching back to ${requested.modelId} on your next message.`
+    : `Droid answered with ${answered} instead of the requested ${requested.modelId}. Switching back to ${requested.modelId} on your next message.`;
   return systemNotice(
     { ...state, reroutedModels: new Set([...state.reroutedModels, modelId]) },
     ctx,
     `${ctx.providerTurn.id}:reroute:${modelId}`,
     message,
     now,
+    {
+      from: requested.selection,
+      to: {
+        instanceId: requested.selection.instanceId,
+        model: modelId,
+        ...(reasoningEffort === undefined
+          ? {}
+          : { options: [{ id: DROID_REASONING_EFFORT_OPTION_ID, value: reasoningEffort }] }),
+      },
+    },
   );
 }
 

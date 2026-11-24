@@ -2279,8 +2279,14 @@ export const makeDroidAdapterV2 = Effect.fn("makeDroidAdapterV2")(function* (
               firstItemOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
               sessionUsage,
               contextUsage: state.providerThread.contextUsage ?? undefined,
-              requestedModelId:
-                desired === undefined || desired.router ? undefined : desired.modelId,
+              requestedModel:
+                desired === undefined
+                  ? undefined
+                  : {
+                      modelId: desired.modelId,
+                      router: desired.router,
+                      selection: turnInput.modelSelection,
+                    },
             }),
             errorMessage: undefined,
             usageLimit: undefined,

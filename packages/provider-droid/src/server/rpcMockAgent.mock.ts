@@ -544,7 +544,12 @@ function assistantModel(turn: Turn): Json {
   }
   const settings = turn.session.settings;
   if (settings.modelId === "auto") {
-    return { modelId: "gpt-6-sol", apiProvider: "openai", reasoningEffort: "medium" };
+    return {
+      modelId: "gpt-6-sol",
+      apiProvider: "openai",
+      routerId: "auto",
+      reasoningEffort: "medium",
+    };
   }
   const provider = MODELS.find((entry) => entry.id === settings.modelId)?.modelProvider;
   return {

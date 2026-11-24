@@ -457,6 +457,34 @@ describe("MessagesTimeline work rows", () => {
     },
   );
 
+  it("marks a model switch the provider made on its own above its notice", async () => {
+    setup();
+    const instanceId = ProviderInstanceId.make("droid");
+    const notice = (id: string, modelSwitch?: object) =>
+      work(id, {
+        label: `Notice ${id}`,
+        tone: "info",
+        itemType: "system_notice",
+        projectedItem: v2Item("system_notice", {
+          id,
+          message: `Notice ${id}`,
+          ...(modelSwitch === undefined ? {} : { modelSwitch }),
+        }),
+      });
+    await using screen = await renderTimeline([
+      notice("plain"),
+      notice("switched", {
+        from: { instanceId, model: "auto" },
+        to: { instanceId, model: "claude-opus-5" },
+      }),
+    ]);
+    const text = screen.text();
+    expect(text.match(/→/g)).toHaveLength(1);
+    expect(text).toContain("auto → claude-opus-5");
+    expect(text.indexOf("Notice plain")).toBeLessThan(text.indexOf("auto → claude-opus-5"));
+    expect(text.indexOf("auto → claude-opus-5")).toBeLessThan(text.indexOf("Notice switched"));
+  });
+
   it("keeps expanded tool output outside the row's toggle button", async () => {
     setup();
     await using screen = await renderTimeline([

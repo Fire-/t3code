@@ -1807,7 +1807,13 @@ describe("todo lists", () => {
 
 describe("model reroute notice [VAL-HIST-014]", () => {
   const REQUESTED = "claude-opus-5-5";
-  const answered = (modelId: string | undefined, id = MESSAGE_ID, apiProvider?: string) =>
+  const INSTANCE = ProviderInstanceId.make("droid");
+  const answered = (
+    modelId: string | undefined,
+    id = MESSAGE_ID,
+    apiProvider?: string,
+    extra: { readonly routerId?: string; readonly reasoningEffort?: string } = {},
+  ) =>
     ({
       type: "create_message",
       message: {
@@ -1815,11 +1821,28 @@ describe("model reroute notice [VAL-HIST-014]", () => {
         role: "assistant",
         ...(modelId === undefined ? {} : { modelId }),
         ...(apiProvider === undefined ? {} : { apiProvider }),
+        ...extra,
         content: [{ type: "text", text: `answer ${id}` }],
       },
     }) satisfies Notification;
   const requestedState = () =>
-    createDroidTurnState({ firstItemOrdinal: 101, requestedModelId: REQUESTED });
+    createDroidTurnState({
+      firstItemOrdinal: 101,
+      requestedModel: {
+        modelId: REQUESTED,
+        router: false,
+        selection: { instanceId: INSTANCE, model: REQUESTED },
+      },
+    });
+  const routerState = () =>
+    createDroidTurnState({
+      firstItemOrdinal: 101,
+      requestedModel: {
+        modelId: "auto",
+        router: true,
+        selection: { instanceId: INSTANCE, model: "auto" },
+      },
+    });
   const notices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
     turnItems(events).flatMap((item) => (item.type === "system_notice" ? [item] : []));
 
@@ -1866,7 +1889,7 @@ describe("model reroute notice [VAL-HIST-014]", () => {
     assert.deepStrictEqual(notices(events), []);
   });
 
-  it("[VAL-HIST-014] the router picks its own model, so no request names one and nothing is a reroute", () => {
+  it("[VAL-HIST-014] a turn that asked for no model (a continuation) notices nothing", () => {
     const { events } = feed([answered("claude-sonnet-5")], {
       state: createDroidTurnState({ firstItemOrdinal: 101 }),
     });
@@ -1876,6 +1899,56 @@ describe("model reroute notice [VAL-HIST-014]", () => {
   it("[VAL-HIST-014] the notice says the next message asks for the requested model again", () => {
     const { events } = feed([answered("claude-opus-5")], { state: requestedState() });
     assert.include(notices(events)[0]?.message, `back to ${REQUESTED} on your next message`);
+  });
+
+  it("[VAL-HIST-014] the router picks its own model: a reply that names the router is no reroute", () => {
+    const { events } = feed(
+      [
+        answered("gpt-6.1-sol", "m1", "azure_openai", { routerId: "auto" }),
+        answered("claude-opus-5", "m2", "snowflake", { routerId: "auto" }),
+      ],
+      { state: routerState() },
+    );
+    assert.deepStrictEqual(notices(events), []);
+  });
+
+  it("[VAL-HIST-014] a router turn's reply without the router left it: one notice, back to the router next message", () => {
+    const { perNotification, state } = feed(
+      [
+        answered("gpt-6.1-sol", "m1", "azure_openai", { routerId: "auto" }),
+        answered("claude-opus-5", "m2", "snowflake", { reasoningEffort: "high" }),
+        answered("claude-opus-5", "m3", "snowflake", { reasoningEffort: "high" }),
+      ],
+      { state: routerState() },
+    );
+    assert.deepStrictEqual(notices(perNotification[0] ?? []), []);
+    const [notice, ...others] = notices(perNotification[1] ?? []);
+    assert.strictEqual(others.length, 0);
+    assert.include(notice?.message, "claude-opus-5 (snowflake)");
+    assert.include(notice?.message, "back to auto on your next message");
+    assert.deepStrictEqual(notices(perNotification[2] ?? []), [], "the same model is noticed once");
+    assert.isTrue(state.reroutedModels.has("claude-opus-5"));
+  });
+
+  it("[VAL-HIST-014] a reroute notice records the switch from the requested selection to the model that answered", () => {
+    const named = feed(
+      [answered("claude-opus-5", "m1", "anthropic", { reasoningEffort: "high" })],
+      { state: requestedState() },
+    );
+    assert.deepStrictEqual(notices(named.events)[0]?.modelSwitch, {
+      from: { instanceId: INSTANCE, model: REQUESTED },
+      to: {
+        instanceId: INSTANCE,
+        model: "claude-opus-5",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+    });
+
+    const routed = feed([answered("claude-opus-5", "m1", "snowflake")], { state: routerState() });
+    assert.deepStrictEqual(notices(routed.events)[0]?.modelSwitch, {
+      from: { instanceId: INSTANCE, model: "auto" },
+      to: { instanceId: INSTANCE, model: "claude-opus-5" },
+    });
   });
 });
 

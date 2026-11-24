@@ -16,7 +16,7 @@ import * as Predicate from "effect/Predicate";
 export type DroidAutonomyLevel = "off" | "low" | "medium" | "high";
 export type DroidInteractionMode = "auto" | "spec";
 
-const DROID_REASONING_EFFORT_OPTION_ID = "reasoningEffort";
+export const DROID_REASONING_EFFORT_OPTION_ID = "reasoningEffort";
 
 const AUTONOMY_BY_RUNTIME_MODE = {
   "approval-required": "off",

@@ -678,8 +678,8 @@ describe("DroidAdapterV2 reroute notice", () => {
         yield* replyTurn(opened, fake, thread, 3, [OTHER_MODEL]);
         assert.strictEqual(noticesOf(opened.all).length, 2, "a new turn notices a reroute again");
 
-        yield* replyTurn(opened, fake, thread, 4, ["claude-sonnet-5"], { model: "auto" });
-        assert.strictEqual(noticesOf(opened.all).length, 2, "the router picks its own model");
+        yield* replyTurn(opened, fake, thread, 4, [undefined], { model: "auto" });
+        assert.strictEqual(noticesOf(opened.all).length, 2, "a reply that names no model");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -696,6 +696,61 @@ describe("DroidAdapterV2 reroute notice", () => {
         yield* replyTurn(opened, fake, thread, 3, [MODEL]);
 
         assert.deepStrictEqual(settingsFrames(fake), [frame(MODEL, "high")]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "[VAL-HIST-014] a router reply that names no router left it (a refusal retry pins a model): one notice, and the next turn asks for the router again",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeDroid({ availableModels: MODELS });
+        const opened = yield* openRuntime(fake);
+        const thread = yield* ensure(opened);
+        const routed = (modelId: string, id: string, routerId?: string) =>
+          ({
+            type: "create_message",
+            message: {
+              id,
+              role: "assistant",
+              modelId,
+              apiProvider: "test-provider",
+              ...(routerId === undefined ? {} : { routerId }),
+              content: [{ type: "text", text: `answer ${id}` }],
+            },
+          }) as const;
+        const routerTurn = Effect.fnUntraced(function* (
+          runOrdinal: number,
+          replies: ReadonlyArray<ReturnType<typeof routed>>,
+        ) {
+          yield* startTurn(opened.runtime, thread, { runOrdinal, model: "auto" });
+          for (const reply of replies) yield* fake.current().emit(reply);
+          yield* fake.current().emit(completed(runOrdinal));
+          yield* opened.takeEvent(isTerminal);
+        });
+
+        yield* routerTurn(1, [
+          routed("gpt-6.1-sol", "r1-0", "auto"),
+          routed("claude-opus-5", "r1-1"),
+          routed("claude-opus-5", "r1-2"),
+        ]);
+        const [notice, ...others] = noticesOf(opened.all);
+        assert.strictEqual(others.length, 0);
+        assert.include(notice?.message, "claude-opus-5");
+        assert.include(notice?.message, "back to auto on your next message");
+        assert.strictEqual(notice?.modelSwitch?.from.model, "auto");
+        assert.strictEqual(notice?.modelSwitch?.to.model, "claude-opus-5");
+        assert.deepStrictEqual(settingsFrames(fake), [frame("auto", undefined)]);
+
+        yield* routerTurn(2, [routed("gpt-6.1-sol", "r2-0", "auto")]);
+        assert.deepStrictEqual(
+          settingsFrames(fake),
+          [frame("auto", undefined), frame("auto", undefined)],
+          "the router is asked for again",
+        );
+        assert.strictEqual(noticesOf(opened.all).length, 1);
+
+        yield* routerTurn(3, [routed("gpt-6.1-sol", "r3-0", "auto")]);
+        assert.strictEqual(settingsFrames(fake).length, 2, "Droid holds the router again");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
