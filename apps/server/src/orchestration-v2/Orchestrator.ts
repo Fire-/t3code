@@ -6481,6 +6481,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
     readonly linkedSender?: OrchestrationV2ConversationMessage["linkedSender"];
     readonly idleCompaction?: OrchestrationV2ConversationMessage["idleCompaction"];
+    readonly timeZone?: OrchestrationV2ConversationMessage["timeZone"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly forceRestart: boolean;
@@ -6644,6 +6645,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           text: input.text,
           attachments: input.attachments,
           ...(input.context ? { context: input.context } : {}),
+          ...(input.timeZone === undefined ? {} : { timeZone: input.timeZone }),
           streaming: false,
           createdAt: now,
           updatedAt: now,
@@ -8049,6 +8051,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(command.timeZone === undefined ? {} : { timeZone: command.timeZone }),
         forceRestart: dispatchMode.type === "restart_active",
       });
       return;
@@ -8371,6 +8374,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         streaming: false,
         createdAt: now,
         updatedAt: now,
+        ...(command.timeZone === undefined ? {} : { timeZone: command.timeZone }),
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(notification === undefined ? {} : { notification }),
       };
@@ -8798,6 +8802,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         streaming: false,
         createdAt: now,
         updatedAt: now,
+        ...(command.timeZone === undefined ? {} : { timeZone: command.timeZone }),
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(notification === undefined ? {} : { notification }),
       };
@@ -9614,6 +9619,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       streaming: false,
       createdAt: now,
       updatedAt: now,
+      ...(command.timeZone === undefined ? {} : { timeZone: command.timeZone }),
       ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
       ...(notification === undefined ? {} : { notification }),
     };
@@ -11936,6 +11942,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           attachments: Object.values(command.attachmentsByQuestionId ?? {}).flat(),
           createdBy: "user" as const,
           creationSource: "server" as const,
+          ...(command.timeZone === undefined ? {} : { timeZone: command.timeZone }),
           dispatchMode,
         };
         yield* dispatchMessage(answer, events, effects);
@@ -12349,6 +12356,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(queuedMessage.idleCompaction === undefined
         ? {}
         : { idleCompaction: queuedMessage.idleCompaction }),
+      ...(queuedMessage.timeZone === undefined ? {} : { timeZone: queuedMessage.timeZone }),
       forceRestart: false,
     });
   });
