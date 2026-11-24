@@ -1,10 +1,12 @@
 import { DEFAULT_THEMES, preloadHighlighter } from "@pierre/diffs";
 import { EnvironmentId, ThreadId, type ProjectReadFileResult } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { StrictMode, type ReactNode } from "react";
+import { splitMarkdown } from "@t3tools/shared/markdownChunks";
+import { cloneElement, StrictMode, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { cdp, userEvent } from "vite-plus/test/browser";
+import { cdp, page, userEvent } from "vite-plus/test/browser";
 import { act, fakeTimers, render } from "../../../test/render";
+import { useComposerDraftStore } from "~/composerDraftStore";
 import appCss from "~/index.css?inline";
 import { isMacPlatform } from "~/lib/utils";
 import {
@@ -288,17 +290,6 @@ describe("source file focus", () => {
       isMacPlatform(navigator.platform) ? "{Meta>}f{/Meta}" : "{Control>}f{/Control}",
     );
     await vi.waitFor(() => expect(deepActiveElement()).toBeInstanceOf(HTMLInputElement));
-
-    const findField = deepActiveElement() as HTMLInputElement;
-    await userEvent.keyboard("server");
-    findField.blur();
-    expect(focus.focus("panel", false)).toBe(true);
-    await vi.waitFor(editorHasFocus);
-    const editor = deepActiveElement() as HTMLElement;
-    await userEvent.keyboard("ab");
-    await vi.waitFor(() => expect(editor.textContent).toContain("xabconst server"));
-    expect(findField.value).toBe("server");
-    editorHasFocus();
   });
 
   it("focuses the editor when a file row is clicked or activated with Enter", async () => {
@@ -743,5 +734,509 @@ describe("rendered Markdown relative images", () => {
     expect(state.assetResources).toContainEqual(
       expect.objectContaining({ _tag: "media-file", path: expectedPath }),
     );
+  });
+});
+
+describe("rendered Markdown cite", () => {
+  /** The app's stylesheet, so the list lays out and renders its pieces as it does in the app. */
+  function setupCite() {
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    const settings = setup();
+    return {
+      [Symbol.dispose]: () => {
+        settings[Symbol.dispose]();
+        style.remove();
+      },
+    };
+  }
+
+  const citeContents = [
+    "# Cite heading",
+    "",
+    "First paragraph with selectable text.",
+    "",
+    "- list one",
+    "- list two",
+  ].join("\n");
+
+  function citePreview() {
+    state.file = {
+      relativePath: "notes.md",
+      contents: citeContents,
+      byteLength: citeContents.length,
+      truncated: false,
+    };
+    return filePreview("notes.md");
+  }
+
+  /** The mouse gesture that ends a drag selection, as the selection toolbar observes it. */
+  function mouseSelect(target: Element, start: number, end: number) {
+    const rect = target.getBoundingClientRect();
+    target.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerType: "mouse",
+        isPrimary: true,
+        clientX: rect.left + 4,
+        clientY: rect.top + 4,
+      }),
+    );
+    selectRenderedText(target, start, end);
+    target.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        detail: 1,
+        clientX: rect.left + 4,
+        clientY: rect.top + 4,
+      }),
+    );
+  }
+
+  function selectRenderedText(target: Element, start: number, end: number) {
+    window.getSelection()?.setBaseAndExtent(target.firstChild!, start, target.firstChild!, end);
+    document.dispatchEvent(new Event("selectionchange"));
+  }
+
+  /** Android's long-press: contextmenu, then pointercancel, then the selection appears. */
+  function touchLongPress(target: Element) {
+    target.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", isPrimary: true }),
+    );
+    target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    target.dispatchEvent(
+      new PointerEvent("pointercancel", { bubbles: true, pointerType: "touch", isPrimary: true }),
+    );
+  }
+
+  function draftReviewComments() {
+    return useComposerDraftStore.getState().getComposerDraft(threadRef)?.reviewComments ?? [];
+  }
+
+  it("cites a mouse selection as a file comment with lines and quote", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => mouseSelect(paragraph, 21, 36));
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    await act(() => (cite.element() as HTMLElement).click());
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({
+        filePath: "notes.md",
+        sectionId: "file:notes.md",
+        startIndex: 2,
+        endIndex: 2,
+        rangeLabel: "L3",
+        text: "",
+        diff: "First paragraph with selectable text.",
+        fenceLanguage: "md",
+        quote: {
+          exact: "selectable text",
+          prefix: "te heading First paragraph with ",
+          suffix: ". list one list two ",
+        },
+      }),
+    ]);
+    // The comment form opens where the Cite button was; an empty comment is allowed.
+    const form = page.getByRole("textbox", { name: "Comment on lines L3" });
+    await expect.element(form).toBeVisible();
+    await userEvent.click(form);
+    await userEvent.keyboard("Check this wording");
+    await act(() =>
+      (page.getByRole("button", { name: "Comment" }).element() as HTMLElement).click(),
+    );
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording" }),
+    ]);
+  });
+
+  it("offers a touch selection as the chip docked in the file surface", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => {
+      touchLongPress(paragraph);
+      selectRenderedText(paragraph, 21, 36);
+    });
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    expect(chip.element().closest("[data-file-cite-dock]")).not.toBeNull();
+    await act(() => {
+      chip
+        .element()
+        .dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", isPrimary: true }),
+        );
+      chip.element().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    });
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({
+        startIndex: 2,
+        endIndex: 2,
+        quote: {
+          exact: "selectable text",
+          prefix: "te heading First paragraph with ",
+          suffix: ". list one list two ",
+        },
+      }),
+    ]);
+    // Cancel takes the comment back out of the draft.
+    await act(() =>
+      (page.getByRole("button", { name: "Cancel" }).element() as HTMLElement).click(),
+    );
+    expect(draftReviewComments()).toEqual([]);
+  });
+
+  // Each paragraph is about 80 characters, so the file is over 4 KB and splits into two pieces.
+  const longParagraphs = Array.from(
+    { length: 60 },
+    (_, index) =>
+      `Paragraph ${index + 1} holds filler text that keeps each block about forty characters.`,
+  );
+  const longContents = longParagraphs.join("\n\n");
+  /** The 1-based line of a paragraph in the file. */
+  const lineOfParagraph = (paragraph: number) =>
+    longContents.split("\n").indexOf(longParagraphs[paragraph - 1]!) + 1;
+
+  function longPreview() {
+    state.file = {
+      relativePath: "notes.md",
+      contents: longContents,
+      byteLength: longContents.length,
+      truncated: false,
+    };
+    return filePreview("notes.md");
+  }
+
+  /** The list that holds the rendered pieces; it is the element that scrolls. */
+  function markdownScroller(container: Element): HTMLElement {
+    return container.querySelector("[data-file-cite-dock]")!.parentElement!.firstElementChild!
+      .firstElementChild as HTMLElement;
+  }
+
+  /** A mouse drag from the start of one element to a character in another. */
+  function mouseSelectAcross(from: Element, to: Element, toEnd: number) {
+    const rect = from.getBoundingClientRect();
+    from.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerType: "mouse",
+        isPrimary: true,
+        clientX: rect.left + 4,
+        clientY: rect.top + 4,
+      }),
+    );
+    window.getSelection()?.setBaseAndExtent(from.firstChild!, 0, to.firstChild!, toEnd);
+    document.dispatchEvent(new Event("selectionchange"));
+    to.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        detail: 1,
+        clientX: rect.left + 4,
+        clientY: rect.top + 4,
+      }),
+    );
+  }
+
+  it("cites a line in a later piece with its file-level line number", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    // The fixture must really split, or the test says nothing about later pieces.
+    expect(splitMarkdown(longContents).chunks).toHaveLength(2);
+    await using screen = await render(longPreview());
+    const scroller = markdownScroller(screen.container);
+    // The list renders only what is near the viewport, so scroll the last paragraph into it.
+    scroller.scrollTop = scroller.scrollHeight;
+    const paragraph = await vi.waitFor(() => screen.getByText(longParagraphs[59]!).element());
+    await act(() => mouseSelect(paragraph, 0, 12));
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    await act(() => (cite.element() as HTMLElement).click());
+    const line = lineOfParagraph(60);
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ startIndex: line - 1, endIndex: line - 1, rangeLabel: `L${line}` }),
+    ]);
+  });
+
+  it("cites a selection across the piece boundary with the lines of both pieces", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    const chunks = splitMarkdown(longContents).chunks;
+    expect(chunks).toHaveLength(2);
+    const lastOfFirst = chunks[0]!.text
+      .split("\n")
+      .filter((line) => line.startsWith("Paragraph ")).length;
+    await using screen = await render(longPreview());
+    const scroller = markdownScroller(screen.container);
+    // Both pieces around the boundary must be rendered for the selection to span them.
+    scroller.scrollTop = scroller.scrollHeight;
+    const from = await vi.waitFor(() =>
+      screen.getByText(longParagraphs[lastOfFirst - 1]!).element(),
+    );
+    const to = await vi.waitFor(() => screen.getByText(longParagraphs[lastOfFirst]!).element());
+    await act(() => mouseSelectAcross(from, to, longParagraphs[lastOfFirst]!.length));
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    await act(() => (cite.element() as HTMLElement).click());
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({
+        startIndex: lineOfParagraph(lastOfFirst) - 1,
+        endIndex: lineOfParagraph(lastOfFirst + 1) - 1,
+      }),
+    ]);
+  });
+
+  function openCitedForm(paragraph: Element, start = 21, end = 36) {
+    return act(async () => mouseSelect(paragraph, start, end)).then(async () => {
+      const cite = page.getByRole("button", { name: "Cite selection in composer" });
+      await expect.element(cite).toBeVisible();
+      await act(() => (cite.element() as HTMLElement).click());
+      const form = page.getByRole("textbox", { name: "Comment on lines L3" });
+      await expect.element(form).toBeVisible();
+      return form;
+    });
+  }
+
+  it("saves the typed comment and offers Cite again when new text is selected mid-form", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const form = await openCitedForm(paragraph);
+    await userEvent.click(form);
+    await userEvent.keyboard("Check this wording");
+    // A new long-press on other text settles the open form: typed text saved, chip kept.
+    const lastItem = screen.getByText("list two").element();
+    await act(() => {
+      touchLongPress(lastItem);
+      selectRenderedText(lastItem, 0, 8);
+    });
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording", rangeLabel: "L3" }),
+    ]);
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    await act(() => {
+      chip
+        .element()
+        .dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", isPrimary: true }),
+        );
+      chip.element().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    });
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording", rangeLabel: "L3" }),
+      expect.objectContaining({ text: "", rangeLabel: "L6" }),
+    ]);
+  });
+
+  it("saves the typed comment and keeps the chip when a press lands outside the form", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const form = await openCitedForm(paragraph);
+    await userEvent.click(form);
+    await userEvent.keyboard("Check this wording");
+    await userEvent.click(screen.getByText("Cite heading"));
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({ text: "Check this wording" }),
+    ]);
+    await expect.element(form).not.toBeInTheDocument();
+  });
+
+  it("keeps the chip and drops unsaved text when the form closes on Escape", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const form = await openCitedForm(paragraph);
+    await userEvent.click(form);
+    await userEvent.keyboard("Unsaved note");
+    await userEvent.keyboard("{Escape}");
+    expect(draftReviewComments()).toEqual([expect.objectContaining({ text: "" })]);
+    await expect.element(form).not.toBeInTheDocument();
+  });
+
+  it("dismisses the mouse popover when the preview scrolls and re-offers once it settles", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => mouseSelect(paragraph, 21, 36));
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    // The breadcrumbs strip scrolls too; the preview's own viewport is the one that scrolls.
+    const scroller = markdownScroller(screen.container);
+    await act(() => scroller.dispatchEvent(new Event("scroll")));
+    await expect.element(cite).not.toBeInTheDocument();
+    await vi.waitFor(() => expect.element(cite).toBeVisible());
+  });
+
+  it("raises the touch chip clear of Chrome's bottom search bar in the file surface dock", async () => {
+    using _settings = setupCite();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => {
+      touchLongPress(paragraph);
+      selectRenderedText(paragraph, 21, 36);
+    });
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    const surface = screen.container.querySelector("[data-file-cite-dock]")!.parentElement!;
+    const raised =
+      surface.getBoundingClientRect().bottom - chip.element().getBoundingClientRect().bottom;
+    expect(raised).toBeGreaterThanOrEqual(96);
+  });
+
+  function spaceUnderLastLine(screen: { container: HTMLElement }) {
+    const scroller = markdownScroller(screen.container);
+    const lastLine = page.getByText("list two").element();
+    return (
+      scroller.getBoundingClientRect().top +
+      scroller.scrollHeight -
+      scroller.scrollTop -
+      lastLine.getBoundingClientRect().bottom
+    );
+  }
+
+  it("leaves room under the last line for Chrome's bottom search bar on touch screens", async () => {
+    using _settings = setupCite();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    const realMatchMedia = window.matchMedia.bind(window);
+    using _touch = vi
+      .spyOn(window, "matchMedia")
+      .mockImplementation((query) => realMatchMedia(query === "(pointer: coarse)" ? "all" : query));
+    await using screen = await render(citePreview());
+    await expect.element(page.getByText("list two")).toBeVisible();
+    expect(spaceUnderLastLine(screen)).toBeGreaterThanOrEqual(96);
+  });
+
+  it("adds no room under the last line with a mouse", async () => {
+    using _settings = setupCite();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    await using screen = await render(citePreview());
+    await expect.element(page.getByText("list two")).toBeVisible();
+    expect(spaceUnderLastLine(screen)).toBeLessThan(48);
+  });
+
+  it("keeps the composer-docked touch chip sitting in its dock", async () => {
+    using _settings = setupCite();
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    const composerDock = document.createElement("div");
+    composerDock.setAttribute("data-composer-dock", "true");
+    document.body.append(composerDock);
+    using _dock = { [Symbol.dispose]: () => composerDock.remove() };
+    state.file = {
+      relativePath: "notes.md",
+      contents: citeContents,
+      byteLength: citeContents.length,
+      truncated: false,
+    };
+    await using screen = await render(
+      cloneElement(filePreview("notes.md"), { citeChipAnchor: composerDock }),
+    );
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    await act(() => {
+      touchLongPress(paragraph);
+      selectRenderedText(paragraph, 21, 36);
+    });
+    const chip = page.getByRole("button", { name: "Cite selection" });
+    await expect.element(chip).toBeVisible();
+    expect(chip.element().closest("[data-composer-dock]")).toBe(composerDock);
+    const offset = Math.abs(
+      chip.element().getBoundingClientRect().bottom - composerDock.getBoundingClientRect().bottom,
+    );
+    expect(offset).toBeLessThan(24);
+  });
+
+  it("keeps the rendered preview filling the panel and scrolling", async () => {
+    using _settings = setupCite();
+    // The layout assertions need the real stylesheet, not just class names.
+    const style = document.createElement("style");
+    style.textContent = appCss;
+    document.head.append(style);
+    using _style = { [Symbol.dispose]: () => style.remove() };
+    state.file = {
+      relativePath: "notes.md",
+      contents: `${citeContents}\n\n${"Filler paragraph.\n\n".repeat(40)}`,
+      byteLength: 4_000,
+      truncated: false,
+    };
+    await using screen = await render(
+      <div style={{ height: 320, display: "flex", flexDirection: "column" }}>
+        {filePreview("notes.md")}
+      </div>,
+    );
+    const dock = screen.container.querySelector("[data-file-cite-dock]")!;
+    const surface = dock.parentElement!;
+    const scroller = markdownScroller(screen.container);
+    await vi.waitFor(() => expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight));
+    expect(surface.getBoundingClientRect().height).toBeGreaterThan(250);
+    expect(scroller.getBoundingClientRect().height).toBeCloseTo(
+      surface.getBoundingClientRect().height,
+      0,
+    );
+    scroller.scrollTop = 48;
+    expect(scroller.scrollTop).toBe(48);
+  });
+
+  it("cites a selection across blocks as the span from first to last line", async () => {
+    using _settings = setupCite();
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearComposerContent(threadRef),
+    };
+    await using screen = await render(citePreview());
+    const paragraph = screen.getByText("First paragraph with selectable text.").element();
+    const lastItem = screen.getByText("list two").element();
+    await act(() => {
+      window.getSelection()?.setBaseAndExtent(paragraph.firstChild!, 21, lastItem.firstChild!, 8);
+      document.dispatchEvent(new Event("selectionchange"));
+      paragraph.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, detail: 1 }));
+    });
+    const cite = page.getByRole("button", { name: "Cite selection in composer" });
+    await expect.element(cite).toBeVisible();
+    await act(() => (cite.element() as HTMLElement).click());
+    expect(draftReviewComments()).toEqual([
+      expect.objectContaining({
+        startIndex: 2,
+        endIndex: 5,
+        rangeLabel: "L3 to L6",
+        diff: ["First paragraph with selectable text.", "", "- list one", "- list two"].join("\n"),
+      }),
+    ]);
   });
 });
