@@ -8,6 +8,7 @@ import {
   resolveLatestMergeBackRun,
   threadCanSteer,
   threadSupportsProviderHandoff,
+  threadSwitchesRuntimeModeLive,
 } from "./threadWorkflows.ts";
 
 const capabilities = (input?: {
@@ -115,6 +116,29 @@ describe("thread workflows", () => {
       }),
     ).toBe(true);
     expect(threadSupportsProviderHandoff({ ...projection, providerThreads: [] })).toBe(false);
+  });
+
+  it("applies a runtime mode pick live only when the bound session switches in place", () => {
+    const withSession = (status: string, supportsRuntimeModeSwitchInSession: boolean) =>
+      ({
+        thread: { id: "thread", activeProviderThreadId: "provider-thread" },
+        runs: [{ id: "run", status: "running", providerThreadId: "provider-thread" }],
+        providerThreads: [
+          { id: "provider-thread", appThreadId: "thread", providerSessionId: "session" },
+        ],
+        providerSessions: [
+          {
+            id: "session",
+            status,
+            capabilities: { sessions: { supportsRuntimeModeSwitchInSession } },
+          },
+        ],
+      }) as unknown as OrchestrationV2ThreadProjection;
+
+    expect(threadSwitchesRuntimeModeLive(withSession("running", true))).toBe(true);
+    expect(threadSwitchesRuntimeModeLive(withSession("running", false))).toBe(false);
+    expect(threadSwitchesRuntimeModeLive(withSession("stopped", true))).toBe(false);
+    expect(threadSwitchesRuntimeModeLive(null)).toBe(false);
   });
 
   it("sorts queued messages and gates promotion from capabilities", () => {

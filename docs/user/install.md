@@ -205,6 +205,7 @@ computer.
 | OpenCode            | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
 | Antigravity         | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
 | Pi                  | Install [Pi](./providers-pi.md#set-up-pi) with Node.js 22.19 or newer, then run `pi` and `/login`.                                                        |
+| Prime               | Install [Prime](./providers-prime.md#set-up-prime), then run `prime-agent` and `/login`, or set `PRIME_API_KEY`.                                          |
 | Muse Code           | Install [Muse Code](https://dev.meta.ai/docs/muse-code) on the server, run `muse login`, then enable it in Settings → Providers.                          |
 | fx                  | Install [fx](https://fx.sh) with `curl -fsSL https://fx.sh/setup.sh \| bash`, then run `fx login`.                                                        |
 | ACP Registry agents | Add GitHub Copilot and other [ACP agents](./providers-acp.md#add-an-agent) from **Settings → Providers → Add provider → Show more**.                      |
@@ -247,7 +248,7 @@ their original values.
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
 [Antigravity](./providers-antigravity.md), [Kiro](./providers-kiro.md),
-[Pi](./providers-pi.md), [Muse Code](./providers-muse.md), [fx](./providers-fx.md), and
+[Pi](./providers-pi.md), [Prime](./providers-prime.md), [Muse Code](./providers-muse.md), [fx](./providers-fx.md),
 [ACP Registry agents](./providers-acp.md).
 
 ### Provider check timeouts
