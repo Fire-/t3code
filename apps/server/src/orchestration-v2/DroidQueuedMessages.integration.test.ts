@@ -66,7 +66,7 @@ function recordedWakeId(transcript: ProviderReplayTranscript): string {
 
 /**
  * Runs Droid's replayed transcript with the effect worker off, so a run that finished its native
- * turn stays `waiting` (and blocking) until the test drains the worker by hand.
+ * turn is `completed` while its checkpoint capture waits until the test drains the worker by hand.
  */
 const withDroidReplay = <A, E, R>(
   transcript: ProviderReplayTranscript,
@@ -141,8 +141,8 @@ const createThread = (orchestrator: Orchestrator.OrchestratorV2["Service"], cwd:
     creationSource: "web",
   });
 
-const isRunWaiting = (event: OrchestrationV2DomainEvent) =>
-  event.type === "run.updated" && event.payload.status === "waiting";
+const isRunCompleted = (event: OrchestrationV2DomainEvent) =>
+  event.type === "run.updated" && event.payload.status === "completed";
 
 it.effect(
   "[VAL-SUB-017] a wake reported while the previous run is still finalizing is queued behind it and runs once",
@@ -155,7 +155,7 @@ it.effect(
         { gate },
         Effect.fn(function* ({ orchestrator, worker, cwd, sessionStatuses, watch }) {
           yield* createThread(orchestrator, cwd);
-          const rootWaiting = yield* watch(isRunWaiting);
+          const rootCompleted = yield* watch(isRunCompleted);
           yield* orchestrator.dispatch({
             type: "message.dispatch",
             commandId: CommandId.make("first"),
@@ -170,14 +170,15 @@ it.effect(
           // One effect: start the turn. Draining on would also run the checkpoint capture the
           // finished turn enqueues and settle run 1 before the report arrives.
           yield* worker.drain(1);
-          yield* Fiber.join(rootWaiting);
-          // Droid ended its turn and then went idle; T3 still holds run 1 until capture runs.
+          yield* Fiber.join(rootCompleted);
+          // Droid ended its turn and went idle; run 1 is completed while its checkpoint capture is pending.
           yield* Effect.promise(() => gate.waitForReached(DROID_TASK_COMPLETION_LABEL));
           const finalizing = yield* orchestrator.getThreadProjection(threadId);
           assert.deepEqual(
             finalizing.runs.map((run) => run.status),
-            ["waiting"],
+            ["completed"],
           );
+          assert.equal(finalizing.runs[0]?.checkpointId, null, "the capture has not run yet");
 
           const queuedRun = yield* watch(
             (event) =>
@@ -200,7 +201,7 @@ it.effect(
           const queued = yield* orchestrator.getThreadProjection(threadId);
           assert.deepEqual(
             queued.runs.map((run) => run.status),
-            ["waiting", "queued"],
+            ["completed", "queued"],
           );
           const continuation = queued.runs[1]!;
           const message = queued.messages.find(
@@ -209,16 +210,16 @@ it.effect(
           assert.equal(`${message?.createdBy}:${message?.creationSource}`, "agent:provider");
           assert.notInclude(yield* Ref.get(sessionStatuses), "stopped");
 
-          const continuationWaiting = yield* watch(
+          const continuationCompleted = yield* watch(
             (event) =>
               event.type === "run.updated" &&
               event.payload.id === continuation.id &&
-              event.payload.status === "waiting",
+              event.payload.status === "completed",
           );
           yield* worker.drain();
           yield* orchestrator.resumeQueuedRuns;
           yield* worker.drain();
-          yield* Fiber.join(continuationWaiting);
+          yield* Fiber.join(continuationCompleted);
           yield* worker.drain();
 
           const after = yield* orchestrator.getThreadProjection(threadId);
@@ -258,7 +259,7 @@ it.effect.each(["queue_after_active", "start_immediately"] as const)(
         { gate: undefined },
         Effect.fn(function* ({ orchestrator, worker, cwd, watch }) {
           yield* createThread(orchestrator, cwd);
-          const rootWaiting = yield* watch(isRunWaiting);
+          const rootCompleted = yield* watch(isRunCompleted);
           yield* orchestrator.dispatch({
             type: "message.dispatch",
             commandId: CommandId.make("first"),
@@ -271,7 +272,7 @@ it.effect.each(["queue_after_active", "start_immediately"] as const)(
             creationSource: "web",
           });
           yield* worker.drain(1);
-          yield* Fiber.join(rootWaiting);
+          yield* Fiber.join(rootCompleted);
 
           const secondId = MessageId.make("second");
           yield* orchestrator.dispatch({
@@ -288,21 +289,21 @@ it.effect.each(["queue_after_active", "start_immediately"] as const)(
           const queued = yield* orchestrator.getThreadProjection(threadId);
           assert.deepEqual(
             queued.runs.map((run) => run.status),
-            ["waiting", "queued"],
+            ["completed", "queued"],
             "the message is accepted as a queued run behind the active one",
           );
           assert.equal(queued.runs[1]?.userMessageId, secondId);
 
-          const secondWaiting = yield* watch(
+          const secondCompleted = yield* watch(
             (event) =>
               event.type === "run.updated" &&
               event.payload.id === queued.runs[1]!.id &&
-              event.payload.status === "waiting",
+              event.payload.status === "completed",
           );
           yield* worker.drain();
           yield* orchestrator.resumeQueuedRuns;
           yield* worker.drain();
-          yield* Fiber.join(secondWaiting);
+          yield* Fiber.join(secondCompleted);
           yield* worker.drain();
 
           const after = yield* orchestrator.getThreadProjection(threadId);
