@@ -1547,6 +1547,8 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   streaming: Schema.Boolean,
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
+  /** The IANA time zone of the device a person sent the message from. */
+  timeZone: Schema.optional(TrimmedNonEmptyString),
   delegatedCompletion: Schema.optional(
     Schema.Struct({
       parentRunId: RunId,
@@ -3614,6 +3616,7 @@ export const OrchestrationV2Command = Schema.Union([
     text: Schema.String,
     context: Schema.optional(OrchestrationMessageContext),
     attachments: Schema.Array(ChatAttachment),
+    timeZone: OrchestrationV2ConversationMessage.fields.timeZone,
     titleSeed: Schema.optional(TrimmedNonEmptyString),
     modelSelection: Schema.optional(ModelSelection),
     sourcePlanRef: Schema.optional(Schema.Struct({ threadId: ThreadId, planId: PlanId })),
@@ -3740,6 +3743,7 @@ export const OrchestrationV2Command = Schema.Union([
     feedback: Schema.optional(Schema.String),
     answers: Schema.optional(ProviderUserInputAnswers),
     attachmentsByQuestionId: Schema.optional(UserInputAttachments),
+    timeZone: OrchestrationV2ConversationMessage.fields.timeZone,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.user-input.dismiss"),
@@ -4178,6 +4182,7 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
       text: Schema.String,
       context: Schema.optional(OrchestrationMessageContext),
       attachments: Schema.Array(ChatAttachment),
+      timeZone: OrchestrationV2ConversationMessage.fields.timeZone,
     }),
   ),
 });
