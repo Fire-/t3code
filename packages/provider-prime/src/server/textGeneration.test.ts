@@ -476,6 +476,7 @@ describe("Prime text generation runner", () => {
         const error = yield* textGeneration
           .generateReviewGuide({
             cwd: "/workspace",
+            projectCwd: "/workspace",
             number: 1,
             title: "Add Prime",
             description: "",
