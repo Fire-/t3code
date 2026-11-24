@@ -447,6 +447,7 @@ it.layer(layerTest)("DroidDriver", (it) => {
         const review = yield* Effect.flip(
           instance.textGeneration.generateReviewGuide({
             cwd: "/machine/project",
+            projectCwd: "/machine/project",
             number: 1,
             title: "Fix login",
             description: "",

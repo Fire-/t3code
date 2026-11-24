@@ -385,6 +385,7 @@ it.layer(NodeServices.layer)("DroidTextGeneration", (it) => {
           textGeneration.generateReviewGuide({
             ...REVIEW_GUIDE_INPUT,
             cwd: mock.projectDir,
+            projectCwd: mock.projectDir,
             modelSelection: modelSelection("claude-haiku-5-5"),
           }),
         );
