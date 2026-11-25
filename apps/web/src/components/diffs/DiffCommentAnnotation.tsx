@@ -41,6 +41,10 @@ interface DiffCommentAnnotationProps {
   submitLabel?: string;
   pending?: boolean;
   secondaryAction?: DiffCommentSecondaryAction;
+  /** Lets the primary action submit with no text, for comments that are optional. */
+  allowEmpty?: boolean;
+  /** Replaces where the Escape key goes when the form owns its undo, keeping the chip. */
+  onEscape?: () => void;
   focusOnMount?: boolean;
   /** Set only for pull request comments, where `@` completes the repository's users. */
   completionScope?: PullRequestCompletionScope | null;
@@ -61,6 +65,8 @@ export function DiffCommentAnnotation({
   submitLabel,
   pending = false,
   secondaryAction,
+  allowEmpty = false,
+  onEscape,
   focusOnMount = true,
   completionScope = null,
 }: DiffCommentAnnotationProps) {
@@ -157,11 +163,19 @@ export function DiffCommentAnnotation({
           if (event.key === "Escape") {
             event.preventDefault();
             if (speech && speech.state.phase !== "idle") speech.cancel();
+            else if (onEscape) onEscape();
             else onCancel();
           }
-          if (isCommentSubmitShortcut(event, trimmedText, pending, speech?.blocksSubmission)) {
+          if (
+            isCommentSubmitShortcut(
+              event,
+              trimmedText,
+              pending,
+              allowEmpty || speech?.blocksSubmission,
+            )
+          ) {
             event.preventDefault();
-            submit(speech, onComment);
+            submit(speech, onComment, allowEmpty);
           }
         }}
       />
@@ -190,8 +204,12 @@ export function DiffCommentAnnotation({
         ) : null}
         <Button
           size="xs"
-          disabled={speech?.preparing || pending || (!speech?.blocksSubmission && !trimmedText)}
-          onClick={() => submit(speech, onComment)}
+          disabled={
+            speech?.preparing ||
+            pending ||
+            (!allowEmpty && !speech?.blocksSubmission && !trimmedText)
+          }
+          onClick={() => submit(speech, onComment, allowEmpty)}
         >
           {submitLabel ?? gt("Comment", { $context: "verb, submit button" })}
         </Button>

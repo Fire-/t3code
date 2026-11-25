@@ -5,8 +5,9 @@ import { observeSelectionActions, SELECTION_MULTI_CLICK_INTERVAL_MS } from "./se
 
 describe("observeSelectionActions", () => {
   it.each([
-    { immediateMultiClick: false, nextFrame: [], afterInterval: [[{ x: 40, y: 12 }]] },
-    { immediateMultiClick: true, nextFrame: [[null]], afterInterval: [[null]] },
+    // The second argument says whether a touch gesture made the selection.
+    { immediateMultiClick: false, nextFrame: [], afterInterval: [[{ x: 40, y: 12 }, false]] },
+    { immediateMultiClick: true, nextFrame: [[null, false]], afterInterval: [[null, false]] },
   ])(
     "double-click with immediateMultiClick=$immediateMultiClick",
     ({ immediateMultiClick, nextFrame, afterInterval }) => {

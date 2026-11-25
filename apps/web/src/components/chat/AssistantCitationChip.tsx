@@ -219,7 +219,8 @@ export function AssistantCitationChip({
     if (dismissal.kind === "commit") return commentEditor?.onSave(dismissal.comment) ?? true;
     return dismissal.kind !== "keep-open";
   };
-  // The timeline virtualizes rows, so a vanished source is routine; the user may still be typing.
+  // The timeline virtualizes rows and folds finished turns, so cited text can vanish mid-typing.
+  // Re-anchor at the chip instead of closing, which would drop the typist into the composer.
   const onSourceUnavailable = useEffectEvent(() => {
     if (sourceAnchor) setUnavailableSourceAnchor(sourceAnchor);
   });

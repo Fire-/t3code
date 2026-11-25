@@ -70,6 +70,7 @@ import { MediaActions, type MediaActionSource } from "~/components/media/MediaAc
 import { useRemoteOpenState } from "~/remoteOpen";
 import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
@@ -104,6 +105,7 @@ import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { breadcrumbPathOf, retainedBreadcrumbTrail, trailChildOf } from "./filePath";
 import { ChunkedMarkdown } from "./ChunkedMarkdown";
 import { splitMarkdown } from "@t3tools/shared/markdownChunks";
+import { FileMarkdownCite } from "./FileMarkdownCite";
 import {
   type FileCommentAnnotationEntry,
   type FileCommentAnnotationGroup,
@@ -158,6 +160,8 @@ interface FilePreviewPanelProps {
   attachment?: ChatFileAttachment;
   threadRef: ScopedThreadRef;
   composerDraftTarget: ScopedThreadRef | DraftId;
+  /** The composer's touch dock, when it is visible beside the panel. */
+  citeChipAnchor?: HTMLElement | null;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   openInShortcutEnabled: boolean;
@@ -1162,8 +1166,11 @@ function selectRenderedContentOnSelectAll(event: ReactKeyboardEvent<HTMLElement>
 
 function RenderedMarkdownSurface({
   environmentId,
+  projectId,
   cwd,
   relativePath,
+  composerDraftTarget,
+  citeChipAnchor,
   contents,
   threadRef,
   workspaceMutationId,
@@ -1172,7 +1179,6 @@ function RenderedMarkdownSurface({
 }: Omit<
   EditableFileSurfaceProps,
   | "resolvedTheme"
-  | "composerDraftTarget"
   | "revealLine"
   | "revealRequestId"
   | "wordWrap"
@@ -1182,6 +1188,8 @@ function RenderedMarkdownSurface({
   threadRef: ScopedThreadRef;
   readOnly: boolean;
   workspaceMutationId: string | null;
+  /** The composer's touch dock, when it is visible beside the panel. */
+  citeChipAnchor: HTMLElement | null;
 }) {
   const saveTarget = { environmentId, cwd, relativePath };
   useFileSaveSession(saveTarget, onPendingChange);
@@ -1195,17 +1203,52 @@ function RenderedMarkdownSurface({
         setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
         changeFileSaveSession(saveTarget, nextContents);
       };
+  const [markdownElement, setMarkdownElement] = useState<HTMLDivElement | null>(null);
+  const [citeDockElement, setCiteDockElement] = useState<HTMLDivElement | null>(null);
+  // The list's scroller is the element that scrolls, so the cite observer watches it.
+  const scrollViewport =
+    markdownElement?.firstElementChild instanceof HTMLElement
+      ? markdownElement.firstElementChild
+      : null;
+  const coarsePointer = useMediaQuery({ pointer: "coarse" });
+  // Chrome's Touch to Search bar covers the bottom of the screen while text is selected, so the
+  // last lines need room to scroll above it when the file surface reaches the screen's bottom.
+  const roomForSearchBar = coarsePointer && citeChipAnchor == null;
 
   return (
-    <ChunkedMarkdown
-      {...splitMarkdown(contents)}
-      cwd={cwd}
-      relativePath={relativePath}
-      threadRef={threadRef}
-      workspaceMutationId={workspaceMutationId}
-      onKeyDown={selectRenderedContentOnSelectAll}
-      onTaskListChange={onTaskListChange}
-    />
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <ChunkedMarkdown
+        {...splitMarkdown(contents)}
+        cwd={cwd}
+        relativePath={relativePath}
+        threadRef={threadRef}
+        workspaceMutationId={workspaceMutationId}
+        onKeyDown={selectRenderedContentOnSelectAll}
+        onTaskListChange={onTaskListChange}
+        rootRef={setMarkdownElement}
+        contentClassName={roomForSearchBar ? "pb-28" : undefined}
+      />
+      {/* The touch Cite chip and its comment form dock here when the composer is not visible. */}
+      <div
+        data-file-cite-dock="true"
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex justify-center p-2"
+      >
+        <div ref={setCiteDockElement} />
+      </div>
+      {markdownElement && scrollViewport ? (
+        <FileMarkdownCite
+          viewport={scrollViewport}
+          content={markdownElement}
+          anchor={citeChipAnchor ?? citeDockElement}
+          raiseTouchChip={citeChipAnchor == null}
+          filePath={relativePath}
+          sourceText={contents}
+          composerDraftTarget={composerDraftTarget}
+          environmentId={environmentId}
+          projectId={projectId}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -1240,6 +1283,7 @@ export default function FilePreviewPanel({
   attachment,
   threadRef,
   composerDraftTarget,
+  citeChipAnchor,
   keybindings,
   availableEditors,
   openInShortcutEnabled,
@@ -1855,8 +1899,11 @@ export default function FilePreviewPanel({
               <RenderedMarkdownSurface
                 key={relativePath}
                 environmentId={environmentId}
+                projectId={projectId}
                 cwd={cwd}
                 relativePath={relativePath}
+                composerDraftTarget={composerDraftTarget}
+                citeChipAnchor={citeChipAnchor ?? null}
                 threadRef={threadRef}
                 contents={file.data.contents}
                 workspaceMutationId={workspaceMutationId}
