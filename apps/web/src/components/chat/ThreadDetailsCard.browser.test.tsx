@@ -124,7 +124,9 @@ it("closes a popup left open when the card switches inline, and reopens from the
 
   useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", false);
   await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
-  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+  await expect
+    .element(page.getByLabelText("Thread details"))
+    .toHaveTextContent("Details for thread-b");
   await setOpen(false);
 
   await screen.rerender(<Card threadRef={threadB} inline={false} fixture={fixture} />);
@@ -141,7 +143,9 @@ it("does not reopen the popover when the card returns from inline mode", async (
 
   useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", false);
   await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} />);
-  await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
+  await expect
+    .element(page.getByLabelText("Thread details"))
+    .toHaveTextContent("Details for thread-b");
 
   await screen.rerender(<Card threadRef={threadB} inline={false} fixture={fixture} />);
   await expect.element(page.getByText("Details for thread-b")).not.toBeInTheDocument();
@@ -174,6 +178,7 @@ it("reopens after a normal close", async () => {
 
 it("returns to full density when hidden items make the content fit", async () => {
   using fixture = setup();
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", true);
   await using screen = await render(<Card threadRef={threadB} inline fixture={fixture} rows={6} />);
   const card = page.getByRole("region", { name: "Thread details" });
   await expect.element(card).toHaveAttribute("data-density", "compact");
@@ -184,6 +189,7 @@ it("returns to full density when hidden items make the content fit", async () =>
 
 it("keeps full density when many automations make the content tall", async () => {
   using fixture = setup();
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", true);
   await using _screen = await render(
     <Card threadRef={threadB} inline fixture={fixture} rows={2} automationRows={6} />,
   );
@@ -195,6 +201,7 @@ it("keeps full density when many automations make the content tall", async () =>
 
 it("stays full while expanded server rows overflow", async () => {
   using fixture = setup();
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", true);
   await using _screen = await render(
     <Card threadRef={threadB} inline fixture={fixture} rows={2} serverOverflowRows={4} />,
   );
