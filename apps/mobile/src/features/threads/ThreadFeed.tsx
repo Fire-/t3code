@@ -62,6 +62,7 @@ import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
 import {
   IDLE_COMPACTING_LABELS,
   resolveUserMessageFileCards,
+  resolveSteerMarker,
   resolveUserMessagePresentation,
 } from "@t3tools/client-runtime/user-message";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
@@ -323,7 +324,6 @@ import {
   resolveWorkspaceRelativeFilePath,
 } from "../files/filePath";
 import { waitForThreadShell } from "./threadForkNavigation";
-import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
 import { fileChipClipboardPath, fileChipMenu, resolveFileChipTarget } from "./fileChipMenu";
 import { useFileChipShare } from "./useFileChipShare";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
@@ -2338,11 +2338,7 @@ function renderFeedEntry(
       const bubbleBodyVisible = foldRowId === null || foldExpanded;
       const intentBadge = props.userMessageGrouping.continuesSteer
         ? null
-        : resolveUserMessageIntentBadge(
-            message.inputIntent,
-            message.projectedItem?.item.status === "pending",
-            props.m,
-          );
+        : resolveSteerMarker(message, props.m);
       const referenceIds = new Set(
         collectComposerContextReferences(message.text).map((reference) => reference.contextId),
       );
@@ -2585,10 +2581,16 @@ function renderFeedEntry(
               {intentBadge ? (
                 <View
                   accessible
-                  accessibilityLabel={intentBadge.accessibilityLabel}
+                  accessibilityLabel={`${intentBadge.label}. ${intentBadge.description}`}
                   className="flex-row items-center gap-1"
                 >
-                  <SymbolView name="arrow.uturn.forward" size={12} tintColor={iconSubtleColor} />
+                  <SymbolView
+                    name={
+                      intentBadge.state === "undelivered" ? "slash.circle" : "arrow.uturn.forward"
+                    }
+                    size={12}
+                    tintColor={iconSubtleColor}
+                  />
                   <Text className="font-t3-medium text-xs text-foreground-secondary">
                     {intentBadge.label}
                   </Text>
@@ -4202,6 +4204,16 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             <ThreadModelSwitchDivider
               environmentId={props.environmentId}
               modelSwitch={info.item.message.projectedItem.item.modelSwitch}
+              iconColor={iconSubtleColor}
+            />
+          ) : null}
+          {info.item.type === "activity-group" &&
+          info.item.activities.length === 1 &&
+          info.item.activities[0]?.projectedItem.item.type === "system_notice" &&
+          info.item.activities[0].projectedItem.item.modelSwitch ? (
+            <ThreadModelSwitchDivider
+              environmentId={props.environmentId}
+              modelSwitch={info.item.activities[0].projectedItem.item.modelSwitch}
               iconColor={iconSubtleColor}
             />
           ) : null}
