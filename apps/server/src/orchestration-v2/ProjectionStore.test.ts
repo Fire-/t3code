@@ -8440,6 +8440,116 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       }),
   );
 
+  it.effect("presents a provider child's live runless root node as its shell activity", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const startedAt = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+      const parentThreadId = ThreadId.make("thread:runless-child:parent");
+      const threadId = ThreadId.make("thread:runless-child:child");
+      const rootNodeId = NodeId.make("node:runless-child:root");
+      for (const [id, lineage] of [
+        [
+          parentThreadId,
+          { parentThreadId: null, relationshipToParent: null, rootThreadId: parentThreadId },
+        ],
+        [
+          threadId,
+          { parentThreadId, relationshipToParent: "subagent", rootThreadId: parentThreadId },
+        ],
+      ] as const) {
+        yield* projectionStore.apply({
+          id: EventId.make(`event:runless-child:${id}:thread`),
+          type: "thread.created",
+          threadId: id,
+          occurredAt: startedAt,
+          payload: {
+            createdBy: id === threadId ? "agent" : "user",
+            creationSource: id === threadId ? "provider" : "web",
+            id,
+            projectId: ProjectId.make("project:runless-child"),
+            title: id === threadId ? "Child" : "Parent",
+            providerInstanceId,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            activeProviderThreadId: null,
+            lineage,
+            forkedFrom: null,
+            createdAt: startedAt,
+            updatedAt: startedAt,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            lastVisitedAt: null,
+            deletedAt: null,
+          },
+        });
+      }
+      const updateRoot = (status: "running" | "completed") =>
+        projectionStore.apply({
+          id: EventId.make(`event:runless-child:root:${status}`),
+          type: "node.updated",
+          threadId,
+          nodeId: rootNodeId,
+          driver,
+          occurredAt: startedAt,
+          payload: {
+            id: rootNodeId,
+            threadId,
+            runId: null,
+            parentNodeId: null,
+            rootNodeId,
+            kind: "root_turn",
+            status,
+            countsForRun: false,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt,
+            completedAt: status === "running" ? null : startedAt,
+          },
+        });
+      const presented = Effect.gen(function* () {
+        const sqlShell = yield* projectionStore.getThreadShell(threadId);
+        const memoryShell = ProjectionStore.threadShellFromProjection(
+          yield* projectionStore.getThreadProjection(threadId),
+        );
+        return [sqlShell, memoryShell].map((shell) => ({
+          latestRunId: shell?.latestRunId ?? null,
+          activeRunId: shell?.activeRunId ?? null,
+          activityRunStatus: shell?.activityRunStatus ?? null,
+          activityRunStartedAt:
+            shell?.activityRunStartedAt == null
+              ? null
+              : DateTime.formatIso(shell.activityRunStartedAt),
+        }));
+      });
+      const idle = {
+        latestRunId: null,
+        activeRunId: null,
+        activityRunStatus: null,
+        activityRunStartedAt: null,
+      };
+      const working = {
+        ...idle,
+        activityRunStatus: "running" as const,
+        activityRunStartedAt: DateTime.formatIso(startedAt),
+      };
+
+      yield* updateRoot("running");
+      assert.deepStrictEqual(yield* presented, [working, working]);
+      yield* assertShellIndexCoversShells();
+
+      yield* updateRoot("completed");
+      assert.deepStrictEqual(yield* presented, [idle, idle]);
+      yield* assertShellIndexCoversShells();
+    }),
+  );
+
   it.effect("only exposes interruptible runs through the shell activeRunId", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;

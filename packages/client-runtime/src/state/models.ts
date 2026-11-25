@@ -247,7 +247,8 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
   const parkAtIdle =
     backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) &&
     thread.status !== "failed";
-  if (thread.latestRunId === null && !parkAtIdle) {
+  // A provider's child thread, such as a native subagent's, can work without ever having a run.
+  if (thread.latestRunId === null && !parkAtIdle && (thread.activityRunStatus ?? null) === null) {
     return null;
   }
   const status = parkAtIdle ? "idle" : (thread.activityRunStatus ?? thread.status);
