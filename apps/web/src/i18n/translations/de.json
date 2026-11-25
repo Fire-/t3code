@@ -6285,14 +6285,14 @@
     },
     "-Verlauf…"
   ],
-  "45194b35dc6d858a": [
-    "Aus deinem ",
+  "970db7c5cadb6e0b": [
+    "From the last 30 days of your ",
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    "-Verlauf"
+    " history"
   ],
   "0070a15f6b693068": "T3 Code auf dem Smartphone nutzen",
   "37c66042ce1906da": "Scanne mit deinem Smartphone, um die App zu holen.",
@@ -6318,6 +6318,7 @@
     "in diesem Terminal aus."
   ],
   "9d9b9624c7bd95df": "Andere Ordner",
+  "fcbd0f5e40a83cbd": "No recent conversations",
   "1eb8f3d4695033fb": [
     "Zu ",
     {
