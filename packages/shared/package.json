@@ -690,6 +690,10 @@
     "./assistantInsights": {
       "types": "./src/assistantInsights.ts",
       "import": "./src/assistantInsights.ts"
+    },
+    "./turnTimeLine": {
+      "types": "./src/turnTimeLine.ts",
+      "import": "./src/turnTimeLine.ts"
     }
   },
   "scripts": {
