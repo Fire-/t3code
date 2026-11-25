@@ -212,6 +212,7 @@ it("stays full while expanded server rows overflow", async () => {
 
 it("stays full while expanded issue rows overflow", async () => {
   using fixture = setup();
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", true);
   await using _screen = await render(
     <Card threadRef={threadB} inline fixture={fixture} rows={2} issueListRows={6} />,
   );
