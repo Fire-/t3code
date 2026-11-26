@@ -230,6 +230,7 @@ it("stays full while expanded issue rows overflow", async () => {
 
 it("keeps the repository list reachable after Show more expands it", async () => {
   using fixture = setup();
+  useRightPanelStore.getState().setThreadPanelOpen(threadB, "inline", true);
   for (let index = 1; index <= 30; index++) {
     useThreadRepositoryPinsStore
       .getState()
