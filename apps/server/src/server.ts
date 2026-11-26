@@ -236,6 +236,7 @@ import * as ThreadViewers from "./orchestration-v2/ThreadViewers.ts";
 import * as WorkflowForge from "./workflows/WorkflowForge.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
+import * as TurnTimeLine from "./orchestration-v2/TurnTimeLine.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
 import * as IdleCompactionService from "./orchestration-v2/IdleCompactionService.ts";
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
@@ -659,6 +660,7 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
   Layer.provide(UsageLimitSources.layerResetFallback),
   Layer.provide(layerTaskFolders),
   Layer.provide(layerScheduledTaskWebhookOrigin),
+  Layer.provide(TurnTimeLine.layerMachineTimeZone),
   Layer.provide(ProviderUsageAnalytics.layer),
   Layer.provide(layerCheckpointStore),
   Layer.provide(layerGitWorkflow),
