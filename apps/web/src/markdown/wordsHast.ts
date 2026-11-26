@@ -13,6 +13,7 @@ import type { ReferenceAutolink } from "@t3tools/client-runtime/source-control-c
 import { expandGithubEmojiAliases } from "@t3tools/client-runtime/pull-request-markdown";
 import { resolveChangeRequestMediaUrl } from "@t3tools/client-runtime/pull-request-references";
 import { GITHUB_ALERT_MARKER } from "@t3tools/shared/markdownGithubAlerts";
+import type { MarkdownSourceBlock } from "@t3tools/shared/markdownSourceBlocks";
 import { absoluteFilePathMatches } from "@t3tools/shared/markdownLinks";
 import {
   rehypeNormalizeLocalEditorLinks,
@@ -22,6 +23,7 @@ import {
 
 import { rehypeChipPunctuation } from "../components/chat/markdownChipPunctuation";
 import { rehypeHeadingIds } from "../components/chat/markdownFragments";
+import { addMarkdownSourceOffsets } from "../components/chat/markdownSourceOffsets";
 import { rehypeTextDirection } from "../components/chat/markdownTextDirection";
 
 /** What a kind of message adds to chat Markdown. Pass a stable object: renderers cache by it. */
@@ -44,6 +46,10 @@ export interface MarkdownExtensions {
   };
   /** Expand GitHub `:alias:` emoji shortcodes in prose outside code. */
   readonly githubEmoji?: boolean;
+  /** The text's blocks from markdownSourceBlocks: rendered blocks get `data-source-*` offsets. */
+  readonly sourceBlocks?: ReadonlyArray<MarkdownSourceBlock>;
+  /** Where the text starts in its file, so the offsets are file offsets. */
+  readonly sourceOffset?: number;
 }
 
 export interface WordsHastOptions {
@@ -1184,6 +1190,8 @@ export function wordsHast(text: string, options: WordsHastOptions): Root {
   if (insights) restorePositions(hast, insights.toOriginal);
   if (extensions.inert) makeInert(hast);
   if (extensions.preview) return flattenPreview(hast, extensions.preview);
+  if (extensions.sourceBlocks)
+    addMarkdownSourceOffsets(hast, text, extensions.sourceBlocks, extensions.sourceOffset);
   addHeadingIds(hast);
   addTextDirection(hast as never);
   groupChipPunctuation(hast as never);

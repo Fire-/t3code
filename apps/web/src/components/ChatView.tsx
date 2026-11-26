@@ -10,7 +10,7 @@ import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { queuedRunEditBlockedReason } from "@t3tools/client-runtime/queued-run-edit";
-import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
+import { ComposerDock, ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
 import { useFocusComposerOnThreadOpen } from "./chat/useFocusComposerOnThreadOpen";
 import { configuredHostedAppUrl } from "../hostedPairing";
@@ -798,6 +798,7 @@ export default function ChatView(props: ChatViewProps) {
   const composerReservedHeightRef = useRef(0);
   const composerExpandedHeightRef = useRef(0);
   const [scrollToEndClearance, setScrollToEndClearance] = useState(0);
+  const [citeChipAnchor, setCiteChipAnchor] = useState<HTMLDivElement | null>(null);
   const fanoutSelectionsAtom = draftFanoutSelectionsAtom(routeThreadKey);
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const multipleModelSelections = useAtomValue(fanoutSelectionsAtom);
@@ -3456,6 +3457,7 @@ export default function ChatView(props: ChatViewProps) {
       environmentId={activeThread.environmentId}
       visible={rightPanelOpen}
       composerDraftTarget={composerDraftTarget}
+      citeChipAnchor={shouldUsePlanSidebarSheet || rightPanelMaximized ? null : citeChipAnchor}
       keybindings={keybindings}
       configuredPreviewUrls={configuredPreviewUrls}
       workspaceMutationId={workspaceMutationId}
@@ -3658,6 +3660,7 @@ export default function ChatView(props: ChatViewProps) {
             >
               <WorkspaceMutationIdContext value={workspaceMutationId}>
                 <ThreadTimeline
+                  citeChipAnchor={citeChipAnchor}
                   pendingApprovals={pendingApprovals}
                   heldApprovalRequestIds={heldApprovalRequestIds}
                   respondingRequestIds={respondingRequestIds}
@@ -3767,13 +3770,15 @@ export default function ChatView(props: ChatViewProps) {
                 />
               </WorkspaceMutationIdContext>
 
-              {showScrollToBottom && !isThreadFindActive && (
-                <ScrollToEndButton
-                  bottom={scrollToEndClearance + 4}
-                  summary={scrollToEndSummary}
-                  onScrollToEnd={() => scrollToEnd(true)}
-                />
-              )}
+              <ComposerDock bottom={scrollToEndClearance + 4}>
+                <div data-cite-chip-anchor="true" ref={setCiteChipAnchor} />
+                {showScrollToBottom && !isThreadFindActive ? (
+                  <ScrollToEndButton
+                    summary={scrollToEndSummary}
+                    onScrollToEnd={() => scrollToEnd(true)}
+                  />
+                ) : null}
+              </ComposerDock>
             </div>
 
             <div
