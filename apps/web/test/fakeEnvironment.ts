@@ -277,7 +277,11 @@ export function threadWithHistory(
 }
 
 /** A one-turn thread whose agent waits on an answer to one question. */
-export function threadWithQuestion(name: string, question: string): FakeThread {
+export function threadWithQuestion(
+  name: string,
+  question: string,
+  allowCustomAnswer = false,
+): FakeThread {
   const thread = threadWithHistory(name, 1);
   const requestId = RuntimeRequestId.make(`${name}-request`);
   return {
@@ -295,7 +299,7 @@ export function threadWithQuestion(name: string, question: string): FakeThread {
             header: "Choice",
             question,
             required: true,
-            allowCustomAnswer: false,
+            allowCustomAnswer,
             options: [{ label: "Continue", value: "continue", description: "Resume work" }],
           },
         ],
