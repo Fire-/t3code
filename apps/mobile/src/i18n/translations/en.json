@@ -866,6 +866,7 @@
   "25bca212561d8ba3": "{used} / {budget} tokens",
   "2dc1d7193b9ba1ae": "{count, plural, one {{count} check} other {{count} checks}}",
   "d1e4cc873f510a86": "Goal set",
+  "d037b283771d583c": "Tasks {done}/{total}",
   "a37fc08ee9b0a937": "Sending feedback to OpenAI...",
   "66ebdd79f5bbcacd": "Feedback sent to OpenAI",
   "f60f20f2831735fb": "Thread ID: {feedbackId}",
