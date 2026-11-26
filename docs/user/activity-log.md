@@ -7,8 +7,9 @@ The activity log shows what an agent is doing during a turn—shell commands, fi
 - Expand a summary group on web and desktop to inspect commands, tool inputs, status, and exit codes.
 - Expand an individual tool call to view its output. Running commands stream live, showing the most recent output for long logs.
 - Select **Open diff** on a file change to review the edit.
-  When a turn ends, its work folds under a **Worked for** summary. If you have scrolled up to read it,
-  it stays open until you scroll back to the bottom, fold it yourself, or the next turn starts.
+
+When a turn ends, its work folds under a **Worked for** summary. If you have scrolled up to read it,
+it stays open until you scroll back to the bottom, fold it yourself, or the next turn starts.
 
 ## Hide tool calls
 
