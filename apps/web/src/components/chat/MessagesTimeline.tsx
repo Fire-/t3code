@@ -103,7 +103,7 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
-import { type HandoffTimelineRun } from "./V2LifecycleRow";
+import { type HandoffTimelineRun, ModelSwitchRow } from "./V2LifecycleRow";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
 
 import { forwardWheelToTimeline } from "./timelineMinimapWheel";
@@ -1663,6 +1663,18 @@ function getItemType(item: MessagesTimelineRow) {
     : `message:${item.message.id}`;
 }
 
+/** A model switch the provider made on its own, marked like the user's own switch. */
+function NoticeModelSwitchRow(props: {
+  readonly entries: Extract<TimelineRow, { kind: "work" }>["groupedEntries"];
+}) {
+  const ctx = use(TimelineRowCtx);
+  const item = props.entries.length === 1 ? props.entries[0]?.projectedItem?.item : undefined;
+  if (item?.type !== "system_notice" || item.modelSwitch === undefined) return null;
+  return (
+    <ModelSwitchRow environmentId={ctx.activeThreadEnvironmentId} modelSwitch={item.modelSwitch} />
+  );
+}
+
 const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
   const isExpandedToolGroup = row.kind === "work" && row.isExpandedToolGroup;
   const isSubagentGroup = row.kind === "event" && row.projectedItem.item.type === "subagent";
@@ -1708,6 +1720,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       }
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
+      {row.kind === "work" ? <NoticeModelSwitchRow entries={row.groupedEntries} /> : null}
       {isWorkLogRow ? (
         <WorkLogBlock
           continues={row.continuesWorkLog}
