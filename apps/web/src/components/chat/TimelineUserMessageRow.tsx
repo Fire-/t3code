@@ -12,7 +12,10 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import {
+  resolveSteerMarker,
+  resolveUserMessagePresentation,
+} from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { useQuietThreadShell } from "../../state/entities";
 import { useEnvironment } from "../../state/environments";
@@ -37,6 +40,7 @@ import {
   DownloadIcon,
   EyeIcon,
   type LucideIcon,
+  MessageSquareOffIcon,
   MessagesSquareIcon,
   Redo2Icon,
   PencilIcon,
@@ -315,13 +319,7 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
   return (
     <div className="group flex flex-col items-end gap-1" data-user-message-attribution="automation">
-      {row.message.inputIntent === "steer" ||
-      row.message.inputIntent === "promoted_queued_to_steer" ? (
-        <UserMessageIntentMarker
-          intent={row.message.inputIntent}
-          unread={row.projectedItem?.item.status === "pending"}
-        />
-      ) : null}
+      <UserMessageIntentMarker message={row.message} />
       <div
         className={cn(
           "min-w-0 max-w-[80%] rounded-2xl bg-message text-message-foreground",
@@ -917,14 +915,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           <GuestMessageName name={userMessage.guestName} />
         </div>
       ) : null}
-      {(row.message.inputIntent === "steer" ||
-        row.message.inputIntent === "promoted_queued_to_steer") &&
-      !row.continuesSteer ? (
-        <UserMessageIntentMarker
-          intent={row.message.inputIntent}
-          unread={row.projectedItem?.item.status === "pending"}
-        />
-      ) : null}
+      {!row.continuesSteer ? <UserMessageIntentMarker message={row.message} /> : null}
       {mediaAboveText ? (
         <div className="flex max-w-[80%] justify-end">
           {/* The heading leads the media so screen readers reach it before the images. */}
@@ -1137,35 +1128,27 @@ const ACTIONS_REVEAL_CLASS_NAME =
   "items-center text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100";
 
 function UserMessageIntentMarker({
-  intent,
-  unread,
+  message,
 }: {
-  readonly intent: "steer" | "promoted_queued_to_steer";
-  readonly unread: boolean;
+  readonly message: Parameters<typeof resolveSteerMarker>[0];
 }) {
-  const gt = useGT();
+  const m = useMessages();
+  const marker = resolveSteerMarker(message, m);
+  if (marker === null) return null;
+  const Icon = marker.state === "undelivered" ? MessageSquareOffIcon : Redo2Icon;
   return (
     <SharedTooltipTrigger
       render={
         <div
           className="me-1 flex items-center justify-end gap-1 text-xs leading-none text-muted-foreground"
-          data-user-message-intent={intent}
+          data-user-message-intent={message.inputIntent}
+          data-steer-state={marker.state}
         />
       }
-      label={
-        unread
-          ? gt(
-              "Waiting for the agent to read this. It reads steers between steps, after a running command finishes.",
-            )
-          : intent === "promoted_queued_to_steer"
-            ? gt("Originally queued, then promoted to steer the active turn")
-            : gt("Steered the active turn")
-      }
+      label={marker.description}
     >
-      <Redo2Icon aria-hidden="true" className="size-3" />
-      {unread
-        ? gt("Steer · waiting to be read")
-        : gt("Steer", { $context: "noun, a message that steers the running turn" })}
+      <Icon aria-hidden="true" className="size-3" />
+      {marker.label}
     </SharedTooltipTrigger>
   );
 }
