@@ -764,6 +764,7 @@ export function summarizeToolGroup(
   hasFailure: boolean;
 } {
   const toolEntries = entries.filter((entry) => entry.itemType !== "reasoning");
+  const thoughtCount = entries.length - toolEntries.length;
   if (entries.length > 0 && toolEntries.length === 0) {
     return {
       summary:
@@ -850,6 +851,9 @@ export function summarizeToolGroup(
         ),
       ),
     );
+  }
+  if (thoughtCount > 0) {
+    labels.push(thoughtCount === 1 ? "Thought once" : `Thought ${thoughtCount} times`);
   }
   const sentenceLabels = labels.map((label, index) =>
     index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1),
