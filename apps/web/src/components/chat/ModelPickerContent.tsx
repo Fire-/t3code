@@ -1,5 +1,6 @@
 import { T, useGT, useLocale, useMessages } from "gt-react";
 import { useLegendListRef } from "~/hooks/useLegendListRef";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
@@ -488,6 +489,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   );
   const serverKeybindings = useAtomValue(primaryServerKeybindingsAtom);
   const keybindings = providedKeybindings ?? serverKeybindings;
+  // Touch screens have no key to press, so the jump labels only crowd the model names.
+  const isCoarsePointer = useMediaQuery({ pointer: "coarse" });
   const [searchHeight, setSearchHeight] = useState(0);
   const toggleFavorite = useToggleEnvironmentModelFavorite(props.environmentId);
 
@@ -880,11 +883,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ),
     ))();
 
-  const modelJumpLabelByKey = modelJumpLabelsByKey(
-    modelJumpModelKeys,
-    keybindings,
-    props.terminalOpen,
-  );
+  const modelJumpLabelByKey = isCoarsePointer
+    ? EMPTY_MODEL_JUMP_LABELS
+    : modelJumpLabelsByKey(modelJumpModelKeys, keybindings, props.terminalOpen);
   const badgedInstanceIds = new Set(
     instanceEntries
       .filter((entry) => shouldShowInstanceBadge(entry, instanceEntries))
@@ -961,7 +962,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         ref={pickerContentRef}
         className={cn(
           "relative flex w-screen max-w-90 flex-row overflow-hidden",
-          props.docked ? "max-sm:h-56 max-sm:w-full max-sm:max-w-none" : "max-h-86.5",
+          props.docked
+            ? "max-sm:min-h-0 max-sm:w-full max-sm:max-w-none max-sm:flex-1"
+            : "max-h-86.5",
         )}
         // Docked, the popup sets the height; a minimum here would overflow short windows.
         style={
