@@ -32,6 +32,7 @@ import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
+import { namedClipboardTarget, writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn } from "~/lib/utils";
 import { relayEnvironmentDiscovery } from "~/state/relay";
 import { useRelayEnvironmentDiscovery, useRetainedRelayEnvironments } from "~/state/environments";
@@ -207,7 +208,11 @@ export function CloudEnvironmentConnectRows({
         ? {
             secondaryActionProps: {
               children: gt("Copy trace ID"),
-              onClick: () => void navigator.clipboard?.writeText(traceId),
+              onClick: () => {
+                void writeTextToClipboard(traceId, namedClipboardTarget("trace ID")).catch(
+                  () => undefined,
+                );
+              },
             },
           }
         : undefined,
