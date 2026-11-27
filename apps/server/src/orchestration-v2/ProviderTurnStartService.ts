@@ -87,6 +87,7 @@ import {
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as TurnTimeLine from "./TurnTimeLine.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -428,6 +429,7 @@ export const layer: Layer.Layer<
     const restoreMissingWorktree = yield* makeRestoreMissingWorktree;
     const worktreeRestore = yield* ThreadWorktreeRestore;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const turnTimeZone = yield* TurnTimeLine.TurnTimeZone;
 
     // Build draining callbacks outside startup scope so they cannot retain full thread history.
     const makeRunControls = (input: {
@@ -1271,14 +1273,35 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
-      const messageText = withMessageSenderNote(
-        providerMessage,
-        projectComposerContextForProvider({
-          text: providerMessage.text,
-          records: providerMessage.context?.records ?? [],
-        }),
+      const previousTimes = projectionStore
+        .getLatestUserMessageAt(input.threadId, providerMessage.createdAt)
+        .pipe(
+          Effect.orElseSucceed(() => undefined),
+          Effect.map((latest) => [
+            latest,
+            ...projection.runs
+              .filter((source) => source.ordinal < run.ordinal)
+              .map((source) => source.completedAt),
+          ]),
+        );
+      const stampPrompt = (text: string) =>
+        TurnTimeLine.stampProviderText({
+          timeZone: turnTimeZone,
+          message: providerMessage,
+          text,
+          previousTimes,
+        });
+      const messageText = yield* stampPrompt(
+        withMessageSenderNote(
+          providerMessage,
+          projectComposerContextForProvider({
+            text: providerMessage.text,
+            records: providerMessage.context?.records ?? [],
+          }),
+        ),
       );
       const slashCommand = isSlashCommandMessage(providerMessage);
+      // Native goal commands go verbatim; handoff history waits a turn.
       const goalDriver =
         session.driver === "codex" ||
         session.driver === "claudeAgent" ||
@@ -2459,7 +2482,9 @@ export const layer: Layer.Layer<
           const prompted = context !== "" || missedAttachments.length > 0;
           // A resume that must be prompted still needs a request, or the agent has nothing to do.
           const requestText =
-            turnInput.resume && prompted && userText === "" ? RESUME_PROMPT : userText;
+            turnInput.resume && prompted && userText === ""
+              ? yield* stampPrompt(RESUME_PROMPT)
+              : userText;
           const text = slashCommand ? userText : withInlineContext(context, requestText);
           const operation =
             turnInput.resume && !prompted

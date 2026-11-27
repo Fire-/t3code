@@ -31,6 +31,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
+import * as TurnTimeLine from "./TurnTimeLine.ts";
 
 const threadId = ThreadId.make("thread:control-reads");
 const providerThreadId = ProviderThreadId.make("provider-thread:control-reads");
@@ -229,6 +230,31 @@ it.effect.each(storageCases)(
       const now = yield* DateTime.now;
       const events = fixtureEvents(now);
       yield* Effect.forEach(events, (event) => store.apply(event), { discard: true });
+      const steer = events.find(
+        (event): event is Extract<OrchestrationV2DomainEvent, { type: "message.updated" }> =>
+          event.type === "message.updated",
+      )!;
+      yield* Effect.forEach(
+        [
+          { id: "message:control-reads-earlier", role: "user", minutes: 2 },
+          { id: "message:control-reads-reply", role: "assistant", minutes: 1 },
+        ] as const,
+        ({ id, role, minutes }) => {
+          const createdAt = DateTime.subtract(now, { minutes });
+          return store.apply({
+            ...steer,
+            id: EventId.make(`control:${id}`),
+            payload: {
+              ...steer.payload,
+              id: MessageId.make(id),
+              role,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+        },
+        { discard: true },
+      );
       if (storage === "sqlite") {
         const sql = yield* SqlClient.SqlClient;
         yield* sql`INSERT INTO orchestration_v2_projection_messages
@@ -334,7 +360,11 @@ it.effect.each(storageCases)(
           messageId,
         });
         yield* reply.respond({ threadId, providerSessionId, requestId, decision: "accept" });
-        assert.deepEqual(calls, ["interrupt", "Use the smaller fix.", "reply"]);
+        assert.deepEqual(calls, [
+          "interrupt",
+          "[01-01 00:00 UTC Δ2m]\nUse the smaller fix.",
+          "reply",
+        ]);
         const wrongSession = ProviderSessionId.make("session:wrong");
         assert.equal(
           (yield* Effect.exit(
@@ -386,7 +416,7 @@ it.effect.each(storageCases)(
         yield* interrupt;
         assert.deepEqual(calls, [
           "interrupt",
-          "Use the smaller fix.",
+          "[01-01 00:00 UTC Δ2m]\nUse the smaller fix.",
           "reply",
           "interrupt",
           "interrupt",
@@ -397,6 +427,7 @@ it.effect.each(storageCases)(
             Layer.provide(
               Layer.mergeAll(layerSessions, layerEvents, McpAppModelContext.layerEmpty),
             ),
+            Layer.provide(Layer.succeed(TurnTimeLine.TurnTimeZone, Effect.succeed("UTC"))),
           ),
         ),
       );
