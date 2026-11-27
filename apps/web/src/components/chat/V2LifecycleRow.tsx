@@ -1,8 +1,9 @@
 import { T, Var, msg, useGT, useMessages } from "gt-react";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
+import ChatMarkdown from "../ChatMarkdown";
 import { AgentElapsed } from "./AgentElapsed";
 import { projectedSubagentsToRuntime } from "@t3tools/client-runtime/state/subagentRuntime";
-import { use, type ReactNode } from "react";
+import { type ReactNode, use, useState } from "react";
 import { useThreadShell, useProject } from "../../state/entities";
 import type { SideThreadOpenIntent } from "@t3tools/client-runtime/side-thread";
 import { SideThreadsOpenContext, useSideThreadTrigger } from "../../hooks/useSideThreadTrigger";
@@ -67,7 +68,8 @@ import { getTriggerDisplayModelName } from "./providerIconUtils";
 import { ProviderInstanceIcon, providerTextColor } from "./ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
-import { subagentResumedSince } from "./V2LifecycleRow.logic";
+import { subagentInlineDetail, subagentResumedSince } from "./V2LifecycleRow.logic";
+import { TimelineRowCtx } from "./timelineRowContext";
 import { Button, InlineButton } from "../ui/button";
 import { T3Wordmark } from "../T3Wordmark";
 
@@ -75,6 +77,8 @@ export type { HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
 
 export function V2LifecycleRow(props: {
   readonly item: OrchestrationV2TurnItem;
+  /** The timeline row this item renders in, which keeps its place when the row expands. */
+  readonly rowId: string;
   readonly environmentId: EnvironmentId;
   readonly resourceSummary?: boolean | undefined;
   readonly runs: ReadonlyArray<HandoffTimelineRun>;
@@ -184,12 +188,14 @@ export function V2LifecycleRow(props: {
         status={item.status}
         driver={item.driver}
         title={formatSubagentDisplayTitle(item.title ?? gt("Subagent"))}
+        prompt={item.prompt}
         result={item.result}
         progress={item.progress}
         startedAt={item.startedAt}
         completedAt={item.completedAt}
         threadId={item.childThreadId}
         remote={item.remoteChild}
+        anchorRowId={props.rowId}
         onOpenThread={props.onOpenThread}
       />
     );
@@ -414,6 +420,7 @@ export function SubagentNotificationLink(props: {
       status={agent.status}
       driver={agent.driver}
       title={formatSubagentDisplayTitle(agent.title ?? gt("Subagent"))}
+      prompt={agent.prompt}
       result={agent.result}
       progress={agent.progress}
       startedAt={agent.startedAt}
@@ -440,6 +447,7 @@ function SubagentTimelineLink(props: {
   readonly origin: OrchestrationV2Subagent["origin"];
   readonly driver: ProviderDriverKind;
   readonly title: string;
+  readonly prompt: string;
   readonly result: string | null;
   readonly progress: string | undefined;
   readonly status: OrchestrationV2TurnItem["status"];
@@ -448,6 +456,7 @@ function SubagentTimelineLink(props: {
   readonly threadId: ThreadId | null;
   /** The thread in a linked environment that runs this task, when it runs there. */
   readonly remote?: OrchestrationV2RemoteTaskChild | undefined;
+  readonly anchorRowId?: string;
   readonly onOpenThread: (
     threadId: ThreadId,
     environmentId?: EnvironmentId,
@@ -459,6 +468,7 @@ function SubagentTimelineLink(props: {
     readonly timestamp: string;
   };
 }) {
+  const ctx = use(TimelineRowCtx);
   const agent = useAtomValue(
     environmentThreadDetails.threadAtom(props.parentRef),
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
@@ -466,6 +476,10 @@ function SubagentTimelineLink(props: {
   const remote = props.remote ?? agent?.remoteChild;
   const gt = useGT();
   const m = useMessages();
+  const detailKey = `subagent-detail:${props.subagentId}`;
+  const [expanded, setExpanded] = useState(() =>
+    ctx.workGroupViewState.expandedEntries.has(detailKey),
+  );
   const threadId = props.threadId;
   // A task in a linked environment opens there, or read-only through this one.
   const remoteOpener = useLinkedThreadOpener(props.parentRef, remote, props.title);
@@ -486,6 +500,18 @@ function SubagentTimelineLink(props: {
   const settled = SETTLED_SUBAGENT_STATUSES.has(status ?? liveStatus);
   const rawDetail = settled ? result || progress : progress || result;
   const detail = subagentCardDetail(rawDetail);
+  const inlineDetail = subagentInlineDetail({
+    hasThread: open !== null,
+    prompt: agent?.prompt ?? props.prompt,
+    report: rawDetail,
+  });
+  const toggleDetail = () => {
+    const next = !expanded;
+    ctx.onToggleWorkEntry(props.anchorRowId ?? detailKey, !next);
+    if (next) ctx.workGroupViewState.expandedEntries.add(detailKey);
+    else ctx.workGroupViewState.expandedEntries.delete(detailKey);
+    setExpanded(next);
+  };
   const failed = status === "failed";
   const timing = {
     status: liveStatus,
@@ -537,54 +563,105 @@ function SubagentTimelineLink(props: {
       <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
         {props.event ? props.event.timestamp : <SubagentElapsed agent={timing} />}
       </span>
-      {open !== null ? (
+      {open !== null || inlineDetail !== null ? (
         <ChevronRightIcon
           aria-hidden
-          className="size-3.5 shrink-0 text-muted-foreground/60 transition-colors group-hover/subagent:text-foreground"
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground/60 transition-[color,transform] group-hover/subagent:text-foreground",
+            open === null && expanded && "rotate-90",
+          )}
         />
       ) : null}
     </>
   );
   const className =
     "group/subagent flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-1.5 text-left";
+  const interactiveClassName = cn(
+    className,
+    "cursor-pointer transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+  );
   return (
-    <Tooltip>
-      <TooltipTrigger
-        delay={200}
-        render={
-          open === null ? (
-            <div data-v2-item-type="subagent" aria-description={statusLabel} className={className}>
-              {content}
-            </div>
-          ) : (
-            <button
-              type="button"
-              data-v2-item-type="subagent"
-              aria-label={gt("Open {title}", { title: props.title })}
-              aria-description={statusLabel}
-              {...trigger(open, { panel })}
-              className={cn(
-                className,
-                "cursor-pointer transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-              )}
-            >
-              {content}
-            </button>
-          )
-        }
-      />
-      <ThreadHoverCardPopup>
-        <SubagentTimelineTooltip
-          {...props}
-          elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
-          model={agent?.model ?? null}
-          modelSelection={agent?.modelSelection}
-          status={liveStatus}
-          result={agent?.result ?? props.result}
-          progress={agent?.progress ?? props.progress}
+    <div>
+      <Tooltip>
+        <TooltipTrigger
+          delay={200}
+          render={
+            open !== null ? (
+              <button
+                type="button"
+                data-v2-item-type="subagent"
+                aria-label={gt("Open {title}", { title: props.title })}
+                aria-description={statusLabel}
+                {...trigger(open, { panel })}
+                className={interactiveClassName}
+              >
+                {content}
+              </button>
+            ) : inlineDetail !== null ? (
+              <button
+                type="button"
+                data-v2-item-type="subagent"
+                aria-expanded={expanded}
+                aria-description={statusLabel}
+                onClick={toggleDetail}
+                className={interactiveClassName}
+              >
+                {content}
+              </button>
+            ) : (
+              <div
+                data-v2-item-type="subagent"
+                aria-description={statusLabel}
+                className={className}
+              >
+                {content}
+              </div>
+            )
+          }
         />
-      </ThreadHoverCardPopup>
-    </Tooltip>
+        <ThreadHoverCardPopup>
+          <SubagentTimelineTooltip
+            {...props}
+            elapsed={
+              agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null
+            }
+            model={agent?.model ?? null}
+            modelSelection={agent?.modelSelection}
+            status={liveStatus}
+            result={agent?.result ?? props.result}
+            progress={agent?.progress ?? props.progress}
+          />
+        </ThreadHoverCardPopup>
+      </Tooltip>
+      {expanded && inlineDetail !== null ? (
+        <div className="ms-10 me-2 mt-1 mb-2 space-y-2 text-xs">
+          {inlineDetail.prompt !== null ? (
+            <div>
+              <p className="mb-1 text-3xs font-medium text-muted-foreground">
+                <T>Prompt</T>
+              </p>
+              <p className="max-h-40 overflow-auto rounded-md border border-border/45 bg-muted/15 p-2 whitespace-pre-wrap break-words text-muted-foreground select-text">
+                {inlineDetail.prompt}
+              </p>
+            </div>
+          ) : null}
+          {inlineDetail.report !== null ? (
+            <div>
+              <p className="mb-1 text-3xs font-medium text-muted-foreground">
+                <T>Report</T>
+              </p>
+              <ChatMarkdown
+                text={inlineDetail.report}
+                cwd={ctx.markdownCwd}
+                threadRef={ctx.threadRef ?? undefined}
+                skills={ctx.skills}
+                lineBreaks
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
