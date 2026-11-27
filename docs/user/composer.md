@@ -77,7 +77,7 @@ Mobile keeps local copies of draft attachments so you can preview them and queue
 
 ## Quote an assistant response
 
-- **Web and desktop**: Select text in an assistant message and click **Cite in composer**. Click the pencil on the chip to add or edit a comment; click the chip to jump back to the source.
+- **Web and desktop**: Select text in an assistant message and click **Cite in composer**. Click the pencil on the chip to add or edit a comment; click the chip to jump back to the source. If the quoted text leaves the timeline while you type, the comment box stays open and moves to the chip. In a file's rendered preview, select text and choose **Cite**; with touch, the Cite button docks near the bottom of the preview instead of sitting on the selection.
 - **Mobile**: Long-press an assistant response, select text, and tap **Cite**. Tap a quote chip to edit its comment, remove it, or jump to the source message.
 
 Quoted text and comments count toward the message length limit and are preserved across copy/paste and [stashed prompts](#prompt-stash).
@@ -146,7 +146,7 @@ With Codex, Claude, and OpenCode 2.2.5+, send `/goal <criteria>` (for example, `
 
 ## Context in your message
 
-Attached context—files, terminal excerpts, diff/file review comments, preview annotations, pull requests, and threads—appears as inline chips at your cursor. Click a chip to inspect or open its source; copy/paste and [Prompt stash](#prompt-stash) preserve chips across drafts.
+Attached context—files, terminal excerpts, diff/file review comments, preview annotations, pull requests, and threads—appears as inline chips at your cursor. New chips go in at the caret, or right after a chip you last tapped. Click a chip to inspect or open its source; copy/paste and [Prompt stash](#prompt-stash) preserve chips across drafts.
 
 - **Pull requests (`#`)**: On web and desktop, type `#` to browse recent PRs in the current repository (linked PRs appear first), type digits to match by number, or type a word to search by text.
 - **Threads (`@`)**: Type `@` and part of a thread title to reference a thread on the same server (or on a linked machine when Linked environments is enabled). You can also drag threads from the sidebar onto the composer, or paste a copied thread link. The prompt carries only a reference—the agent reads the thread on demand. Dropping a thread from an unlinked environment attaches a snapshot transcript file instead.
