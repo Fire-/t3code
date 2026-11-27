@@ -98,6 +98,26 @@ describe("V2 client presentation", () => {
     ).toBeNull();
   });
 
+  it("presents a provider's child thread as working while its runless root is live", () => {
+    const startedAt = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+    const child = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: null,
+      activeProviderThreadId: null,
+      activeRunId: null,
+      status: "idle",
+      activityRunStatus: "running",
+      activityRunStartedAt: startedAt,
+      pendingBackgroundTasks: [],
+    });
+    expect(child.runtime).toMatchObject({
+      status: "running",
+      activeRunId: null,
+      activityStartedAt: DateTime.formatIso(startedAt),
+    });
+    expect(isThreadWorking(child)).toBe(true);
+  });
+
   it("keeps an imported thread that never ran out of Working", () => {
     const imported = presentThreadShell(environmentId, {
       ...v2ThreadShell,

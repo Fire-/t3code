@@ -1297,7 +1297,22 @@ type ShellThreadRow = {
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
   readonly has_actionable_proposed_plan: number;
+  readonly live_runless_root_status: string | null;
+  readonly live_runless_root_started_at: string | null;
 };
+
+/**
+ * A provider's child thread, such as a native subagent's, works under a root node of its own and
+ * never gets a run. While no run is active, a live root of that kind is the thread's activity.
+ */
+function withRunlessRootActivity(row: ShellThreadRow): ShellThreadRow {
+  if (row.activity_run_status !== null || row.live_runless_root_status === null) return row;
+  return {
+    ...row,
+    activity_run_status: row.live_runless_root_status,
+    activity_run_started_at: row.live_runless_root_started_at,
+  };
+}
 
 type ShellRunRow = {
   readonly thread_id: string;
@@ -1875,7 +1890,31 @@ const linkCardStillAsks = (
   latestUserAuthoredMessageAt === null ||
   !DateTime.isGreaterThan(latestUserAuthoredMessageAt, item.startedAt ?? item.updatedAt);
 
+/** Mirrors `withRunlessRootActivity` for a shell built from the whole projection. */
 export function threadShellFromProjection(
+  projection: OrchestrationV2ThreadProjection,
+): OrchestrationV2ThreadShell {
+  const shell = threadShellFromProjectionRuns(projection);
+  if ((shell.activityRunStatus ?? null) !== null) return shell;
+  const root = projection.nodes
+    .filter(
+      (node): node is typeof node & { readonly status: "running" | "waiting" } =>
+        node.runId === null &&
+        node.kind === "root_turn" &&
+        (node.status === "running" || node.status === "waiting"),
+    )
+    .toSorted(
+      (left, right) =>
+        (right.startedAt === null ? 0 : DateTime.toEpochMillis(right.startedAt)) -
+          (left.startedAt === null ? 0 : DateTime.toEpochMillis(left.startedAt)) ||
+        right.id.localeCompare(left.id),
+    )[0];
+  return root === undefined
+    ? shell
+    : { ...shell, activityRunStatus: root.status, activityRunStartedAt: root.startedAt };
+}
+
+function threadShellFromProjectionRuns(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell {
   const providerSession =
@@ -8535,6 +8574,28 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               active.run_id AS active_run_id,
               active.status AS active_run_status,
               (
+                SELECT root.status
+                FROM orchestration_v2_projection_nodes root ${LIVE_NODES_INDEX}
+                WHERE root.thread_id = t.thread_id
+                  AND root.status IN ('pending', 'starting', 'running', 'waiting')
+                  AND root.status <> 'pending'
+                  AND root.run_id IS NULL
+                  AND root.kind = 'root_turn'
+                ORDER BY root.started_at DESC, root.node_id DESC
+                LIMIT 1
+              ) AS live_runless_root_status,
+              (
+                SELECT root.started_at
+                FROM orchestration_v2_projection_nodes root ${LIVE_NODES_INDEX}
+                WHERE root.thread_id = t.thread_id
+                  AND root.status IN ('pending', 'starting', 'running', 'waiting')
+                  AND root.status <> 'pending'
+                  AND root.run_id IS NULL
+                  AND root.kind = 'root_turn'
+                ORDER BY root.started_at DESC, root.node_id DESC
+                LIMIT 1
+              ) AS live_runless_root_started_at,
+              (
                 SELECT r.status
                 -- Read active runs by status. Walking the ordinal index to skip this sort
                 -- reads every run of a thread with none active.
@@ -9206,13 +9267,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         >;
       }) {
         const {
-          row,
           runsByThreadId,
           itemCountsByThreadId,
           shellItemCountsByThreadId,
           providerThreadsByThreadId,
           pendingTurnItemsByThreadId,
         } = input;
+        const row = withRunlessRootActivity(input.row);
         const thread = yield* decodeThreadPayload(row.payload_json);
         const latestUserAuthoredMessageAt =
           row.latest_user_authored_message_at === null
@@ -9699,6 +9760,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             t.thread_id IN (
               SELECT r.thread_id FROM orchestration_v2_projection_runs r
               WHERE r.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+            )
+            OR t.thread_id IN (
+              SELECT root.thread_id FROM orchestration_v2_projection_nodes root ${LIVE_NODES_INDEX}
+              WHERE root.status IN ('pending', 'starting', 'running', 'waiting')
+                AND root.run_id IS NULL
+                AND root.kind = 'root_turn'
             )
             OR t.thread_id IN (
               SELECT request.thread_id FROM orchestration_v2_projection_runtime_requests request
