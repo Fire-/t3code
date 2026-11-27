@@ -2216,8 +2216,9 @@ describe("PrimeAdapterV2", () => {
           nativeContextEstimate: 307_543,
           modelContextWindow: runtime.getModelContextWindow?.(modelSelection(model)),
         });
-      assert.equal(budget("default"), 16_000);
-      assert.equal(budget("anthropic/large"), 16_000);
+      // The token cap is four bytes per token in the byte budget.
+      assert.equal(budget("default"), 64_000);
+      assert.equal(budget("anthropic/large"), 64_000);
       assert.equal(runtime.getModelContextWindow?.(modelSelection("anthropic/small")), 32_000);
       assert.equal(budget("anthropic/small"), 0);
       assert.isUndefined(runtime.getModelContextWindow?.(modelSelection("anthropic/unknown")));
