@@ -86,6 +86,19 @@ describe("subagent shell events", () => {
     ).toBe(true);
     expect(subagents.has("new-child")).toBe(true);
   });
+
+  it("keeps a subagent's runless root node updates, which start and end its activity", () => {
+    const subagents = new Set(["child"]);
+    const node = (runId: string | null, kind: string) =>
+      ({
+        event: { threadId: "child", type: "node.updated", payload: { runId, kind } },
+      }) as ApplicationStoredEvent;
+    expect(shouldPublishShellApplicationEvent(node(null, "root_turn"), subagents)).toBe(true);
+    expect(shouldPublishShellApplicationEvent(node("run", "root_turn"), subagents)).toBe(false);
+    expect(shouldPublishShellApplicationEvent(node(null, "assistant_message"), subagents)).toBe(
+      false,
+    );
+  });
 });
 
 it.effect("coalesces a slow shell subscriber by identity and location in sequence order", () =>

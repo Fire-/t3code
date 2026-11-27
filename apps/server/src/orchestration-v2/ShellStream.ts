@@ -551,6 +551,14 @@ export function shouldPublishShellApplicationEvent(
   if (event.type === "turn-item.updated" && turnItemCanChangeUserWait(event.payload)) {
     return true;
   }
+  // A provider's child thread works under a runless root node, which is its shell activity.
+  if (
+    event.type === "node.updated" &&
+    event.payload.runId === null &&
+    event.payload.kind === "root_turn"
+  ) {
+    return true;
+  }
   return !(
     subagentThreadIds.has(event.threadId) &&
     (event.type === "node.updated" ||
