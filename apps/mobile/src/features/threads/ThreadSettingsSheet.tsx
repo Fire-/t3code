@@ -100,6 +100,7 @@ import { threadAllowsProviderSwitch } from "../../state/thread-provider-switchin
 import { environmentServerConfigsAtom, serverEnvironment } from "../../state/server";
 import { mobilePreferencesAtom } from "../../state/preferences";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { threadEnvironment } from "../../state/threads";
 import { useNewTaskFlow } from "./new-task-flow-provider";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import {
@@ -125,6 +126,7 @@ import {
   visibleCatalogModels,
 } from "./thread-settings-sheet-state";
 import { formatProviderUpdateRequiredNotice } from "@t3tools/client-runtime/providerUpdateRequiredModels";
+import { threadSwitchesRuntimeModeLive } from "@t3tools/client-runtime/state/thread-workflows";
 import type { MessageResolver } from "../../i18n/messages";
 
 const PRIMARY_PROVIDER_DRIVERS: ReadonlySet<string> = new Set([
@@ -1522,6 +1524,9 @@ export function ExistingThreadSettingsRouteScreen({
   const draftSettings = useComposerDraftSettings(draftKey);
   const threadDraftSettings = useComposerDraftSettings(threadKey);
   const prompt = useComposerDraft(draftKey).text;
+  const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
+    reportFailure: false,
+  });
 
   if (!selectedThread) {
     return <View className="flex-1 bg-sheet" />;
@@ -1583,7 +1588,15 @@ export function ExistingThreadSettingsRouteScreen({
         updateModelSelection({ ...modelSelection, options });
       }}
       runtimeMode={threadDraftSettings.runtimeMode ?? selectedThread.runtimeMode}
-      onUpdateRuntimeMode={(runtimeMode) => updateComposerDraftSettings(threadKey, { runtimeMode })}
+      onUpdateRuntimeMode={(runtimeMode) => {
+        updateComposerDraftSettings(threadKey, { runtimeMode });
+        if (threadSwitchesRuntimeModeLive(structure?.projection)) {
+          void setThreadRuntimeMode({
+            environmentId: selectedThread.environmentId,
+            input: { threadId: selectedThread.id, runtimeMode },
+          });
+        }
+      }}
       onClose={() => navigation.goBack()}
     />
   );

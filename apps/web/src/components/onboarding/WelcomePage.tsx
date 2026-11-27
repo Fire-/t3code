@@ -1,6 +1,7 @@
 import { useAuth } from "@clerk/react";
 import { useAtomValue } from "@effect/atom-react";
 import type {
+  AgentSessionImportResult,
   AgentSessionProjectCandidate,
   EnvironmentId,
   ProjectId,
@@ -114,6 +115,7 @@ import { SidebarInset } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { cn } from "../../lib/utils";
+import { summarizeImport, type ImportSummary } from "./importSummary";
 import { formatRelativeTime } from "../../timestampFormat";
 import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 
@@ -183,11 +185,7 @@ export function WelcomePage({
   // Starting before the project list loads keeps saved picks, such as an import a quit cut short.
   const keepChoicesRef = useRef(false);
   const completionErrorToastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
-  const finish = (
-    projectRef?: ScopedProjectRef,
-    importWarning?: string,
-    importedThreadCount = 0,
-  ) => {
+  const finish = (projectRef?: ScopedProjectRef, importSummary?: ImportSummary) => {
     if (finishingPromiseRef.current !== null) return finishingPromiseRef.current;
     if (completionErrorToastIdRef.current !== null) {
       toastManager.close(completionErrorToastIdRef.current);
@@ -205,20 +203,26 @@ export function WelcomePage({
         holdPageRef.current = false;
         await onDone(projectRef);
         if (!keepChoicesRef.current) setImportSelection(null);
-        if (importWarning) {
+        const importedThreadCount = importSummary?.importedThreadCount ?? 0;
+        const importNote = importSummary?.note ?? "";
+        if (importSummary?.warning) {
           toastManager.add({
             type: "warning",
             title: gt("Some history was not imported"),
-            description: importWarning,
+            description: importSummary.warning,
             timeout: 0,
           });
-        } else if (importedThreadCount > 0) {
+        } else if (importedThreadCount > 0 || importNote !== "") {
           toastManager.add({
-            type: "success",
-            title: gt(
-              "{count, plural, one {Imported {count} thread} other {Imported {count} threads}}",
-              { count: importedThreadCount },
-            ),
+            type: importedThreadCount > 0 ? "success" : "info",
+            title:
+              importedThreadCount > 0
+                ? gt(
+                    "{count, plural, one {Imported {count} thread} other {Imported {count} threads}}",
+                    { count: importedThreadCount },
+                  )
+                : gt("No threads to import"),
+            ...(importNote === "" ? {} : { description: importNote }),
           });
         }
         return true;
@@ -762,7 +766,7 @@ function AgentsSection({
           onOpenChange={setAddingProvider}
           onCreated={(_instanceId, driver) => {
             void refreshProviders({ environmentId, input: {} });
-            // A new Claude Code, Codex, or Pi instance can bring more history to import.
+            // A new Claude Code, Codex, Pi, or Droid instance can bring more history to import.
             if (isImportSource(driver)) onImportSourceEnabled();
           }}
         />
@@ -1491,15 +1495,13 @@ function useProjectImport({
   readonly holdPageRef: { current: boolean };
   readonly onDone: (
     projectRef?: ScopedProjectRef,
-    importWarning?: string,
-    importedThreadCount?: number,
+    importSummary?: ImportSummary,
   ) => Promise<boolean>;
 }) {
   const writableEnvironments = useEnvironmentsWithScope(scans, AuthOrchestrationOperateScope);
-  const gt = useGT();
   const createProject = useAtomCommand(projectEnvironment.create, { reportFailure: false });
   const importThreads = useAtomCommand(agentSessionImport, { reportFailure: false });
-  const importWarningRef = useRef("");
+  const importSummaryRef = useRef<ImportSummary | undefined>(undefined);
   // Per project, so a retry that skips finished projects still counts their threads.
   const importedThreadsRef = useRef(new Map<string, number>());
   const importedProjectsRef = useRef(new Map<string, ScopedProjectRef>());
@@ -1572,7 +1574,7 @@ function useProjectImport({
     // Busy until setup is saved, so Start cannot run the import again meanwhile.
     setIsImporting(true);
     if (projectRef === undefined) {
-      void onDone(undefined, importWarningRef.current, importedThreadTotal()).then((completed) => {
+      void onDone(undefined, importSummaryRef.current).then((completed) => {
         if (!completed) setIsImporting(false);
       });
       return;
@@ -1591,7 +1593,7 @@ function useProjectImport({
           holdPageRef.current = false;
           return;
         }
-        const completed = await onDone(landing, importWarningRef.current, importedThreadTotal());
+        const completed = await onDone(landing, importSummaryRef.current);
         if (!completed) setIsImporting(false);
       });
   };
@@ -1609,7 +1611,7 @@ function useProjectImport({
       return;
     }
     setIsImporting(true);
-    importWarningRef.current = "";
+    importSummaryRef.current = undefined;
     lastImportSelectionRef.current = selection.map((candidate) => candidate.key);
     const importGeneration = importGenerationRef.current;
     const importedThreads = importedThreadsRef.current;
@@ -1619,7 +1621,7 @@ function useProjectImport({
       importedProjects.size > 0
         ? selection.filter((candidate) => importedProjects.has(candidate.key)).length
         : 0;
-    let skippedThreadCount = 0;
+    const threadImportResults: Array<AgentSessionImportResult> = [];
     const refreshEnvironments = new Set<EnvironmentId>();
     // Resolves false when the run stopped early: a newer run, an unmount, or lost access.
     const importEach = async () => {
@@ -1678,7 +1680,7 @@ function useProjectImport({
             candidate.key,
             (importedThreads.get(candidate.key) ?? 0) + threadImportResult.value.importedCount,
           );
-          skippedThreadCount += threadImportResult.value.skippedCount;
+          threadImportResults.push(threadImportResult.value);
           if (threadImportResult.value.importedCount > 0) {
             projectsWithImportedHistoryRef.current.set(
               candidate.key,
@@ -1705,30 +1707,11 @@ function useProjectImport({
       if (refreshEnvironments.has(scan.environmentId)) scan.refresh();
     }
     setIsImporting(false);
-    const importedThreadCount = importedThreadTotal();
-    if (importedProjectsCount < selection.length) {
-      if (importedThreadCount > 0 && skippedThreadCount > 0) {
-        importWarningRef.current = `${gt(
-          "{count, plural, one {Imported {count} thread.} other {Imported {count} threads.}}",
-          { count: importedThreadCount },
-        )} ${gt(
-          "{count, plural, one {{count} thread could not be imported.} other {{count} threads could not be imported.}}",
-          { count: skippedThreadCount },
-        )}`;
-      } else if (skippedThreadCount > 0) {
-        importWarningRef.current = gt(
-          "{count, plural, one {{count} thread could not be imported.} other {{count} threads could not be imported.}}",
-          { count: skippedThreadCount },
-        );
-      } else if (importedThreadCount > 0) {
-        importWarningRef.current = gt(
-          "{count, plural, one {Imported {count} thread. Some thread history could not be imported.} other {Imported {count} threads. Some thread history could not be imported.}}",
-          { count: importedThreadCount },
-        );
-      } else {
-        importWarningRef.current = gt("Could not import thread history.");
-      }
-    }
+    importSummaryRef.current = summarizeImport(
+      threadImportResults,
+      importedProjectsCount >= selection.length,
+      importedThreadTotal(),
+    );
     finishAfterImport();
   };
 
@@ -1948,6 +1931,7 @@ const IMPORT_SOURCE_NAMES: Record<AgentSessionSource, string> = {
   claudeAgent: "Claude Code",
   codex: "Codex",
   pi: "Pi",
+  droid: "Droid",
 };
 function useImportSourcesLabel() {
   return new Intl.ListFormat(useLocale(), { type: "conjunction" }).format(
@@ -1975,7 +1959,7 @@ function ImportRowMeta({
         ? gt("now", { $context: "relative time" })
         : relative.value;
   return (
-    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
+    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
       {AgentSessionSource.literals.map((source) => (
         <span key={source} className="flex size-4 items-center justify-center">
           {sources?.includes(source) ? (
