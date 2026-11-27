@@ -31,6 +31,7 @@ const DRIVERS_WITH_REPLAY_FIXTURE_FILES = new Set([
   "claudeAgent",
   "codex",
   "cursor",
+  "droid",
   "fx",
   "grok",
   "kiro",
@@ -227,6 +228,10 @@ export function itRunsReplayFixtures<E>(
         .map((provider) => [fixture.name, provider.driver, fixture, provider] as const),
     ),
   )("runs %s/%s through OrchestratorV2 using deterministic replay", ([, , fixture, provider]) =>
-    run({ fixtureName: fixture.name, buildInput: fixture.buildInput, driver: provider }),
+    run({
+      fixtureName: fixture.name,
+      buildInput: provider.buildInput ?? fixture.buildInput,
+      driver: provider,
+    }),
   );
 }

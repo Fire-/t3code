@@ -53,6 +53,12 @@ export function createTranscriptJsonReader(
     readonly maxDepth?: number;
     // Reports each selected top-level string field as soon as it ends, before the record does.
     readonly onTopLevelString?: (key: string, value: string) => void;
+    /**
+     * Strings at paths this returns a number for keep only their last `n` characters (`Infinity`
+     * keeps all), and reserve what they keep rather than a token's cost per chunk: escapes split
+     * a string into many chunks, so multi-line text otherwise reserves several times its size.
+     */
+    readonly stringLimit?: (path: JsonPath) => number | undefined;
   },
 ) {
   // 3.6.0 omits the synchronous tokenizer from types; parser() adds an unnecessary async generator.
@@ -68,8 +74,17 @@ export function createTranscriptJsonReader(
   let depth = 0;
   let complete = false;
   let malformed = false;
+  let stringLimit: number | undefined;
 
   const assemble = (token: Token) => {
+    if (token.name === "stringChunk" && stringLimit !== undefined) {
+      const kept = Math.min(value.length + token.value.length, stringLimit);
+      reserve((kept - Math.min(value.length, stringLimit)) * 2);
+      value += token.value;
+      // Trimming at twice the limit keeps each chunk from copying the whole kept tail.
+      if (value.length > stringLimit * 2) value = value.slice(-stringLimit);
+      return;
+    }
     reserve(
       64 + ("value" in token && typeof token.value === "string" ? token.value.length * 2 : 0),
     );
@@ -83,7 +98,13 @@ export function createTranscriptJsonReader(
         value += token.value;
         break;
       case "endString":
-        assembler.consume({ name: "stringValue", value });
+        assembler.consume({
+          name: "stringValue",
+          value:
+            stringLimit !== undefined && value.length > stringLimit
+              ? value.slice(-stringLimit)
+              : value,
+        });
         value = "";
         break;
       case "endNumber":
@@ -131,10 +152,16 @@ export function createTranscriptJsonReader(
         endValue();
         return;
       case "startString":
-      case "startNumber":
-        selectedValue = startValue().selected;
+      case "startNumber": {
+        const frame = startValue();
+        selectedValue = frame.selected;
+        stringLimit =
+          selectedValue && token.name === "startString"
+            ? options?.stringLimit?.(frame.path)
+            : undefined;
         if (selectedValue) assemble(token);
         return;
+      }
       case "endString":
       case "endNumber":
         if (selectedValue) {

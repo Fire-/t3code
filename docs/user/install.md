@@ -80,19 +80,20 @@ Install from the [App Store](https://apps.apple.com/us/app/t3-code-remote-claude
 
 Open **Settings → Providers** (web or desktop), select the environment, and enable the providers you use. Installation and sign-in always happen on the **environment's machine**.
 
-| Provider         | Install and authenticate                                                                                                 | Guide                                     |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------- |
-| **Codex**        | Connect with ChatGPT in Settings, or install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`. | [Codex](./providers-codex.md)             |
-| **Claude**       | Install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`.                               | [Claude](./providers-claude.md)           |
-| **Cursor**       | Sign in in Settings or install [Cursor CLI](https://cursor.com/cli) and run `agent login`.                               | [Cursor](./cursor.md)                     |
-| **Grok Build**   | Install [Grok Build CLI](https://x.ai/cli) and run `grok login`.                                                         | [Grok](./providers-grok.md)               |
-| **Antigravity**  | Install managed runtime and sign in with Google in Settings.                                                             | [Antigravity](./providers-antigravity.md) |
-| **OpenCode**     | Install [OpenCode](https://opencode.ai) and run `opencode auth login`.                                                   | [OpenCode](./providers-opencode.md)       |
-| **Kiro**         | Install [Kiro CLI](https://kiro.dev/docs/cli/) and run `kiro-cli login`.                                                 | [Kiro](./providers-kiro.md)               |
-| **Pi**           | Install [Pi](./providers-pi.md) (Node.js 22.19+) and run `pi` → `/login`.                                                | [Pi](./providers-pi.md)                   |
-| **Muse Code**    | Install [Muse Code](https://dev.meta.ai/docs/muse-code) and run `muse login`.                                            | [Muse Code](./providers-muse.md)          |
-| **fx**           | Install [fx](https://fx.sh) and run `fx login`.                                                                          | [fx](./providers-fx.md)                   |
-| **ACP Registry** | Add GitHub Copilot and other agents in **Settings → Providers → Add provider → Show more**.                              | [ACP](./providers-acp.md)                 |
+| Provider         | Install and authenticate                                                                                                                       | Guide                                     |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| **Codex**        | Connect with ChatGPT in Settings, or install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`.                       | [Codex](./providers-codex.md)             |
+| **Claude**       | Install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`.                                                     | [Claude](./providers-claude.md)           |
+| **Cursor**       | Sign in in Settings or install [Cursor CLI](https://cursor.com/cli) and run `agent login`.                                                     | [Cursor](./cursor.md)                     |
+| **Grok Build**   | Install [Grok Build CLI](https://x.ai/cli) and run `grok login`.                                                                               | [Grok](./providers-grok.md)               |
+| **Antigravity**  | Install managed runtime and sign in with Google in Settings.                                                                                   | [Antigravity](./providers-antigravity.md) |
+| **OpenCode**     | Install [OpenCode](https://opencode.ai) and run `opencode auth login`.                                                                         | [OpenCode](./providers-opencode.md)       |
+| **Kiro**         | Install [Kiro CLI](https://kiro.dev/docs/cli/) and run `kiro-cli login`.                                                                       | [Kiro](./providers-kiro.md)               |
+| **Pi**           | Install [Pi](./providers-pi.md) (Node.js 22.19+) and run `pi` → `/login`.                                                                      | [Pi](./providers-pi.md)                   |
+| **Muse Code**    | Install [Muse Code](https://dev.meta.ai/docs/muse-code) and run `muse login`.                                                                  | [Muse Code](./providers-muse.md)          |
+| **fx**           | Install [fx](https://fx.sh) and run `fx login`.                                                                                                | [fx](./providers-fx.md)                   |
+| **ACP Registry** | Add GitHub Copilot and other agents in **Settings → Providers → Add provider → Show more**.                                                    | [ACP](./providers-acp.md)                 |
+| **Droid**        | Install [Droid](./providers-droid.md#set-up-droid), then run `droid` and sign in, or set `FACTORY_API_KEY`. Enable it in Settings → Providers. | [Droid](./providers-droid.md)             |
 
 - **Binary path**: If a CLI isn't on the server's `PATH` (common with version managers), set **Binary path** in the provider's settings.
 - **Updates**: Click **Update now** on outdated provider cards (supports Homebrew, mise `latest`, npm/pnpm/Yarn/Bun/Volta/Vite+, or the CLI's own updater; update Nix, Chocolatey, or pinned mise installs manually).
