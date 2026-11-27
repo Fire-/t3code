@@ -13,6 +13,7 @@ import { useGT } from "gt-react";
 import { FolderIcon } from "lucide-react";
 
 import { contextMenuSourceOf, openContextMenuFromKeyboard } from "../../contextMenuSource";
+import { namedClipboardTarget, writeTextToClipboard } from "../../hooks/useCopyToClipboard";
 import { readLocalApi } from "../../localApi";
 import { cn } from "../../lib/utils";
 import { shouldOpenMarkdownFileLinkInEditor } from "../../markdown-links";
@@ -215,27 +216,22 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
       title === "Relative path"
         ? gt("Failed to copy relative path")
         : gt("Failed to copy full path");
-    if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: failureTitle,
-          description: gt("Clipboard API unavailable."),
-        }),
-      );
-      return;
-    }
-
     const value = resolveValue().then((text) => formatFilePathForClipboard(text, targetPath));
     // Start the write before workspace lookup finishes so Safari retains the user gesture.
+    // Plain-HTTP remote origins have no async Clipboard API; writeTextToClipboard
+    // falls back to execCommand there.
     const write =
-      typeof navigator.clipboard.write === "function" && typeof ClipboardItem !== "undefined"
+      typeof navigator !== "undefined" &&
+      typeof navigator.clipboard?.write === "function" &&
+      typeof ClipboardItem !== "undefined"
         ? navigator.clipboard.write([
             new ClipboardItem({
               "text/plain": value.then((text) => new Blob([text], { type: "text/plain" })),
             }),
           ])
-        : value.then((text) => navigator.clipboard.writeText(text));
+        : value.then((text) =>
+            writeTextToClipboard(text, namedClipboardTarget(title.toLowerCase())),
+          );
     void Promise.all([write, value]).catch((error) => {
       reportMarkdownActionFailure(
         { operation: "copy-file-path", target: targetPath, copyTarget: title },
