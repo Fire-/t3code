@@ -94,6 +94,7 @@ Open **Settings → Providers** (web or desktop), select the environment, and en
 | **fx**           | Install [fx](https://fx.sh) and run `fx login`.                                                                                                | [fx](./providers-fx.md)                   |
 | **ACP Registry** | Add GitHub Copilot and other agents in **Settings → Providers → Add provider → Show more**.                                                    | [ACP](./providers-acp.md)                 |
 | **Droid**        | Install [Droid](./providers-droid.md#set-up-droid), then run `droid` and sign in, or set `FACTORY_API_KEY`. Enable it in Settings → Providers. | [Droid](./providers-droid.md)             |
+| **Prime**        | Install [Prime](./providers-prime.md#set-up-prime), then run `prime-agent` and `/login`, or set `PRIME_API_KEY`.                               | [Prime](./providers-prime.md)             |
 
 - **Binary path**: If a CLI isn't on the server's `PATH` (common with version managers), set **Binary path** in the provider's settings.
 - **Updates**: Click **Update now** on outdated provider cards (supports Homebrew, mise `latest`, npm/pnpm/Yarn/Bun/Volta/Vite+, or the CLI's own updater; update Nix, Chocolatey, or pinned mise installs manually).
