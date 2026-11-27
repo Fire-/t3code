@@ -1431,6 +1431,7 @@ it.effect.each(["complete", "stop-before-end"] as const)(
           text: "late steer",
           attachments: [],
           modelSelection: composerSelection,
+          timeZone: "Asia/Tokyo",
           dispatchMode: { type: "steer_active", targetRunId: first.runId },
           createdBy: "user",
           creationSource: "web",
@@ -1518,6 +1519,10 @@ it.effect.each(["complete", "stop-before-end"] as const)(
               .filter((item) => item.runId === first.runId)
               .map((item) => item.ordinal),
           ),
+        );
+        assert.equal(
+          projection.messages.find((message) => message.id === "message:steer")?.timeZone,
+          "Asia/Tokyo",
         );
       }).pipe(Effect.provide(layer));
     }),
@@ -2986,6 +2991,7 @@ it.effect("steers a promoted queued message with the selection it was queued wit
         text: "queued",
         attachments: [],
         modelSelection: composerSelection,
+        timeZone: "Asia/Tokyo",
         dispatchMode: { type: "queue_after_active" },
         createdBy: "user",
         creationSource: "web",
@@ -3005,6 +3011,10 @@ it.effect("steers a promoted queued message with the selection it was queued wit
       const projection = yield* orchestrator.getThreadProjection(threadId);
       assert.deepEqual(steered, ["queued"]);
       assert.deepEqual(projection.thread.modelSelection, composerSelection);
+      assert.equal(
+        projection.messages.find((message) => message.id === "message:queued")?.timeZone,
+        "Asia/Tokyo",
+      );
     }).pipe(Effect.provide(layer));
   }),
 );
