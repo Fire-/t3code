@@ -37,6 +37,7 @@ import {
   useThreadRecentHistory,
 } from "~/browserHistoryStore";
 import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
+import { namedClipboardTarget, writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
 import { readComposerImageBytes } from "../chat/composerAttachmentFiles";
 import { ensureLocalApi } from "~/localApi";
@@ -589,21 +590,11 @@ export function PreviewView({
           let toastId: ReturnType<typeof toastManager.add>;
 
           const copyPath = () => {
-            if (!navigator.clipboard?.writeText) {
-              toastManager.update(
-                toastId,
-                stackedThreadToast({
-                  type: "error",
-                  title: gt("Unable to copy recording path"),
-                  description: gt("Clipboard API unavailable."),
-                  actionProps: revealAction,
-                }),
-              );
-              return;
-            }
-
-            void navigator.clipboard.writeText(artifact.path).then(
-              () => {
+            // writeTextToClipboard falls back to execCommand so remote pages
+            // served over plain HTTP (LAN/tailnet origins) can copy.
+            void writeTextToClipboard(artifact.path, namedClipboardTarget("recording path")).then(
+              (didCopy) => {
+                if (!didCopy) return;
                 pathCopied = true;
                 updateRecordingToast();
                 window.setTimeout(() => {
@@ -732,17 +723,9 @@ export function PreviewView({
         };
 
         const copyPath = () => {
-          if (!navigator.clipboard?.writeText) {
-            updateScreenshotToast(
-              "error",
-              gt("Unable to copy screenshot path"),
-              gt("Clipboard API unavailable."),
-            );
-            return;
-          }
-
-          void navigator.clipboard.writeText(artifact.path).then(
-            () => {
+          void writeTextToClipboard(artifact.path, namedClipboardTarget("screenshot path")).then(
+            (didCopy) => {
+              if (!didCopy) return;
               pathCopied = true;
               updateScreenshotToast();
               window.setTimeout(() => {
