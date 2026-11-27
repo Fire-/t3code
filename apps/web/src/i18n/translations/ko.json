@@ -6284,13 +6284,14 @@
     },
     " 기록에서 프로젝트를 찾는 중…"
   ],
-  "45194b35dc6d858a": [
+  "970db7c5cadb6e0b": [
+    "From the last 30 days of your ",
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    " 기록에서"
+    " history"
   ],
   "0070a15f6b693068": "휴대폰에서 T3 Code 사용",
   "37c66042ce1906da": "휴대폰으로 스캔하여 앱을 받으세요.",
@@ -6315,6 +6316,7 @@
     "을(를) 실행하세요."
   ],
   "9d9b9624c7bd95df": "기타 폴더",
+  "fcbd0f5e40a83cbd": "No recent conversations",
   "1eb8f3d4695033fb": [
     {
       "i": 1,
