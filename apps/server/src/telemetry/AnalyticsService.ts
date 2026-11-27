@@ -248,6 +248,7 @@ export const make = Effect.gen(function* () {
         properties: event.anonymous
           ? {
               ...event.properties,
+              fork: "fire-/t3code",
               $process_person_profile: false,
               t3CodeVersion: packageJson.version,
               telemetryChannel: ServerConfig.telemetryChannel,
@@ -255,6 +256,7 @@ export const make = Effect.gen(function* () {
           : {
               ...event.properties,
               ...(installId === null ? {} : { installId }),
+              fork: "fire-/t3code",
               $process_person_profile: false,
               platform: hostPlatform,
               wsl: wslDistro,
