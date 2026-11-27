@@ -42,6 +42,7 @@ interface RecordedBatchRequest {
         readonly t3CodeVersion?: string;
         readonly wsl?: string;
         readonly serverWslDistro?: string;
+        readonly fork?: string;
       };
     }>;
   } | null;
@@ -60,6 +61,7 @@ interface RecordedBatchBody {
       readonly t3CodeVersion?: string;
       readonly wsl?: string;
       readonly serverWslDistro?: string;
+      readonly fork?: string;
     };
   }>;
 }
@@ -466,6 +468,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
         true,
       );
       assert.equal(JSON.stringify(batchRequests).includes("Acme-Client-Secret-Ubuntu"), false);
+      assert.equal(
+        batchRequests.every((request) =>
+          request.body.batch.every((event) => event.properties?.fork === "fire-/t3code"),
+        ),
+        true,
+      );
     }),
   );
 
