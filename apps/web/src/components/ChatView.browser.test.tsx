@@ -305,6 +305,11 @@ it("opens a linked Linear issue from an inactive thread's sidebar badge", async 
   await expect.element(linkedPr).not.toBeInTheDocument();
   await userEvent.click(page.getByRole("button", { name: issue.key, exact: true }));
   await vi.waitFor(() => expect(issueScroller().scrollTop).toBe(issueScrollTop));
+  await act(() =>
+    useRightPanelStore
+      .getState()
+      .setThreadPanelOpen(scopeThreadRef(ENVIRONMENT_ID, linked.id), "inline", true),
+  );
   await act(() => useRightPanelStore.getState().close(scopeThreadRef(ENVIRONMENT_ID, linked.id)));
   await expect
     .element(
@@ -1241,6 +1246,16 @@ it("a new thread on a branch with changes opens them from thread details", async
     // AppRoot brings its own router.
     router: false,
   });
+  // The overlay starts the inline thread panel closed; the row lives inside it.
+  await act(() =>
+    useRightPanelStore
+      .getState()
+      .setThreadPanelOpen(
+        scopeThreadRef(ENVIRONMENT_ID, ThreadId.make("thread-43905")),
+        "inline",
+        true,
+      ),
+  );
   const changesRow = page.getByRole("button", { name: /^Changes\s*vs main\s*\+150/ });
   // The row already shows the branch's totals, so it has to open them.
   await expect.element(changesRow).toBeEnabled();
