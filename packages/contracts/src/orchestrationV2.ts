@@ -3862,7 +3862,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     runId: RunId,
     value: Schema.Json,
   }),
-  // Guest share commands the server issues after checking T3 Connect and the guest token.
+  // Guest share commands the server issues after checking the link's host and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),
     commandId: CommandId,
