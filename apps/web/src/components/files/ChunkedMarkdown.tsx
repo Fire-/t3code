@@ -4,6 +4,7 @@ import { useRef, type KeyboardEventHandler, type MouseEvent as ReactMouseEvent }
 
 import { normalizeMarkdownFragmentId } from "~/components/chat/markdownFragments";
 import { Spinner } from "~/components/ui/spinner";
+import { cn } from "~/lib/utils";
 import type { MarkdownExtensions } from "~/markdown/wordsHast";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
 import {
@@ -66,6 +67,9 @@ export function ChunkedMarkdown(props: {
   readonly threadRef: ScopedThreadRef;
   readonly workspaceMutationId: string | null;
   readonly onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
+  /** Receives the root that holds every piece; the list's scroller is its first child. */
+  readonly rootRef?: ((node: HTMLDivElement | null) => void) | undefined;
+  readonly contentClassName?: string | undefined;
   readonly onTaskListChange?:
     | ((input: { readonly markerOffset: number; readonly checked: boolean }) => void)
     | undefined;
@@ -159,13 +163,18 @@ export function ChunkedMarkdown(props: {
       });
   };
 
+  const setRoot = (node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    props.rootRef?.(node);
+  };
+
   const extraData = props.footnotes
     ? `${props.definitions}\0${props.footnotes.stubs}\0${props.footnotes.definitions}\0${props.footnotes.chunkRefs.map((refs) => refs.join(",")).join("|")}`
     : props.definitions;
 
   return (
     <div
-      ref={containerRef}
+      ref={setRoot}
       // Clicking the text focuses the preview, so Select All stays inside it.
       tabIndex={-1}
       className="flex min-h-0 flex-1 flex-col outline-none"
@@ -221,7 +230,7 @@ export function ChunkedMarkdown(props: {
         drawDistance={800}
         recycleItems={false}
         className="h-full scrollbar-gutter-both"
-        contentContainerClassName="py-5"
+        contentContainerClassName={cn("py-5", props.contentClassName)}
         ListFooterComponent={props.loading ? spinner : null}
         renderItem={({ item }) => {
           if (item.kind === "footnotes") {
@@ -280,6 +289,7 @@ export function ChunkedMarkdown(props: {
                 workspaceMutationId={props.workspaceMutationId}
                 className="mx-auto max-w-4xl px-6"
                 extensions={extensions}
+                sourceOffset={item.start - prepared.offsetShift}
                 onTaskListChange={
                   onTaskListChange &&
                   ((input) =>

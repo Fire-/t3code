@@ -11,11 +11,15 @@ import type {
 } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { videoMimeType } from "@t3tools/shared/video";
-import { MessageCircleIcon, MousePointerClickIcon } from "lucide-react";
-import { createContext, type ReactElement, type ReactNode, use } from "react";
+import { MessageCircleIcon, MousePointerClickIcon, PencilIcon } from "lucide-react";
+import { createContext, type ReactElement, type ReactNode, use, useState } from "react";
 import { msg, T, useGT, useMessages } from "gt-react";
 import type { MessageResolver } from "../i18n/messages";
 import { ComposerContextActionsContext } from "./composerContextActions";
+import { composerFloatingLayerProps } from "./chat/composerEventScope";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "./ui/popover";
+import { DiffCommentAnnotation } from "./diffs/DiffCommentAnnotation";
+import { formatFileCommentRange } from "./files/fileCommentAnnotations";
 
 import type { ComposerFileAttachment, ComposerImageAttachment } from "~/composerDraftStore";
 import { composerFileNeedsReattach } from "~/composerDraftStore";
@@ -36,6 +40,7 @@ import {
   pullRequestContextKindLabel,
   reviewCommentContextId,
   reviewCommentContextLabel,
+  reviewCommentQuoteAccessibleName,
   reviewCommentRangeText,
   reviewCommentSectionText,
   terminalContextReference,
@@ -52,7 +57,12 @@ import {
   createContextPresentationRegistry,
   type ContextPresentationCapability,
 } from "./contextPresentationRegistry";
-import type { ContextChipKind } from "./ContextChip";
+import {
+  ContextChip as BaseContextChip,
+  ContextChipAction,
+  ContextChipLabel,
+  type ContextChipKind,
+} from "./ContextChip";
 import {
   ContextChipPopover,
   ContextChipShell,
@@ -411,6 +421,105 @@ function previewAnnotationTooltip(
   return lines.join("\n");
 }
 
+/**
+ * The composer's chip for a rendered-view cite: the quote labels it so sibling cites read apart.
+ * The chip and its pencil both open one editor that shows the file, lines, and full quote above
+ * the comment, since the small pencil alone is a hard touch target.
+ */
+function ComposerFileCommentChip(props: { record: ReviewCommentContext }) {
+  const actions = use(ComposerContextActionsContext);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(props.record.text);
+  const messages = useMessages();
+  const label = reviewCommentContextLabel(props.record, messages);
+  const accessibleName = reviewCommentQuoteAccessibleName(props.record, messages);
+  return (
+    <BaseContextChip kind="review-comment" contentEditable={false}>
+      <Popover
+        open={editing}
+        onOpenChange={(open, eventDetails) => {
+          // Like reply Cite, only Escape and Cancel drop typed text; any other dismissal saves it.
+          if (
+            !open &&
+            eventDetails.reason !== "escape-key" &&
+            draft.trim() !== props.record.text.trim()
+          ) {
+            actions.editReviewComment(props.record, draft);
+          }
+          // Moving between the chip and pencil triggers reopens an open popover; keep the draft.
+          if (open && !editing) setDraft(props.record.text);
+          setEditing(open);
+        }}
+      >
+        <PopoverTrigger
+          render={
+            <BaseContextChip
+              render={<button type="button" />}
+              aria-label={messages(msg("{name}. Edit comment", { name: accessibleName }))}
+            >
+              <MessageCircleIcon aria-hidden="true" />
+              <ContextChipLabel className="max-w-[16em]">{label}</ContextChipLabel>
+            </BaseContextChip>
+          }
+        />
+        <PopoverTrigger
+          aria-label={messages(
+            props.record.text ? msg("Edit file comment") : msg("Add file comment"),
+          )}
+          render={<ContextChipAction />}
+        >
+          <PencilIcon aria-hidden="true" className="size-3" />
+        </PopoverTrigger>
+        {editing ? (
+          <PopoverPopup
+            {...composerFloatingLayerProps}
+            side="top"
+            align="end"
+            width="md"
+            padding="compact"
+          >
+            <PopoverTitle className="sr-only">{accessibleName}</PopoverTitle>
+            <div data-file-comment-editor-source className="space-y-1 px-3 pt-2">
+              <div className="flex min-w-0 items-baseline gap-1.5">
+                <span className="truncate text-xs font-medium text-foreground">
+                  {props.record.filePath}
+                </span>
+                <span className="shrink-0 text-secondary-label text-2xs">
+                  {props.record.rangeLabel}
+                </span>
+              </div>
+              {props.record.quote ? (
+                <blockquote className="line-clamp-4 whitespace-pre-wrap border-s-2 border-border ps-2 text-muted-foreground text-xs">
+                  {props.record.quote.exact}
+                </blockquote>
+              ) : null}
+            </div>
+            <DiffCommentAnnotation
+              {...(actions.environmentId ? { environmentId: actions.environmentId } : {})}
+              projectId={actions.projectId}
+              ownerKey={JSON.stringify(["file-comment-edit", props.record.id])}
+              kind="draft"
+              allowEmpty
+              submitLabel={messages(msg("Save"))}
+              rangeLabel={formatFileCommentRange(
+                props.record.startIndex + 1,
+                props.record.endIndex + 1,
+              )}
+              text={draft}
+              onTextChange={setDraft}
+              onComment={(text) => {
+                actions.editReviewComment(props.record, text);
+                setEditing(false);
+              }}
+              onCancel={() => setEditing(false)}
+            />
+          </PopoverPopup>
+        ) : null}
+      </Popover>
+    </BaseContextChip>
+  );
+}
+
 function ComposerReviewCommentDetails({ comment }: { comment: ReviewCommentContext }) {
   const messages = useMessages();
   return (
@@ -579,6 +688,9 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
               kind={PULL_REQUEST_CHIP_KINDS[pullRequestState]}
             />
           );
+        }
+        if (entry.record.quote !== undefined) {
+          return <ComposerFileCommentChip record={entry.record} />;
         }
         return (
           <ReviewCommentContextChip

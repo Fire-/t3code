@@ -743,6 +743,11 @@ export function answerRpc(method: string, handler: (input: never) => unknown): D
   };
 }
 
+/** Whether the app holds a live subscription to the thread, so events reach it. */
+export function isThreadSubscribed(threadId: ThreadId): boolean {
+  return threadSubscribers.has(threadId);
+}
+
 /** Delivers one domain event, such as a run or turn-item update, to the thread's subscription. */
 export async function emitThreadEvent(
   threadId: ThreadId,
@@ -759,3 +764,13 @@ export async function emitThreadEvent(
     } as OrchestrationV2ThreadStreamItem),
   );
 }
+
+export function runningRun(threadId: ThreadId, id: string, ordinal: number, userMessageId: string) {
+  return {
+    ...run(threadId, RunId.make(id), ordinal, userMessageId),
+    status: "running" as const,
+    completedAt: null,
+  };
+}
+
+export { userItem };

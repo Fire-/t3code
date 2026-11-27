@@ -16,6 +16,7 @@ import {
 } from "../rightPanelStore";
 import type { MarkdownExtensions } from "../markdown/wordsHast";
 import { setMarkdownTaskChecked } from "@t3tools/shared/markdownTaskEdits";
+import { markdownSourceBlocks } from "@t3tools/shared/markdownSourceBlocks";
 import { HostImageUrlContext } from "./chat/hostImageUrl";
 import { getSyntaxHighlighterPromise } from "~/lib/syntaxHighlighting";
 
@@ -1291,5 +1292,110 @@ describe("ChatMarkdown copy of line breaks", () => {
     selection.addRange(range);
 
     expect(chatMarkdownClipboardPayload(selection)?.text).toBe("first line\nsecond line");
+  });
+});
+
+describe("ChatMarkdown source offsets", () => {
+  const text = [
+    "# Title",
+    "",
+    "First paragraph.",
+    "",
+    "- one",
+    "- two",
+    "",
+    "```ts",
+    "const a = 1;",
+    "```",
+    "",
+    "| a | b |",
+    "| - | - |",
+    "| 1 | 2 |",
+  ].join("\n");
+  const offsetOf = (lineNumber: number) => {
+    const lines = text.split("\n");
+    return lines.slice(0, lineNumber - 1).reduce((length, line) => length + line.length + 1, 0);
+  };
+
+  const withOffsets = (markdown: string) => ({
+    extensions: { sourceBlocks: markdownSourceBlocks(markdown) },
+  });
+  const sourceRange = (element: Element | null | undefined) => {
+    const { sourceStart, sourceEnd } = (element as HTMLElement | null)?.dataset ?? {};
+    return sourceStart === undefined ? null : [Number(sourceStart), Number(sourceEnd)];
+  };
+
+  it("tags blocks with their source offsets when asked", async () => {
+    setup();
+    await using screen = await renderText(text, withOffsets(text));
+    const heading = screen.getByText("Title").element().closest("h1")!;
+    expect(heading.dataset.sourceStart).toBe(String(offsetOf(1)));
+    expect(heading.dataset.sourceEnd).toBe(String(offsetOf(1) + "# Title".length));
+    const paragraph = screen.getByText("First paragraph.").element().closest("p")!;
+    expect(paragraph.dataset.sourceStart).toBe(String(text.indexOf("First paragraph.")));
+    const items = [...screen.container.querySelectorAll("li")];
+    expect(items.map((item) => item.dataset.sourceStart)).toEqual([
+      String(text.indexOf("- one")),
+      String(text.indexOf("- two")),
+    ]);
+    const codeBlock = screen.container.querySelector("[data-language=ts]")!.parentElement!;
+    expect(codeBlock.dataset.sourceStart).toBe(String(text.indexOf("```ts")));
+    // The mdast code node ends at the closing fence, before its line break.
+    const closingFence = text.indexOf("```", text.indexOf("```ts") + "```ts".length);
+    expect(codeBlock.dataset.sourceEnd).toBe(String(closingFence + "```".length));
+    const cell = screen.getByText("2").element().closest("td")!;
+    // A GFM cell token spans from its leading pipe to the next one.
+    const rowStart = text.indexOf("| 1 | 2 |");
+    expect(cell.dataset.sourceStart).toBe(String(rowStart + 4));
+    expect(cell.dataset.sourceEnd).toBe(String(rowStart + 9));
+  });
+
+  it("pairs blocks through quotes, loose lists and non-ASCII text, and skips raw HTML", async () => {
+    setup();
+    const markdown = [
+      "Ünïcödé 😀 first.",
+      "",
+      '<p align="center">Raw block</p>',
+      "",
+      "> Quoted line",
+      "",
+      "1. loose one",
+      "",
+      "   second paragraph",
+      "",
+      "2. loose two",
+      "",
+      "After the list.",
+    ].join("\n");
+    await using screen = await renderText(markdown, withOffsets(markdown));
+    const range = (needle: string) => [
+      markdown.indexOf(needle),
+      markdown.indexOf(needle) + needle.length,
+    ];
+    expect(sourceRange(screen.getByText("Ünïcödé 😀 first.").element().closest("p"))).toEqual(
+      range("Ünïcödé 😀 first."),
+    );
+    expect(sourceRange(screen.getByText("Raw block").element())).toBeNull();
+    expect(sourceRange(screen.getByText("Quoted line").element().closest("blockquote"))).toEqual(
+      range("> Quoted line"),
+    );
+    expect(sourceRange(screen.getByText("Quoted line").element().closest("p"))).toEqual(
+      range("Quoted line"),
+    );
+    expect(sourceRange(screen.getByText("second paragraph").element().closest("p"))).toEqual(
+      range("second paragraph"),
+    );
+    expect(sourceRange(screen.getByText("loose two").element().closest("li"))).toEqual(
+      range("2. loose two"),
+    );
+    expect(sourceRange(screen.getByText("After the list.").element().closest("p"))).toEqual(
+      range("After the list."),
+    );
+  });
+
+  it("leaves chat markup unchanged by default", async () => {
+    setup();
+    await using screen = await renderText(text);
+    expect(screen.container.querySelector("[data-source-start]")).toBeNull();
   });
 });

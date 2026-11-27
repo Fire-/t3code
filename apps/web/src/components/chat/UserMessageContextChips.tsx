@@ -48,6 +48,7 @@ import {
   pullRequestContextDisplayState,
   pullRequestContextKindLabel,
   reviewCommentContextLabel,
+  reviewCommentQuoteAccessibleName,
   reviewCommentRangeText,
   reviewCommentSectionText,
 } from "~/lib/composerContextRecords";
@@ -500,15 +501,17 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
           <UserMessageContextPopover
             copyMarkdown={context.copyMarkdown}
             accessibleLabel={
-              record.pullRequest
-                ? context.m(
-                    msg("{kind}, {label}, {title}", {
-                      kind: kindLabel,
-                      label,
-                      title: record.pullRequest.title,
-                    }),
+              record.quote !== undefined
+                ? reviewCommentQuoteAccessibleName(record, context.m)
+                : context.m(
+                    record.pullRequest
+                      ? msg("{kind}, {label}, {title}", {
+                          kind: kindLabel,
+                          label,
+                          title: record.pullRequest.title,
+                        })
+                      : msg("{kind}, {label}", { kind: kindLabel, label }),
                   )
-                : context.m(msg("{kind}, {label}", { kind: kindLabel, label }))
             }
             kind={isPullRequest ? PULL_REQUEST_CHIP_KINDS[pullRequestState] : "review-comment"}
             icon={isPullRequest ? <PullRequestGlyph.pullRequest /> : <MessageCircleIcon />}
