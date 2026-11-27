@@ -44,6 +44,9 @@ type SidebarContextProps = {
   mobileSheetMounted: boolean;
   setMobileSheetMounted: (mounted: boolean) => void;
   setOpenMobile: (open: boolean) => void;
+  /** Closes the mobile sheet without moving focus back to what had it before the sheet opened. */
+  closeMobileWithoutFocusReturn: () => void;
+  mobileCloseReturnsFocus: boolean;
   isMobile: boolean;
   toggleSidebar: () => void;
   /** Runs before the desktop sidebar collapses. */
@@ -143,6 +146,7 @@ function moveFocusOutOfCollapsingSidebar() {
 interface SidebarOpenState {
   readonly open: boolean;
   readonly openMobile: boolean;
+  readonly mobileCloseReturnsFocus: boolean;
 }
 
 /** Per-provider open state, kept outside React so shortcuts can toggle it at event time. */
@@ -150,6 +154,7 @@ function createSidebarOpenStore(defaultOpen: boolean, storageKey: string | undef
   let state: SidebarOpenState = {
     open: readStoredSidebarOpen(storageKey) ?? defaultOpen,
     openMobile: false,
+    mobileCloseReturnsFocus: true,
   };
   const listeners = new Set<() => void>();
   const collapseListeners = new Set<() => void>();
@@ -169,7 +174,13 @@ function createSidebarOpenStore(defaultOpen: boolean, storageKey: string | undef
     if (storageKey) writeLocalStorageValue(storageKey, open, defaultOpen, Schema.Boolean);
   };
   const setOpenMobile = (openMobile: boolean) => {
-    if (openMobile !== state.openMobile) publish({ ...state, openMobile });
+    if (openMobile !== state.openMobile) {
+      publish({ ...state, openMobile, mobileCloseReturnsFocus: true });
+    }
+  };
+  // A close with no tap behind it, like Android's back, would draw a focus ring and tooltip on the trigger.
+  const closeMobileWithoutFocusReturn = () => {
+    if (state.openMobile) publish({ ...state, openMobile: false, mobileCloseReturnsFocus: false });
   };
   return {
     subscribe: (listener: () => void) => {
@@ -181,6 +192,7 @@ function createSidebarOpenStore(defaultOpen: boolean, storageKey: string | undef
     getSnapshot: () => state,
     setOpen,
     setOpenMobile,
+    closeMobileWithoutFocusReturn,
     toggle: () => (isMobileViewport() ? setOpenMobile(!state.openMobile) : setOpen(!state.open)),
     onCollapse: (listener: () => void) => {
       collapseListeners.add(listener);
@@ -204,7 +216,7 @@ function SidebarProvider({
 }) {
   const isMobile = useMediaQuery(SIDEBAR_MOBILE_QUERY);
   const [store] = React.useState(() => createSidebarOpenStore(defaultOpen, storageKey));
-  const { open, openMobile } = React.useSyncExternalStore(
+  const { open, openMobile, mobileCloseReturnsFocus } = React.useSyncExternalStore(
     store.subscribe,
     store.getSnapshot,
     store.getSnapshot,
@@ -228,6 +240,8 @@ function SidebarProvider({
     setMobileSheetMounted,
     setOpen: store.setOpen,
     setOpenMobile: store.setOpenMobile,
+    closeMobileWithoutFocusReturn: store.closeMobileWithoutFocusReturn,
+    mobileCloseReturnsFocus,
     state,
     toggleSidebar: store.toggle,
     onCollapse: store.onCollapse,
@@ -298,7 +312,14 @@ function Sidebar({
   collapsible?: "offcanvas" | "icon" | "none";
   resizable?: boolean | SidebarResizableOptions;
 }) {
-  const { isMobile, state, openMobile, setOpenMobile, setMobileSheetMounted } = useSidebar();
+  const {
+    isMobile,
+    state,
+    openMobile,
+    setOpenMobile,
+    setMobileSheetMounted,
+    mobileCloseReturnsFocus,
+  } = useSidebar();
   const gt = useGT();
   // Not usePanelAnimationSettings: its navigation suppression would snap the sheet shut mid-exit when an item navigates.
   const panelAnimationDurationMs = useClientSettings(
@@ -341,6 +362,7 @@ function Sidebar({
           {/* Children stay mounted while closed so their window shortcuts, like thread jumps, keep working. */}
           <SheetPopup
             keepMounted
+            finalFocus={mobileCloseReturnsFocus}
             {...(panelAnimationsActive ? {} : { transitionDurationMs: 0 })}
             className={cn(
               "w-(--sidebar-width) max-w-none bg-sidebar surface-grain p-0 text-sidebar-foreground",
