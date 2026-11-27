@@ -9,6 +9,7 @@ import {
   EnvironmentId,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2ThreadProjection,
+  orchestrationV2UserWaits,
 } from "@t3tools/contracts";
 import { useRef, useState, type ReactNode } from "react";
 
@@ -100,6 +101,8 @@ export function ReadOnlyThreadTimeline(props: {
             timelineEntries={entries}
             isWorking={isWorking}
             activeTurnStartedAt={workStartedAt}
+            activeTurnPausedAt={runtime?.activityPausedAt ?? null}
+            userWaits={orchestrationV2UserWaits(projection.runtimeRequests)}
             latestRun={activityRun}
             runningRunId={runningRunId}
             turnDiffSummaries={NO_TURN_DIFFS}
